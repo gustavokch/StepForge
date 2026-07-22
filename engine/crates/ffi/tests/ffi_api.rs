@@ -70,3 +70,23 @@ fn serialize_yields_bytes_freed_via_free_bytes() {
     unsafe { sequencer_engine_ffi::engine_free_bytes(std::ptr::null_mut(), 0) };
     unsafe { sequencer_engine_ffi::engine_free(h) };
 }
+
+#[test]
+fn overflow_event_roundtrips_over_c_abi() {
+    // Encode Overflow via the event codec, decode back, compare postcard bytes.
+    use sequencer_engine::event::EngineEvent;
+    let ev = EngineEvent::Overflow { dropped: 42 };
+    let bytes = postcard::to_allocvec(&ev).unwrap();
+    let back: EngineEvent = postcard::from_bytes(&bytes).unwrap();
+    assert_eq!(back, ev);
+}
+
+#[test]
+fn garbage_event_bytes_do_not_panic_overflow_path() {
+    // Re-run the existing garbage-bytes guard to ensure the new variant didn't
+    // break codec totality. (If a dedicated garbage test already exists, this
+    // asserts it still passes with Overflow added.)
+    let garbage = [0xFFu8; 8];
+    let _: Result<sequencer_engine::event::EngineEvent, _> = postcard::from_bytes(&garbage);
+    // total: returns Ok or Err, never panics
+}

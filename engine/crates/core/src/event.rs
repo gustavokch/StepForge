@@ -67,6 +67,8 @@ pub enum EngineEvent {
         code: i32,
         message: String,
     },
+    /// A bounded queue dropped entries (E8). Hot-channel safe (small).
+    Overflow { dropped: u32 },
 }
 
 #[cfg(test)]
@@ -82,6 +84,7 @@ mod tests {
                 track_idx: 2,
                 step_idx: 7,
             },
+            EngineEvent::Overflow { dropped: 7 },
         ];
         for e in events {
             let bytes = postcard::to_allocvec(&e).expect("serialize");
