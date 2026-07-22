@@ -1,0 +1,35 @@
+name: StepForge
+options:
+  bundleIdPrefix: com.stepforge
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGNING_REQUIRED: "NO"
+targets:
+  StepForge:
+    type: application
+    platform: iOS
+    sources:
+      - path: StepForge
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.stepforge.app
+        GENERATE_INFOPLIST_FILE: "YES"
+        INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: "YES"
+        SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/../engine/include/sequencer_engine.h"
+        USER_HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../engine/include"
+        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../engine/include"
+        FRAMEWORK_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../engine/dist"
+    dependencies:
+      - framework: ../engine/dist/SequencerEngine.xcframework
+        embed: false
+      - sdk: CoreMIDI.framework
+    preBuildScripts:
+      - script: 'bash "$SRCROOT/../engine/scripts/build_engine.sh"'
+        name: Build Rust Engine
+        shell: /bin/sh
