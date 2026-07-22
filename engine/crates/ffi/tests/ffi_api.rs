@@ -6,7 +6,7 @@ use sequencer_engine_ffi::{command_codec, EngineResult};
 
 #[test]
 fn new_and_free_do_not_crash() {
-    let h = unsafe { sequencer_engine_ffi::engine_new() };
+    let h = sequencer_engine_ffi::engine_new();
     assert!(!h.is_null());
     unsafe { sequencer_engine_ffi::engine_free(h) };
     // free of NULL is a tolerated no-op (Hard Rule 4/5).
@@ -15,7 +15,7 @@ fn new_and_free_do_not_crash() {
 
 #[test]
 fn garbage_command_bytes_return_non_fatal_error() {
-    let h = unsafe { sequencer_engine_ffi::engine_new() };
+    let h = sequencer_engine_ffi::engine_new();
     let garbage = [0xffu8, 0xff, 0xff, 0xff, 0xff];
     let res =
         unsafe { sequencer_engine_ffi::engine_submit_command(h, garbage.as_ptr(), garbage.len()) };
@@ -27,7 +27,7 @@ fn garbage_command_bytes_return_non_fatal_error() {
 #[test]
 fn well_formed_command_is_accepted() {
     use sequencer_engine::command::Command;
-    let h = unsafe { sequencer_engine_ffi::engine_new() };
+    let h = sequencer_engine_ffi::engine_new();
     let bytes = command_codec::encode_command(&Command::Play).unwrap();
     let res =
         unsafe { sequencer_engine_ffi::engine_submit_command(h, bytes.as_ptr(), bytes.len()) };
@@ -37,7 +37,7 @@ fn well_formed_command_is_accepted() {
 
 #[test]
 fn drain_returns_empty_when_no_events() {
-    let h = unsafe { sequencer_engine_ffi::engine_new() };
+    let h = sequencer_engine_ffi::engine_new();
     let mut ptr = std::ptr::null_mut();
     let mut len = 0usize;
     let res = unsafe { sequencer_engine_ffi::engine_drain_events(h, &mut ptr, &mut len) };
@@ -48,7 +48,7 @@ fn drain_returns_empty_when_no_events() {
 
 #[test]
 fn serialize_yields_bytes_freed_via_free_bytes() {
-    let h = unsafe { sequencer_engine_ffi::engine_new() };
+    let h = sequencer_engine_ffi::engine_new();
     let mut ptr = std::ptr::null_mut();
     let mut len = 0usize;
     let res = unsafe { sequencer_engine_ffi::engine_serialize(h, &mut ptr, &mut len) };
