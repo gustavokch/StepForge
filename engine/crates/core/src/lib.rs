@@ -10,6 +10,7 @@ pub mod command;
 pub mod engine;
 pub mod event;
 pub mod midi;
+pub mod midi_out;
 pub mod models;
 pub mod scheduler;
 pub mod serde_ext;
