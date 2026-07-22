@@ -11,6 +11,9 @@ path = "src/lib.rs"
 [dependencies]
 serde = { workspace = true }
 uuid = { workspace = true }
+arc-swap = { workspace = true }
+heapless = { workspace = true }
 
 [dev-dependencies]
 postcard = { workspace = true }
+proptest = { workspace = true }
