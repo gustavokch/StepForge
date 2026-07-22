@@ -176,7 +176,8 @@ pub unsafe extern "C" fn engine_serialize(
             return Err(EngineResult::ErrInvalidBuffer);
         }
         // COW read: snapshot_arc() is a lock-free load_full() of the
-        // authoritative Session. Task 8 will replace this stub's body in full.
+        // authoritative Session — synchronous on the caller thread, no worker
+        // round-trip, no allocation beyond the serialized Vec below (Task 8).
         let envelope =
             sequencer_engine::serde_ext::SessionEnvelope::wrap((*eng.snapshot_arc()).clone());
         let bytes = match postcard::to_allocvec(&envelope) {

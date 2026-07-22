@@ -147,8 +147,26 @@ impl Engine {
                     },
                 );
             }
-            // Off-RT large-channel events (Serialize) handled in Task 8.
-            Serialize | LoadSession { .. } => { /* Task 8 / Task 18 */ }
+            // Off-RT (state worker) → hot channel. The state worker is allowed
+            // to allocate (CLAUDE.md: RT path is sacred, the worker is not RT);
+            // `postcard::to_allocvec` here is fine. The resulting `Serialized`
+            // event is small enough for the default session (34-byte envelope →
+            // 36-byte event, well under MAX_EVENT_BYTES). NOTE: per D5 / A2 the
+            // *general* large-payload path is a separate off-RT channel wired in
+            // a later task; for now Serialized rides the hot channel and
+            // `push_event` silently drops on overflow (drop-oldest, E8).
+            Serialize => {
+                let snap = self.snapshot.load_full();
+                let env = crate::serde_ext::SessionEnvelope::wrap((*snap).clone());
+                if let Ok(bytes) = postcard::to_allocvec(&env) {
+                    crate::midi_out::push_event(
+                        &self.hot_events,
+                        &EngineEvent::Serialized { bytes },
+                    );
+                }
+            }
+            // LoadSession apply arrives in Task 18.
+            LoadSession { .. } => { /* Task 18 */ }
             // Algorithms/scheduler arms added in Tasks 14-16.
             Roll { .. }
             | Vary { .. }
@@ -305,6 +323,38 @@ mod tests {
                 .stop_generation
                 .load(std::sync::atomic::Ordering::Acquire),
             1
+        );
+    }
+
+    #[test]
+    fn serialize_command_emits_serialized_event_with_default_session() {
+        // Drives the Serialize arm directly (no worker thread — Task 20 spawns it).
+        // The arm must produce an EngineEvent::Serialized on the hot channel whose
+        // bytes decode to a SessionEnvelope at the default bpm (120).
+        let e = Engine::new();
+        e.apply_command(Command::Serialize);
+        let slot = e
+            .hot_events
+            .dequeue()
+            .expect("Serialized event pushed to hot channel");
+        let ev: EngineEvent =
+            postcard::from_bytes(&slot.bytes[..slot.len as usize]).expect("decode event");
+        let bytes = match ev {
+            EngineEvent::Serialized { bytes } => bytes,
+            other => panic!("expected Serialized, got {other:?}"),
+        };
+        let env: crate::serde_ext::SessionEnvelope =
+            postcard::from_bytes(&bytes).expect("decode SessionEnvelope");
+        assert_eq!(
+            env.version,
+            crate::serde_ext::SESSION_FORMAT_VERSION,
+            "version tag must round-trip"
+        );
+        assert_eq!(env.session.bpm, 120.0, "default bpm must be 120");
+        // The channel must be drained (one event per Serialize).
+        assert!(
+            e.hot_events.dequeue().is_none(),
+            "Serialize produced more than one event"
         );
     }
 }

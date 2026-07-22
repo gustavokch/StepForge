@@ -71,6 +71,32 @@ fn serialize_yields_bytes_freed_via_free_bytes() {
     unsafe { sequencer_engine_ffi::engine_free(h) };
 }
 
+/// Verifies `engine_serialize` reads the current snapshot SYNCHRONOUSLY, without
+/// the state worker thread (which is not spawned until `engine_start` in Task 20).
+/// The default session is bpm 120; the bytes must decode to that, be non-empty,
+/// and be freed via `engine_free_bytes`. The full submit-SetBpm-then-serialize
+/// integration (bpm 150) belongs to Task 20 once the worker runs.
+#[test]
+fn serialize_reads_default_session_synchronously_without_worker() {
+    let h = sequencer_engine_ffi::engine_new();
+    assert!(!h.is_null());
+
+    let mut ptr = std::ptr::null_mut();
+    let mut len = 0usize;
+    let res = unsafe { sequencer_engine_ffi::engine_serialize(h, &mut ptr, &mut len) };
+    assert_eq!(res, EngineResult::Ok, "engine_serialize must succeed");
+    assert!(!ptr.is_null(), "out_ptr must be non-NULL on success");
+    assert!(len > 0, "must produce non-empty bytes");
+
+    let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len) };
+    let env: sequencer_engine::serde_ext::SessionEnvelope =
+        postcard::from_bytes(bytes).expect("decoded SessionEnvelope");
+    assert_eq!(env.session.bpm, 120.0, "default session bpm is 120");
+
+    unsafe { sequencer_engine_ffi::engine_free_bytes(ptr, len) };
+    unsafe { sequencer_engine_ffi::engine_free(h) };
+}
+
 #[test]
 fn overflow_event_roundtrips_over_c_abi() {
     // Encode Overflow via the event codec, decode back, compare postcard bytes.
