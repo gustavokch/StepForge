@@ -158,6 +158,11 @@ pub unsafe extern "C" fn engine_drain_events(
 /// postcard `SessionEnvelope`. The buffer is Rust-allocated and must be freed
 /// with [`engine_free_bytes`] (Hard Rule 4).
 ///
+/// NULL contract asymmetry: unlike [`engine_drain_events`] — a pull that
+/// tolerates NULL out-params and no-ops when empty — this MUST receive non-NULL
+/// `out_ptr`/`out_len`, since it has to hand back both the buffer pointer and
+/// its length for the caller to read and later free (NULL → `ErrInvalidBuffer`).
+///
 /// # Safety
 /// `out_ptr`/`out_len` are valid writable, non-NULL pointers; `engine` is valid.
 #[no_mangle]

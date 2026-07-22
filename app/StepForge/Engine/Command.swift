@@ -6,4 +6,7 @@ enum Command {
     case play
     case stop
     case setBpm(Double)
+    // TODO(app-plan): Rust `Command::LoadSession { bytes: Vec<u8> }` (amendment
+    // A15) has no Swift mirror yet — add `loadSession(Data)` + its postcard
+    // encoder here to match.
 }

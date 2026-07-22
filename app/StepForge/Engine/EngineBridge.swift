@@ -4,6 +4,10 @@ import Foundation
 /// lifecycle (CLAUDE.md Hard Rule 5). The event drain loop, SessionMirror updates,
 /// and codec live in the app plan.
 final class EngineBridge {
+    // Opaque token — pass it only back to the FFI. `EngineHandle` is a
+    // zero-sized struct in the C header, so Swift sees an `UnsafeMutablePointer`,
+    // but it must NEVER be dereferenced (CLAUDE.md Hard Rule 2: no long-lived
+    // pointer into engine state).
     private var handle: UnsafeMutablePointer<EngineHandle>?
     var hasHandle: Bool { handle != nil }
 
