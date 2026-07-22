@@ -2,14 +2,17 @@
 //! shutdown flag, and thread handles. The state worker is sole writer of the
 //! Session (publish); the RT thread is a lock-free reader (snapshot_arc / load).
 
-use crate::clock::Rng;
+use crate::clock::{
+    advance_speed_ratio, micro_timing_offset_micros, swing_offset_micros, to_q16_16, Clock, Rng,
+};
 use crate::command::Command;
 use crate::event::EngineEvent;
+use crate::midi::{build_note_on, humanize_velocity, ratchet_count, velocity_for_zone};
 use crate::midi_out::{
     command_queue, hot_event_channel, large_event_channel, midi_out_ring, push_large_event,
     CommandQueue, HotEventChannel, LargeEventChannel, MidiOutRing,
 };
-use crate::models::{Session, MAX_TRACKS};
+use crate::models::{Session, MAX_TRACKS, STEP_COUNT};
 use arc_swap::ArcSwap;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU32};
@@ -127,6 +130,39 @@ impl Engine {
     #[cfg(test)]
     pub fn load_session_for_test(&self, session: Session) {
         self.publish(session);
+    }
+
+    /// Fresh RT state for the RT thread. The seed is a placeholder —
+    /// [`Engine::begin_play`] reseeds from a session hash on play transition.
+    pub fn new_rt_state(&self) -> RtState {
+        RtState::new(1)
+    }
+
+    /// RT thread body (Free-clock branch only; Task 17 adds MidiClock/Link).
+    /// `elevate_priority` runs ONCE at spawn; per-tick work is allocation-free:
+    /// one `ArcSwap` `Guard` load (zero-alloc), transport atomic reads,
+    /// [`process`], then `sleep_until` the next 16th deadline.
+    pub fn run_rt_loop(self: &Arc<Engine>, clock: &dyn Clock) {
+        clock.elevate_priority(); // ONCE at spawn
+        let mut rt = self.new_rt_state();
+        let mut began = false;
+        loop {
+            if self.shutdown.load(Ordering::Acquire) {
+                break;
+            }
+            let now = clock.now_micros();
+            let playing = self.transport.is_playing.load(Ordering::Acquire);
+            if playing && !began {
+                self.begin_play(&mut rt);
+                began = true;
+            } else if !playing {
+                began = false;
+            }
+            let snap = self.snapshot.load(); // zero-alloc Guard; immutable for the tick
+            process(&mut rt, &snap, playing, now, &self.midi, &self.hot_events);
+            let period = (60.0 / snap.bpm / 4.0 * 1_000_000.0) as u64;
+            clock.sleep_until(now + period);
+        }
     }
 
     /// Apply one command by clone-mutate-publish (the worker's per-command body).
@@ -267,6 +303,110 @@ impl Engine {
                 std::thread::sleep(std::time::Duration::from_micros(200));
             }
         }
+    }
+}
+
+/// Per-tick counters returned by [`process`]. Testability seam so callers
+/// (and the RT loop) can assert dispatch behavior without draining queues.
+pub struct TickOutcome {
+    pub playheads_emitted: u32,
+    pub notes_pushed: u32,
+}
+
+/// One global tick. Pure except for queue pushes (MIDI ring + hot event slot).
+///
+/// `playing` is read by the caller ([`Engine::run_rt_loop`]) from the transport
+/// atomics, so `process` stays free of atomics and is directly unit-testable.
+/// RT-safety: no allocations, no locks, no FFI, no panics — the active pattern
+/// is fetched via `patterns.get(...)` (bounds-checked) and array indexes are
+/// either modulo `STEP_COUNT` or guarded by `idx < per_track.len()`.
+#[allow(clippy::too_many_arguments)]
+pub fn process(
+    rt: &mut RtState,
+    session: &Session,
+    playing: bool,
+    now_micros: u64,
+    midi: &MidiOutRing,
+    events: &HotEventChannel,
+) -> TickOutcome {
+    let mut outcome = TickOutcome {
+        playheads_emitted: 0,
+        notes_pushed: 0,
+    };
+    let _ = now_micros; // reserved: absolute tick time (LinkPhase positioning — Task 17)
+    if !playing {
+        return outcome;
+    }
+    // Bounds-checked pattern fetch — NEVER index `[Option<Pattern>; 9]` directly
+    // on the RT path (out-of-range `active_pattern_index` would panic on RT,
+    // violating Hard Rule 1). Task 18 validates the index on `LoadSession`.
+    let Some(pattern) = session
+        .patterns
+        .get(session.active_pattern_index)
+        .and_then(|p| p.as_ref())
+    else {
+        return outcome;
+    };
+    let step_period_micros = (60.0 / session.bpm / 4.0 * 1_000_000.0) as u64;
+    let endpoint = session.midi_destinations.first().copied().unwrap_or(0);
+    let channel = session.global_midi_channel;
+
+    for (idx, track) in pattern.tracks.iter().enumerate() {
+        if idx >= rt.per_track.len() || track.muted {
+            continue;
+        }
+        let (steps, new_acc) =
+            advance_speed_ratio(rt.per_track[idx].speed_acc, to_q16_16(track.speed_ratio));
+        rt.per_track[idx].speed_acc = new_acc;
+        for _ in 0..steps {
+            let si = rt.per_track[idx].step_idx;
+            rt.per_track[idx].step_idx = (si + 1) % track.length.max(1);
+            // `si` was set under a bounded idx (0..length≤16) so it is < STEP_COUNT;
+            // the modulo is belt-and-suspenders against a corrupted length.
+            let step = track.steps[si % STEP_COUNT];
+            if step.active {
+                let base = velocity_for_zone(step.velocity_zone);
+                let vel = humanize_velocity(
+                    base,
+                    session.humanize_velocity,
+                    zone_weight(step.velocity_zone),
+                    &mut rt.rng,
+                );
+                // E2/E3: swing + micro_timing become a per-note send_at_offset
+                // the CoreMIDI worker applies when the deadline arrives.
+                let swings = swing_offset_micros(
+                    crate::clock::effective_swing(session.global_swing_pct, track.swing_pct),
+                    si,
+                    step_period_micros,
+                );
+                let mt = micro_timing_offset_micros(step.micro_timing_offset, step_period_micros);
+                let offset = (swings + mt).max(0) as u32;
+                for _ in 0..ratchet_count(step.ratchet) {
+                    let _ = crate::midi_out::push_drop_oldest(
+                        midi,
+                        build_note_on(endpoint, channel, track.midi_note, vel, offset),
+                    );
+                    outcome.notes_pushed += 1;
+                }
+            }
+            let _ = crate::midi_out::push_event(
+                events,
+                &EngineEvent::Playhead {
+                    track_idx: idx,
+                    step_idx: rt.per_track[idx].step_idx,
+                },
+            );
+            outcome.playheads_emitted += 1;
+        }
+    }
+    outcome
+}
+
+/// Humanize weight per zone — accents stay tighter than non-accented hits (E4).
+fn zone_weight(z: crate::models::VelocityZone) -> f32 {
+    match z {
+        crate::models::VelocityZone::Accent => 1.0,
+        _ => 0.6,
     }
 }
 
