@@ -226,6 +226,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sequencer_engine_ffi"
+version = "0.1.0"
+dependencies = [
+ "postcard",
+ "sequencer_engine",
+ "serde",
+]
+
+[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
