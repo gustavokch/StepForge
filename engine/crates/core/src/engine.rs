@@ -6,7 +6,8 @@ use crate::clock::Rng;
 use crate::command::Command;
 use crate::event::EngineEvent;
 use crate::midi_out::{
-    command_queue, hot_event_channel, midi_out_ring, CommandQueue, HotEventChannel, MidiOutRing,
+    command_queue, hot_event_channel, large_event_channel, midi_out_ring, push_large_event,
+    CommandQueue, HotEventChannel, LargeEventChannel, MidiOutRing,
 };
 use crate::models::{Session, MAX_TRACKS};
 use arc_swap::ArcSwap;
@@ -80,6 +81,9 @@ pub struct Engine {
     pub commands: CommandQueue,
     pub midi: MidiOutRing,
     pub hot_events: HotEventChannel,
+    /// Off-RT large-payload channel (A2/D5) — `Serialized`/`FullSnapshot`/
+    /// `Error` ride here, never on the 128-byte `hot_events` slot.
+    pub large_events: LargeEventChannel,
     pub transport: Transport,
     pub shutdown: Arc<AtomicBool>,
     pub rt_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
@@ -93,6 +97,7 @@ impl Engine {
             commands: command_queue(),
             midi: midi_out_ring(),
             hot_events: hot_event_channel(),
+            large_events: large_event_channel(),
             transport: Transport::default(),
             shutdown: Arc::new(AtomicBool::new(false)),
             rt_handle: Mutex::new(None),
@@ -140,29 +145,24 @@ impl Engine {
             }
             RequestFullSnapshot => {
                 let snap = self.snapshot.load_full();
-                crate::midi_out::push_event(
-                    &self.hot_events,
-                    &EngineEvent::FullSnapshot {
+                push_large_event(
+                    &self.large_events,
+                    EngineEvent::FullSnapshot {
                         session: (*snap).clone(),
                     },
                 );
             }
-            // Off-RT (state worker) → hot channel. The state worker is allowed
+            // Off-RT (state worker) → large channel. The state worker is allowed
             // to allocate (CLAUDE.md: RT path is sacred, the worker is not RT);
-            // `postcard::to_allocvec` here is fine. The resulting `Serialized`
-            // event is small enough for the default session (34-byte envelope →
-            // 36-byte event, well under MAX_EVENT_BYTES). NOTE: per D5 / A2 the
-            // *general* large-payload path is a separate off-RT channel wired in
-            // a later task; for now Serialized rides the hot channel and
-            // `push_event` silently drops on overflow (drop-oldest, E8).
+            // `postcard::to_allocvec` here is fine. Per D5/A2 large payloads
+            // (`Serialized`/`FullSnapshot`/`Error`) ride the off-RT
+            // `large_events` channel (drop-oldest, E8) — never the 128-byte hot
+            // slot, which panics once a real session exceeds MAX_EVENT_BYTES.
             Serialize => {
                 let snap = self.snapshot.load_full();
                 let env = crate::serde_ext::SessionEnvelope::wrap((*snap).clone());
                 if let Ok(bytes) = postcard::to_allocvec(&env) {
-                    crate::midi_out::push_event(
-                        &self.hot_events,
-                        &EngineEvent::Serialized { bytes },
-                    );
+                    push_large_event(&self.large_events, EngineEvent::Serialized { bytes });
                 }
             }
             // LoadSession apply arrives in Task 18.
@@ -329,16 +329,20 @@ mod tests {
     #[test]
     fn serialize_command_emits_serialized_event_with_default_session() {
         // Drives the Serialize arm directly (no worker thread — Task 20 spawns it).
-        // The arm must produce an EngineEvent::Serialized on the hot channel whose
-        // bytes decode to a SessionEnvelope at the default bpm (120).
+        // The arm must produce an EngineEvent::Serialized on the OFF-RT large
+        // channel (D5/A2 — large payloads never ride the 128-byte hot slot)
+        // whose bytes decode to a SessionEnvelope at the default bpm (120).
         let e = Engine::new();
         e.apply_command(Command::Serialize);
-        let slot = e
-            .hot_events
+        // Hot channel must be empty — Serialized rides the large channel only.
+        assert!(
+            e.hot_events.dequeue().is_none(),
+            "Serialize must not ride the hot channel"
+        );
+        let ev = e
+            .large_events
             .dequeue()
-            .expect("Serialized event pushed to hot channel");
-        let ev: EngineEvent =
-            postcard::from_bytes(&slot.bytes[..slot.len as usize]).expect("decode event");
+            .expect("Serialized event pushed to large channel");
         let bytes = match ev {
             EngineEvent::Serialized { bytes } => bytes,
             other => panic!("expected Serialized, got {other:?}"),
@@ -351,9 +355,9 @@ mod tests {
             "version tag must round-trip"
         );
         assert_eq!(env.session.bpm, 120.0, "default bpm must be 120");
-        // The channel must be drained (one event per Serialize).
+        // The large channel must be drained (one event per Serialize).
         assert!(
-            e.hot_events.dequeue().is_none(),
+            e.large_events.dequeue().is_none(),
             "Serialize produced more than one event"
         );
     }
