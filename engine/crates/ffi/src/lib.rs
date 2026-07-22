@@ -5,7 +5,42 @@
 
 #![allow(unsafe_code)]
 
-mod coremidi;
+pub mod command_codec;
+pub mod coremidi;
+pub mod event_codec;
 mod handle;
 
 pub use handle::EngineHandle;
+
+/// Maximum bytes an event may occupy on the hot (fixed-slot) RT channel. Events
+/// that would exceed this (e.g. `Serialized`) are routed to the separate off-RT
+/// large-event channel (design decision D5; amendment A2).
+pub const MAX_EVENT_BYTES: usize = 128;
+
+/// Status returned by every `extern "C"` entry point (CLAUDE.md Hard Rule 3).
+/// Discriminants are stable across releases — do not renumber existing variants.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineResult {
+    /// Success.
+    Ok = 0,
+    /// A command/event byte buffer could not be decoded (non-fatal).
+    ErrDecode = 1,
+    /// A NULL or invalid handle was supplied.
+    ErrInvalidHandle = 2,
+    /// A buffer pointer/length was invalid.
+    ErrInvalidBuffer = 3,
+    /// Any other failure; details via an `EngineEvent::Error`.
+    ErrOther = 4,
+}
+
+#[derive(Debug)]
+pub(crate) enum CodecError {
+    Postcard(postcard::Error),
+}
+
+impl From<postcard::Error> for CodecError {
+    fn from(e: postcard::Error) -> Self {
+        Self::Postcard(e)
+    }
+}
