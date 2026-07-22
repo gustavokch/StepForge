@@ -76,6 +76,17 @@ The xcframework is **linked** (not embedded) into the app; `CoreMIDI.framework` 
 - **Model changes ripple** — update `serde_ext` (+ bump `SESSION_FORMAT_VERSION`), the Swift mirror, and the snapshot round-trip test.
 - **Non-destructive length** — `Track.length` is a window over a fixed `[Step; 16]`; Roll/Vary/Cut/Trash never touch `length` / `midi_note` / `speed_ratio`; Paste carries `length` + `speed_ratio` but never `midi_note`.
 
+## Slash commands
+
+Project commands in `.claude/commands/` (invoke as `/<name>`):
+
+- `/add-feature <desc>` — add a cross-layer feature across Rust + Swift with no orphans.
+- `/enforce-ffi` — audit the C-ABI boundary (ownership, null-safety, no panics across FFI, no `#[repr(C)]` data enums, CoreMIDI ownership in Swift).
+- `/audit-rt` — flag any alloc / lock / FFI / CoreMIDI call on the RT thread path.
+- `/gen-mirror <type>` — generate the Swift mirror struct + `SessionMirror.apply(_:)` case for a Rust model.
+- `/gen-proptest <algo>` — generate a `proptest` asserting an algorithm's invariants.
+- `/debug-build <error>` — diagnose cargo / cbindgen / xcframework / Xcode build-chain failures.
+
 ## Where things live
 
 Specs `docs/specs/` · amendments `docs/specs/amendments.md` · design `docs/superpowers/specs/` · plans `docs/plans/` · engine `engine/crates/{core,ffi}` · app `app/StepForge/`.
