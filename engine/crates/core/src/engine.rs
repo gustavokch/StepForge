@@ -3,13 +3,42 @@
 //! Session (publish); the RT thread is a lock-free reader (snapshot_arc / load).
 
 use crate::clock::Rng;
+use crate::command::Command;
+use crate::event::EngineEvent;
 use crate::midi_out::{
     command_queue, hot_event_channel, midi_out_ring, CommandQueue, HotEventChannel, MidiOutRing,
 };
 use crate::models::{Session, MAX_TRACKS};
 use arc_swap::ArcSwap;
+use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::{Arc, Mutex};
+
+fn active_pattern_mut(s: &mut Session) -> Option<&mut crate::models::Pattern> {
+    s.patterns[s.active_pattern_index].as_mut()
+}
+fn with_track_mut<R>(
+    s: &mut Session,
+    idx: usize,
+    f: impl FnOnce(&mut crate::models::Track) -> R,
+) -> Option<R> {
+    let p = active_pattern_mut(s)?;
+    p.tracks.get_mut(idx).map(f)
+}
+fn add_track(s: &mut Session) {
+    if let Some(p) = active_pattern_mut(s) {
+        if p.tracks.len() < MAX_TRACKS {
+            p.tracks.push(crate::models::Track::default());
+        }
+    }
+}
+fn remove_track(s: &mut Session) {
+    if let Some(p) = active_pattern_mut(s) {
+        if p.tracks.len() > crate::models::MIN_TRACKS {
+            p.tracks.pop();
+        }
+    }
+}
 
 pub struct Transport {
     pub is_playing: AtomicBool,
@@ -94,6 +123,133 @@ impl Engine {
     pub fn load_session_for_test(&self, session: Session) {
         self.publish(session);
     }
+
+    /// Apply one command by clone-mutate-publish (the worker's per-command body).
+    /// Algorithms/scheduler/load-session arms are wired in their own tasks.
+    pub fn apply_command(&self, cmd: Command) {
+        use crate::command::Command::*;
+        match cmd {
+            Play => {
+                self.transport.is_playing.store(true, Ordering::Release);
+            }
+            Stop => {
+                self.transport.is_playing.store(false, Ordering::Release);
+                self.transport
+                    .stop_generation
+                    .fetch_add(1, Ordering::AcqRel);
+            }
+            RequestFullSnapshot => {
+                let snap = self.snapshot.load_full();
+                crate::midi_out::push_event(
+                    &self.hot_events,
+                    &EngineEvent::FullSnapshot {
+                        session: (*snap).clone(),
+                    },
+                );
+            }
+            // Off-RT large-channel events (Serialize) handled in Task 8.
+            Serialize | LoadSession { .. } => { /* Task 8 / Task 18 */ }
+            // Algorithms/scheduler arms added in Tasks 14-16.
+            Roll { .. }
+            | Vary { .. }
+            | Cut { .. }
+            | Copy { .. }
+            | Paste { .. }
+            | Trash { .. }
+            | Undo { .. }
+            | QueuePattern { .. }
+            | CancelQueuedPattern
+            | RetriggerPattern { .. } => { /* later tasks */ }
+            other => {
+                let mut s = (*self.snapshot.load_full()).clone();
+                match other {
+                    SetBpm { bpm } => s.bpm = bpm,
+                    SetGlobalSwing { pct } => s.global_swing_pct = pct,
+                    SetHumanize { timing, velocity } => {
+                        s.humanize_timing = timing;
+                        s.humanize_velocity = velocity;
+                    }
+                    SetSyncSource { source } => s.sync_source = source,
+                    SetQuantizeGrain { grain: _ } => { /* stored on the scheduler in Task 16 */ }
+                    SetGlobalMidiChannel { channel } => s.global_midi_channel = channel,
+                    SetMidiDestinations { endpoints } => s.midi_destinations = endpoints,
+                    SetTrackLength { track_idx, length } => {
+                        with_track_mut(&mut s, track_idx, |t| {
+                            t.length = length.clamp(1, crate::models::STEP_COUNT);
+                        });
+                    }
+                    SetTrackMuted { track_idx, muted } => {
+                        with_track_mut(&mut s, track_idx, |t| t.muted = muted);
+                    }
+                    SetTrackNote {
+                        track_idx,
+                        midi_note,
+                    } => {
+                        with_track_mut(&mut s, track_idx, |t| t.midi_note = midi_note);
+                    }
+                    SetTrackSpeedRatio { track_idx, ratio } => {
+                        with_track_mut(&mut s, track_idx, |t| t.speed_ratio = ratio);
+                    }
+                    SetTrackSwing {
+                        track_idx,
+                        swing_pct,
+                    } => {
+                        with_track_mut(&mut s, track_idx, |t| t.swing_pct = swing_pct);
+                    }
+                    AddTrack => add_track(&mut s),
+                    RemoveTrack => remove_track(&mut s),
+                    SetStep {
+                        track_idx,
+                        step_idx,
+                        zone,
+                    } => {
+                        with_track_mut(&mut s, track_idx, |t| {
+                            if step_idx < t.steps.len() {
+                                t.steps[step_idx].active = true;
+                                t.steps[step_idx].velocity_zone = zone;
+                            }
+                        });
+                    }
+                    DeleteStep {
+                        track_idx,
+                        step_idx,
+                    } => {
+                        with_track_mut(&mut s, track_idx, |t| {
+                            if step_idx < t.steps.len() {
+                                t.steps[step_idx].active = false;
+                            }
+                        });
+                    }
+                    SetRatchet {
+                        track_idx,
+                        step_idx,
+                        ratchet,
+                    } => {
+                        with_track_mut(&mut s, track_idx, |t| {
+                            if step_idx < t.steps.len() {
+                                t.steps[step_idx].ratchet = ratchet;
+                            }
+                        });
+                    }
+                    SetFollowAction { .. } => { /* Task 16 */ }
+                    // unreachable: the match arms above are exhaustive with the outer match
+                    _ => {}
+                }
+                self.publish(s);
+            }
+        }
+    }
+
+    /// Worker thread body: drain commands until shutdown.
+    pub fn run_worker_loop(self: &Arc<Engine>) {
+        while !self.shutdown.load(Ordering::Acquire) {
+            if let Some(cmd) = self.commands.dequeue() {
+                self.apply_command(cmd);
+            } else {
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+        }
+    }
 }
 
 impl Default for Engine {
@@ -124,5 +280,31 @@ mod tests {
         e.begin_play(&mut b);
         // same snapshot -> same seed -> same RNG stream
         assert_eq!(a.rng.next_u32(), b.rng.next_u32());
+    }
+    #[test]
+    fn worker_applies_set_bpm_via_cow() {
+        let e = Engine::new();
+        e.apply_command(Command::SetBpm { bpm: 174.0 });
+        assert_eq!(e.snapshot_arc().bpm, 174.0);
+    }
+    #[test]
+    fn play_stop_toggle_transport_atomic() {
+        let e = Engine::new();
+        e.apply_command(Command::Play);
+        assert!(e
+            .transport
+            .is_playing
+            .load(std::sync::atomic::Ordering::Acquire));
+        e.apply_command(Command::Stop);
+        assert!(!e
+            .transport
+            .is_playing
+            .load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(
+            e.transport
+                .stop_generation
+                .load(std::sync::atomic::Ordering::Acquire),
+            1
+        );
     }
 }
