@@ -1,0 +1,16 @@
+[package]
+name = "sequencer_engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "sequencer_engine"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+postcard = { workspace = true }
