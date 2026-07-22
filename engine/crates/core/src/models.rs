@@ -72,7 +72,10 @@ pub struct FollowAction {
 
 impl Default for FollowAction {
     fn default() -> Self {
-        Self { after_loops: 1, action: FollowActionType::default() }
+        Self {
+            after_loops: 1,
+            action: FollowActionType::default(),
+        }
     }
 }
 
@@ -96,9 +99,9 @@ impl Default for FollowActionType {
 pub struct Track {
     pub id: Uuid,
     pub midi_note: u8,
-    pub length: usize, // 1-16 (playback window over a fixed [Step; 16])
+    pub length: usize,    // 1-16 (playback window over a fixed [Step; 16])
     pub speed_ratio: f32, // 0.5, 1.0, 2.0, 3.0
-    pub swing_pct: f32,  // relative to global
+    pub swing_pct: f32,   // relative to global
     pub muted: bool,
     pub steps: [Step; STEP_COUNT],
 }

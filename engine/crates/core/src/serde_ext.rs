@@ -16,7 +16,10 @@ pub struct SessionEnvelope {
 
 impl SessionEnvelope {
     pub fn wrap(session: Session) -> Self {
-        Self { version: SESSION_FORMAT_VERSION, session }
+        Self {
+            version: SESSION_FORMAT_VERSION,
+            session,
+        }
     }
 }
 

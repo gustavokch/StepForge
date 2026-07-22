@@ -10,7 +10,9 @@ pub struct Engine {
 impl Engine {
     /// Construct an engine with a fresh default session.
     pub fn new() -> Self {
-        Self { session: Session::default() }
+        Self {
+            session: Session::default(),
+        }
     }
 }
 
