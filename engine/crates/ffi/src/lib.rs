@@ -175,7 +175,10 @@ pub unsafe extern "C" fn engine_serialize(
         if out_ptr.is_null() || out_len.is_null() {
             return Err(EngineResult::ErrInvalidBuffer);
         }
-        let envelope = sequencer_engine::serde_ext::SessionEnvelope::wrap(eng.session.clone());
+        // COW read: snapshot_arc() is a lock-free load_full() of the
+        // authoritative Session. Task 8 will replace this stub's body in full.
+        let envelope =
+            sequencer_engine::serde_ext::SessionEnvelope::wrap((*eng.snapshot_arc()).clone());
         let bytes = match postcard::to_allocvec(&envelope) {
             Ok(b) => b,
             Err(_) => return Err(EngineResult::ErrOther),
