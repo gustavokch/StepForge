@@ -445,6 +445,8 @@ dependencies = [
 name = "sequencer_engine_ffi"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
+ "heapless 0.8.0",
  "postcard",
  "sequencer_engine",
  "serde",

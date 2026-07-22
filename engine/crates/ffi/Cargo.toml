@@ -13,3 +13,5 @@ path = "src/lib.rs"
 sequencer_engine = { workspace = true }
 serde = { workspace = true }
 postcard = { workspace = true }
+arc-swap = { workspace = true }
+heapless = { workspace = true }
