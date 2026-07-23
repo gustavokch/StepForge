@@ -2,12 +2,14 @@ import SwiftUI
 
 /// Track action drawer (ui-ux-spec §3.2): Roll / Vary / Cut / Copy / Paste / Trash,
 /// plus ✓ keep (dismiss) and ✕ revert (`Undo` for this track). Presented as a
-/// compact sheet from the track header's "…". Roll/Vary use a default strength;
-/// the inline ✓/✕ affordance matches the spec's keep/revert after Roll/Vary.
+/// compact sheet from the track header's "…". Includes mini strength sliders for Roll/Vary.
 struct ActionDrawer: View {
     @EnvironmentObject private var bridge: EngineBridge
     @Environment(\.dismiss) private var dismiss
     let trackIdx: Int
+
+    @State private var rollStrength: Float = 0.6
+    @State private var varyStrength: Float = 0.5
 
     private var trackName: String {
         DrumNames.name(for: bridge.mirror.tracks[safe: trackIdx]?.midiNote ?? 0)
@@ -39,9 +41,39 @@ struct ActionDrawer: View {
                 .accessibilityLabel("Revert (undo)")
             }
 
+            HStack(spacing: Theme.Spacing.md) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Text("VARY STRENGTH")
+                            .font(Typography.sectionTag)
+                            .foregroundStyle(Theme.textMuted)
+                        Spacer()
+                        Text("\(Int((varyStrength * 100).rounded()))%")
+                            .font(Typography.monoValue)
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    Slider(value: $varyStrength, in: 0...1)
+                        .tint(Theme.primary)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Text("ROLL STRENGTH")
+                            .font(Typography.sectionTag)
+                            .foregroundStyle(Theme.textMuted)
+                        Spacer()
+                        Text("\(Int((rollStrength * 100).rounded()))%")
+                            .font(Typography.monoValue)
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    Slider(value: $rollStrength, in: 0...1)
+                        .tint(Theme.primary)
+                }
+            }
+
             HStack(spacing: 6) {
-                action("Vary", "wand.and.stars") { bridge.submit(.vary(trackIdx: trackIdx, strength: 0.5)) }
-                action("Roll", "dice") { bridge.submit(.roll(trackIdx: trackIdx, strength: 0.6)) }
+                action("Vary", "wand.and.stars") { bridge.submit(.vary(trackIdx: trackIdx, strength: varyStrength)) }
+                action("Roll", "dice") { bridge.submit(.roll(trackIdx: trackIdx, strength: rollStrength)) }
                 action("Copy", "doc.on.doc") { bridge.submit(.copy(trackIdx: trackIdx)) }
                 action("Cut", "scissors") { bridge.submit(.cut(trackIdx: trackIdx)) }
                 action("Paste", "doc.on.clipboard") { bridge.submit(.paste(trackIdx: trackIdx)) }

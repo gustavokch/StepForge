@@ -1,30 +1,42 @@
 import SwiftUI
 
 /// Pinned track header (ui-ux-spec §3.1): mute toggle, drum/note name, speed-ratio
-/// chip, and "…" → opens the action drawer. Reads the `Track`; mute toggles submit
-/// `SetTrackMuted`. (Note-name tap → Note Picker is Phase 4.)
+/// chip, length chip, note picker trigger, and "…" → opens the action drawer. Reads
+/// the `Track`; mute toggles submit `SetTrackMuted`. Note name tap opens `NotePickerSheet`.
 struct TrackHeader: View {
     @EnvironmentObject private var bridge: EngineBridge
     let track: Track
     let trackIdx: Int
     let onOpenActions: () -> Void
 
+    @State private var showNotePicker = false
+
     var body: some View {
         HStack(spacing: 6) {
             muteButton
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: 4) {
-                    Text(DrumNames.name(for: track.midiNote))
-                        .font(Typography.trackName)
-                        .foregroundStyle(track.muted ? Theme.textMuted : Theme.textPrimary)
-                        .lineLimit(1)
-                    if abs(track.speedRatio - 1.0) > 0.001 {
-                        Chip(text: SpeedRatio.label(track.speedRatio))
+                    Button {
+                        showNotePicker = true
+                    } label: {
+                        Text(DrumNames.name(for: track.midiNote))
+                            .font(Typography.trackName)
+                            .foregroundStyle(track.muted ? Theme.textMuted : Theme.textPrimary)
+                            .lineLimit(1)
                     }
+                    .buttonStyle(.plain)
+
+                    speedMenu
+                    lengthMenu
                 }
-                Text("NOTE \(track.midiNote)")
-                    .font(Typography.badge)
-                    .foregroundStyle(Theme.textMuted)
+                Button {
+                    showNotePicker = true
+                } label: {
+                    Text("NOTE \(track.midiNote)")
+                        .font(Typography.badge)
+                        .foregroundStyle(Theme.textMuted)
+                }
+                .buttonStyle(.plain)
             }
             Spacer(minLength: 2)
             Button(action: onOpenActions) {
@@ -39,6 +51,52 @@ struct TrackHeader: View {
         .padding(.horizontal, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.Surface.low)
+        .sheet(isPresented: $showNotePicker) {
+            NotePickerSheet(
+                trackIdx: trackIdx,
+                currentNote: track.midiNote
+            ) { note in
+                bridge.submit(.setTrackNote(trackIdx: trackIdx, midiNote: note))
+            }
+        }
+    }
+
+    private var speedMenu: some View {
+        Menu {
+            ForEach([0.5, 1.0, 2.0, 3.0], id: \.self) { ratio in
+                Button {
+                    bridge.submit(.setTrackSpeedRatio(trackIdx: trackIdx, ratio: Float(ratio)))
+                } label: {
+                    HStack {
+                        Text(SpeedRatio.label(Float(ratio)))
+                        if abs(track.speedRatio - Float(ratio)) < 0.01 {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            Chip(text: SpeedRatio.label(track.speedRatio), accent: abs(track.speedRatio - 1.0) > 0.001)
+        }
+    }
+
+    private var lengthMenu: some View {
+        Menu {
+            ForEach(1...16, id: \.self) { l in
+                Button {
+                    bridge.submit(.setTrackLength(trackIdx: trackIdx, length: l))
+                } label: {
+                    HStack {
+                        Text("\(l) steps")
+                        if track.length == l {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            Chip(text: "\(track.length)s", accent: track.length != 16)
+        }
     }
 
     private var muteButton: some View {
@@ -58,8 +116,7 @@ struct TrackHeader: View {
     }
 }
 
-/// General-MIDI drum name lookup (falls back to the note number). (Note Picker
-/// §5.2 is Phase 4; this is the read-only header label.)
+/// General-MIDI drum name lookup (falls back to the note number).
 enum DrumNames {
     private static let map: [UInt8: String] = [
         35: "Kick", 36: "Kick", 37: "Side Stick", 38: "Snare", 39: "Clap", 40: "Snare",

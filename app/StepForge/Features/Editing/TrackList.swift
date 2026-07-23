@@ -4,7 +4,8 @@ import SwiftUI
 /// outside the horizontal scroll) beside that track's 16 `StepCell`s (in a single
 /// shared horizontal scroll so columns stay aligned across rows). Reads tracks from
 /// `bridge.mirror`; gesture callbacks bubble long-press (ratchet) and header "…"
-/// (action drawer) up to `EditingView`.
+/// (action drawer) up to `EditingView`. Wraps vertical scroll in `ScrollViewReader`
+/// to auto-scroll when new tracks are added.
 struct TrackList: View {
     @EnvironmentObject private var bridge: EngineBridge
     @Environment(\.horizontalSizeClass) private var hSize
@@ -29,20 +30,21 @@ struct TrackList: View {
     }
 
     private func grid(metrics: GridMetrics, tracks: [Track]) -> some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            HStack(alignment: .top, spacing: 0) {
-                // Pinned header column — fixed width, NOT in the horizontal scroll.
-                VStack(spacing: metrics.rowSpacing) {
-                    ForEach(Array(tracks.enumerated()), id: \.element.id) { idx, track in
-                        TrackHeader(track: track, trackIdx: idx) {
-                            drawerTarget = DrawerTarget(track: idx)
+        ScrollViewReader { proxy in
+            ScrollView(.vertical, showsIndicators: false) {
+                HStack(alignment: .top, spacing: 0) {
+                    // Pinned header column — fixed width, NOT in the horizontal scroll.
+                    VStack(spacing: metrics.rowSpacing) {
+                        ForEach(Array(tracks.enumerated()), id: \.element.id) { idx, track in
+                            TrackHeader(track: track, trackIdx: idx) {
+                                drawerTarget = DrawerTarget(track: idx)
+                            }
+                            .frame(width: metrics.headerWidth, height: metrics.rowHeight)
+                            .id(track.id)
                         }
-                        .frame(width: metrics.headerWidth, height: metrics.rowHeight)
                     }
-                }
 
-                // One shared horizontal scroller for every row's cells.
-                ScrollViewReader { _ in
+                    // One shared horizontal scroller for every row's cells.
                     ScrollView(.horizontal, showsIndicators: false) {
                         VStack(spacing: metrics.rowSpacing) {
                             ForEach(Array(tracks.enumerated()), id: \.element.id) { idx, track in
@@ -55,14 +57,21 @@ struct TrackList: View {
                         }
                     }
                 }
+                .padding(.vertical, Theme.Spacing.xs)
             }
-            .padding(.vertical, Theme.Spacing.xs)
+            .onChange(of: tracks.count) { oldCount, newCount in
+                if newCount > oldCount, let last = tracks.last {
+                    withAnimation {
+                        proxy.scrollTo(last.id, anchor: .bottom)
+                    }
+                }
+            }
         }
     }
 
     private var emptyState: some View {
         VStack(spacing: Theme.Spacing.sm) {
-            Image(systemName: "drum.fill").font(.system(size: 40)).foregroundStyle(Theme.textMuted)
+            Image(systemName: "music.note").font(.system(size: 40)).foregroundStyle(Theme.textMuted)
             Text("No tracks").font(Typography.controlLabel).foregroundStyle(Theme.textMuted)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

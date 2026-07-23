@@ -1,17 +1,11 @@
 import SwiftUI
 
-/// Feel controls (ui-ux-spec §1.1 Row 2): global swing, humanize popover, and the
-/// quantize-grain cycle. (Pattern management is reached via the Performance mode
-/// toggle, so the Patterns button is omitted from this row.)
-///
-/// Swing and humanize have **no echo event** in the 18-event contract, so their
-/// controls are driven by UI-local `@State` (seeded from the mirror, re-synced on
-/// `FullSnapshot` for swing) and submitted to the engine on change — otherwise a
-/// binding straight to `mirror.globalSwingPct` would snap back to 0 every drag tick.
-/// The quantize grain is also UI-local default state (not persisted in `Session`).
+/// Feel controls (ui-ux-spec §1.1 Row 2): global swing, humanize popover,
+/// quantize-grain cycle, and patterns selector popover.
 struct FeelBar: View {
     @EnvironmentObject private var bridge: EngineBridge
     @State private var showHumanize = false
+    @State private var showPatterns = false
     @State private var humanizeTiming: Float = 0
     @State private var humanizeVelocity: Float = 0
     @State private var swingValue: Float = 0
@@ -19,6 +13,7 @@ struct FeelBar: View {
 
     var body: some View {
         HStack(spacing: Theme.Spacing.sm) {
+            patternsControl
             swingControl
             humanizeControl
             Spacer(minLength: Theme.Spacing.xs)
@@ -36,12 +31,36 @@ struct FeelBar: View {
             .frame(idealWidth: 280, idealHeight: 150)
             .presentationCompactAdaptation(.popover)
         }
+        .popover(isPresented: $showPatterns) {
+            PatternPickerPopover()
+                .environmentObject(bridge)
+                .frame(idealWidth: 240, idealHeight: 160)
+                .presentationCompactAdaptation(.popover)
+        }
     }
 
     private func seedFromMirror() {
         swingValue = bridge.mirror.globalSwingPct
         humanizeTiming = bridge.mirror.humanizeTiming
         humanizeVelocity = bridge.mirror.humanizeVelocity
+    }
+
+    private var patternsControl: some View {
+        Button { showPatterns.toggle() } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "square.grid.2x2").font(.caption)
+                Text("PATTERNS").font(Typography.controlLabel)
+                Text("P\(bridge.mirror.activePatternIndex + 1)")
+                    .font(Typography.monoValue)
+                    .foregroundStyle(Theme.primary)
+            }
+            .foregroundStyle(Theme.textSecondary)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .raisedStyle()
     }
 
     private var swingControl: some View {
@@ -98,6 +117,42 @@ struct FeelBar: View {
         let i = all.firstIndex(of: quantizeGrain) ?? 0
         quantizeGrain = all[(i + 1) % all.count]
         bridge.submit(.setQuantizeGrain(grain: quantizeGrain))
+    }
+}
+
+/// Pattern picker popover for quick pattern switching / queuing in Editing view.
+private struct PatternPickerPopover: View {
+    @EnvironmentObject private var bridge: EngineBridge
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
+            SectionLabel("Pattern Bank")
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 48))], spacing: 8) {
+                ForEach(0..<8, id: \.self) { idx in
+                    let isActive = bridge.mirror.activePatternIndex == idx
+                    let isQueued = bridge.mirror.queuedPatternIndex == idx
+                    Button {
+                        bridge.submit(.queuePattern(index: idx, quantize: .nextBar))
+                        dismiss()
+                    } label: {
+                        Text("P\(idx + 1)")
+                            .font(Typography.monoValue)
+                            .foregroundStyle(isActive ? Theme.onPrimary : (isQueued ? Theme.primary : Theme.textPrimary))
+                            .frame(width: 48, height: 36)
+                            .background(isActive ? Theme.primary : Theme.Surface.high)
+                            .cornerRadius(Theme.Radius.sm)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: Theme.Radius.sm)
+                                    .stroke(isQueued ? Theme.primary : Theme.borderWeak, lineWidth: 1)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding()
+        .background(Theme.Surface.low)
     }
 }
 

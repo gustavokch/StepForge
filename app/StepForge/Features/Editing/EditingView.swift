@@ -57,7 +57,7 @@ struct EditingView: View {
         }
         .sheet(item: $drawerTarget) { target in
             ActionDrawer(trackIdx: target.track)
-                .presentationDetents([.height(132)])
+                .presentationDetents([.height(180)])
         }
     }
 
