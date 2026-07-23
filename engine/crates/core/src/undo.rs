@@ -22,6 +22,9 @@ impl Undo {
     }
     /// Restore track `idx`'s steps if a snapshot exists. Returns true if restored.
     pub fn undo(&mut self, s: &mut Session, idx: usize) -> bool {
+        if idx >= MAX_TRACKS {
+            return false;
+        }
         let Some(steps) = self.slots[idx].take() else {
             return false;
         };
@@ -64,5 +67,16 @@ mod tests {
         assert!(u.undo(&mut s, 0));
         assert!(s.patterns[0].as_ref().unwrap().tracks[0].steps[0].active);
         assert!(!u.available(0));
+    }
+    #[test]
+    fn undo_ignores_out_of_range_idx() {
+        // A malformed Command::Undo { track_idx: 99 } must not panic the worker
+        // (run_worker_loop's catch_unwind aside, `undo` itself must be total).
+        let mut u = Undo::default();
+        let mut s = session_with_steps();
+        let snap = s.patterns[0].as_ref().unwrap().tracks[0].steps;
+        u.push(0, &snap);
+        assert!(!u.undo(&mut s, 99)); // OOB — no panic, returns false
+        assert!(u.available(0)); // snapshot at idx 0 was NOT consumed
     }
 }

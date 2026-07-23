@@ -298,7 +298,15 @@ impl Engine {
     pub fn run_worker_loop(self: &Arc<Engine>) {
         while !self.shutdown.load(Ordering::Acquire) {
             if let Some(cmd) = self.commands.dequeue() {
-                self.apply_command(cmd);
+                // Panic-proof the worker: a panicking command is dropped and the
+                // worker survives (mirrors the FFI catch_unwind panic-safety).
+                // AssertUnwindSafe is the standard pattern — `&self`/`cmd` aren't
+                // RefUnwindSafe; a panic here means a malformed command was being
+                // applied during clone-mutate, before `publish`, so the live
+                // ArcSwap snapshot is untouched.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.apply_command(cmd)
+                }));
             } else {
                 std::thread::sleep(std::time::Duration::from_micros(200));
             }
