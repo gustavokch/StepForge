@@ -460,7 +460,7 @@ impl Engine {
                         .as_ref()
                         .and_then(|p| p.tracks.get(track_idx))
                     {
-                        self.undo.lock().unwrap().push(track_idx, &t.steps);
+                        self.undo.lock().unwrap().push(track_idx, t);
                     }
                 }
                 match cmd {
