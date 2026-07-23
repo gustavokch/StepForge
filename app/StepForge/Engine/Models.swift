@@ -72,7 +72,7 @@ enum SyncSource: UInt8, PostcardCodable, CaseIterable {
 
 /// `FollowActionType { None, PlayNext, PlaySpecific(Uuid), PlayPrevious, Stop, PlayRandom }`.
 /// `PlaySpecific` carries a `Uuid`, so this is not a simple raw-value enum.
-indirect enum FollowActionType: PostcardCodable, Equatable {
+indirect enum FollowActionType: PostcardCodable, Equatable, Hashable {
     case none, playNext, playSpecific(UUID), playPrevious, stop, playRandom
 
     func encode(to writer: inout PostcardWriter) {

@@ -69,13 +69,13 @@ class EngineBridge: ObservableObject, @unchecked Sendable {
     }
 
     deinit {
-        // Backstop for the force-quit path. Normal teardown calls scene-phase
-        // `stop()` first (didStop == true), so we skip the redundant engine_stop.
-        // A drain handler holds `self` weakly, so once deinit begins no live drain
-        // mutates; the timer is already cancelled by stop() in the normal path.
         drainTimer?.cancel()
-        if let h = handle, !didStop { _ = engine_stop(h); }
-        if let h = handle { engine_free(h); }
+        let h = handle
+        let stopped = didStop
+        drainQueue.sync {
+            if let h, !stopped { _ = engine_stop(h) }
+            if let h { engine_free(h) }
+        }
     }
 
     // MARK: - Commands (non-blocking; ErrDecode is non-fatal — Hard Rule 3)
@@ -120,7 +120,6 @@ class EngineBridge: ObservableObject, @unchecked Sendable {
         guard let h = handle else { return; }
         var events: [EngineEvent] = []
         var playheads: [Int: Int] = [:]   // trackIdx -> latest stepIdx (coalesced)
-        var sawSwitch = false
         while true {
             var outPtr: UnsafeMutablePointer<UInt8>? = nil
             var outLen: UInt = 0
@@ -129,15 +128,15 @@ class EngineBridge: ObservableObject, @unchecked Sendable {
             let copy = Array(UnsafeBufferPointer(start: p, count: Int(outLen)))
             engine_free_bytes(p, outLen)                        // borrowed + freed immediately
             guard let event = EngineEvent.decode(copy) else { continue; } // malformed → drop
-            if case .playhead(let t, let s) = event { playheads[t] = s; } // per-track coalesce
-            else {
-                if case .patternSwitched = event { sawSwitch = true; }
-                events.append(event);
+            if case .playhead(let t, let s) = event {
+                playheads[t] = s
+            } else {
+                if case .patternSwitched = event {
+                    playheads.removeAll(keepingCapacity: true)
+                }
+                events.append(event)
             }
         }
-        // A pattern switch mid-batch clears the RT counters; drop any playheads
-        // collected before it so the new pattern doesn't briefly inherit the old.
-        if sawSwitch { playheads.removeAll(keepingCapacity: true); }
         guard !events.isEmpty || !playheads.isEmpty else { return; }
         // One MainActor hop per batch (E7).
         DispatchQueue.main.async { [weak self] in

@@ -3,6 +3,7 @@ options:
   bundleIdPrefix: com.stepforge
   deploymentTarget:
     iOS: "17.0"
+    macOS: "14.0"
   createIntermediateGroups: true
 settings:
   base:
@@ -23,6 +24,28 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: "YES"
         INFOPLIST_KEY_UIUserInterfaceStyle: "Dark"
+        SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/../engine/include/sequencer_engine.h"
+        USER_HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../engine/include"
+        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../engine/include"
+        FRAMEWORK_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../engine/dist"
+    dependencies:
+      - framework: ../engine/dist/SequencerEngine.xcframework
+        embed: false
+      - sdk: CoreMIDI.framework
+    preBuildScripts:
+      - script: 'bash "$SRCROOT/../engine/scripts/build_engine.sh"'
+        name: Build Rust Engine
+        shell: /bin/sh
+  StepForge-macOS:
+    type: application
+    platform: macOS
+    sources:
+      - path: StepForge
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.stepforge.app.mac
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        GENERATE_INFOPLIST_FILE: "YES"
         SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/../engine/include/sequencer_engine.h"
         USER_HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../engine/include"
         HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../engine/include"

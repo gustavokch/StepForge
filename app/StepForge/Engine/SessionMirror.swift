@@ -45,6 +45,10 @@ struct SessionMirror: Equatable {
     }
     /// Tracks of the active pattern (empty if the slot has no pattern).
     var tracks: [Track] { activePattern?.tracks ?? [] }
+    /// Patterns in the session.
+    var patterns: [Pattern?] { session.patterns }
+    /// Playhead step index for track 0.
+    var playheadStep: Int? { playheads[0] }
 
     // MARK: Event application (runs on MainActor, one hop per drain batch)
 
@@ -150,12 +154,24 @@ struct SessionMirror: Equatable {
             playing = true
         case .stop:
             playing = false
-        // Roll/Vary/Cut/Copy/Paste/Undo/pattern/sync/load — no deterministic
+        case .queuePattern(let index, let quantize):
+            queuedPatternIndex = index
+            queuedPatternQuantize = quantize
+        case .cancelQueuedPattern:
+            queuedPatternIndex = nil
+            queuedPatternQuantize = nil
+        case .setFollowAction(let patternIdx, let action):
+            if session.patterns.indices.contains(patternIdx), var pat = session.patterns[patternIdx] {
+                pat.followAction = action
+                session.patterns[patternIdx] = pat
+            }
+        case .setMidiDestinations(let endpoints):
+            session.midiDestinations = endpoints
+        // Roll/Vary/Cut/Copy/Paste/Undo/sync/load — no deterministic
         // optimistic echo (engine logic / RNG / external state); the real engine
         // echoes the result. The mock leaves the mirror untouched for these.
         case .roll, .vary, .cut, .copy, .paste, .undo,
-             .queuePattern, .cancelQueuedPattern, .retriggerPattern,
-             .setFollowAction, .setMidiDestinations, .requestFullSnapshot,
+             .retriggerPattern, .requestFullSnapshot,
              .serialize, .loadSession, .linkPhase, .midiClockTick:
             break
         }
@@ -196,7 +212,7 @@ struct SessionMirror: Equatable {
 extension SessionMirror {
     /// A rich, deterministic mirror for SwiftUI previews and UI tests: 6 tracks
     /// (Kick / Snare / Closed Hat / Open Hat / Perc / Bass) with varied steps,
-    /// bpm 124, one pattern. Never touches the engine.
+    /// bpm 120, one pattern. Never touches the engine.
     static var demoSeed: SessionMirror {
         var m = SessionMirror()
         let names: [(UInt8, String)] = [
@@ -219,7 +235,7 @@ extension SessionMirror {
         }
         var pattern = Pattern(id: SeedUUID.pattern, tracks: tracks)
         m.session.patterns[0] = pattern
-        m.session.bpm = 124
+        m.session.bpm = 120
         m.playheads = [0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0]
         return m
     }
