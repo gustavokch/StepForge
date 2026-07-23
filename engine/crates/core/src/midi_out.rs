@@ -83,6 +83,7 @@ pub fn push_drop_oldest<T, const N: usize>(q: &MpMcQueue<T, N>, val: T) -> usize
 /// payloads (`Serialized`/`FullSnapshot`/`Error`) MUST go through
 /// [`push_large_event`] on the off-RT [`LargeEventChannel`] (A2/D5).
 pub fn push_event(events: &HotEventChannel, ev: &EngineEvent) -> usize {
+    eprintln!("[Rust Engine] push_event: {:?}", ev);
     let mut buf = [0u8; MAX_EVENT_BYTES];
     let written = postcard::to_slice(&ev, &mut buf)
         .expect("event fits MAX_EVENT_BYTES")
@@ -103,6 +104,7 @@ pub fn push_event(events: &HotEventChannel, ev: &EngineEvent) -> usize {
 /// [`push_drop_oldest`], which already handles non-`Copy` owned `T`. Returns
 /// the number of slots dropped.
 pub fn push_large_event(q: &LargeEventChannel, ev: EngineEvent) -> usize {
+    eprintln!("[Rust Engine] push_large_event: {:?}", ev);
     push_drop_oldest(q.as_ref(), ev)
 }
 

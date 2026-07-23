@@ -202,6 +202,7 @@ struct PerformanceView: View {
                 RoundedRectangle(cornerRadius: Theme.Radius.lg)
                     .stroke(cellBorderColor(isFilled: isFilled, isActive: isActive, isQueued: isQueued),
                             lineWidth: isActive ? 2 : 1)
+                    .allowsHitTesting(false)
             )
             .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.lg))
             .overlay(alignment: .bottom) {
@@ -214,6 +215,7 @@ struct PerformanceView: View {
                     .frame(height: 3)
                 }
             }
+            .allowsHitTesting(false)
 
             if isFilled {
                 Button {
@@ -306,7 +308,7 @@ struct PerformanceView: View {
             // Activity LED Indicator
             Circle()
                 .fill(isHit ? Theme.primary : Theme.Surface.lowest)
-                .overlay(Circle().stroke(isHit ? Theme.primary : Theme.borderWeak, lineWidth: 1))
+                .overlay(Circle().stroke(isHit ? Theme.primary : Theme.borderWeak, lineWidth: 1).allowsHitTesting(false))
                 .shadow(color: isHit ? Theme.primary : .clear, radius: 4)
                 .frame(width: 14, height: 14)
 
@@ -332,7 +334,7 @@ struct PerformanceView: View {
                     .padding(8)
                     .background(track.muted ? Theme.primary : Theme.Surface.high)
                     .clipShape(Circle())
-                    .overlay(Circle().stroke(track.muted ? Theme.primary : Theme.borderWeak, lineWidth: 1))
+                    .overlay(Circle().stroke(track.muted ? Theme.primary : Theme.borderWeak, lineWidth: 1).allowsHitTesting(false))
             }
             .buttonStyle(.plain)
         }

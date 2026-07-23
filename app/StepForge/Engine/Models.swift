@@ -282,7 +282,9 @@ struct Session: PostcardDecodable, Equatable {
         self.globalMidiChannel = 10
         self.activePatternIndex = 0
         self.patterns = Array(repeating: nil, count: 9)
-        self.patterns[0] = Pattern(tracks: (0..<4).map { _ in Track() })
+        // Match Rust Pattern::default(): Kick (36), Snare (38), Closed Hat (42), Clap (39)
+        let defaultNotes: [UInt8] = [36, 38, 42, 39]
+        self.patterns[0] = Pattern(tracks: defaultNotes.map { Track(midiNote: $0) })
         self.midiDestinations = []
     }
 }

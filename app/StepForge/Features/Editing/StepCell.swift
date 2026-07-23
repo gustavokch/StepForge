@@ -17,9 +17,9 @@ struct StepCell: View {
     var body: some View {
         RoundedRectangle(cornerRadius: Theme.Radius.sm, style: .continuous)
             .fill(fill)
-            .overlay(border)
-            .overlay(playheadMark)
-            .overlay(ratchetMark)
+            .overlay(border.allowsHitTesting(false))
+            .overlay(playheadMark.allowsHitTesting(false))
+            .overlay(ratchetMark.allowsHitTesting(false))
             .opacity(isWithinLength ? 1 : 0.22)   // dim steps beyond `length` (non-destructive window)
             .contentShape(Rectangle())
             .stepGestures(

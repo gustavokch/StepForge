@@ -17,9 +17,22 @@ pub fn vary(track: &mut Track, strength: f32, rng: &mut Rng) {
     for i in 0..STEP_COUNT {
         let is_accent =
             track.steps[i].active && track.steps[i].velocity_zone == VelocityZone::Accent;
-        if track.steps[i].active && !is_accent {
-            let off = (rng.range(-50, 50) as f32 / 100.0) * s;
-            track.steps[i].micro_timing_offset = off;
+        if !is_accent {
+            if rng.range(0, 100) < (s * 30.0) as i32 {
+                track.steps[i].active = !track.steps[i].active;
+            }
+            if track.steps[i].active {
+                let off = (rng.range(-50, 50) as f32 / 100.0) * s;
+                track.steps[i].micro_timing_offset = off;
+                
+                if rng.range(0, 100) < (s * 40.0) as i32 {
+                    let v = rng.range(0, 2);
+                    track.steps[i].velocity_zone = match v {
+                        0 => crate::models::VelocityZone::Low,
+                        _ => crate::models::VelocityZone::Mid,
+                    };
+                }
+            }
         }
         // accent steps untouched
     }

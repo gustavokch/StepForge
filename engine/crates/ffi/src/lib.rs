@@ -117,17 +117,13 @@ pub unsafe extern "C" fn engine_start(engine: *mut EngineHandle) -> EngineResult
         // and the caller upholds Hard Rule 5 (no concurrent free).
         let eng = unsafe { Arc::from_raw(engine as *const Engine) };
 
+        // Reset shutdown flag to false so worker and RT loops run (crucial if start is called again after stop)
+        eng.shutdown.store(false, std::sync::atomic::Ordering::Release);
+
         // Create CoreMIDI client and output port (engine owns these per Rule 7).
-        // Returns `(usize, usize)` — pointer-sized so the refs survive regardless
-        // of how Apple defines MIDIClientRef/MIDIPortRef (Fix 1, Task 20a review).
-        let (client, port) = match unsafe { coremidi::create_client_and_port() } {
-            Ok(pair) => pair,
-            Err(_) => {
-                // Don't forget eng - decrement the refcount since we're erroring
-                drop(eng);
-                return Err(EngineResult::ErrOther);
-            }
-        };
+        // Non-fatal if CoreMIDI client creation fails (e.g. sandboxed / un-entitled);
+        // worker and RT threads must still spawn so playback and UI commands work.
+        let (client, port) = unsafe { coremidi::create_client_and_port() }.unwrap_or((0, 0));
 
         // Store client/port in the engine for disposal in engine_stop
         *eng.coremidi_client.lock().unwrap() = client;
@@ -149,15 +145,19 @@ pub unsafe extern "C" fn engine_start(engine: *mut EngineHandle) -> EngineResult
             eng_worker.run_worker_loop();
         });
 
-        // Spawn CoreMIDI worker thread
-        let coremidi_handle = std::thread::spawn(move || {
-            coremidi::run_coremidi_worker(&eng_coremidi, port);
-        });
+        // Spawn CoreMIDI worker thread only if port != 0
+        let coremidi_handle = if port != 0 {
+            Some(std::thread::spawn(move || {
+                coremidi::run_coremidi_worker(&eng_coremidi, port);
+            }))
+        } else {
+            None
+        };
 
         // Store handles in the engine
         *eng.rt_handle.lock().unwrap() = Some(rt_handle);
         *eng.worker_handle.lock().unwrap() = Some(worker_handle);
-        *eng.coremidi_handle.lock().unwrap() = Some(coremidi_handle);
+        *eng.coremidi_handle.lock().unwrap() = coremidi_handle;
 
         // Forget the Arc so it doesn't drop - the handle still owns it
         std::mem::forget(eng);
@@ -282,6 +282,7 @@ pub unsafe extern "C" fn engine_drain_events(
     run_void(engine, |eng| {
         // Try hot channel first (for playhead coalescing, E7)
         if let Some(slot) = eng.hot_events.dequeue() {
+            eprintln!("[Rust FFI] engine_drain_events dequeued hot event (len: {})", slot.len);
             // Box the event bytes for Swift to own
             let len = slot.len as usize;
             let mut bytes: Box<[u8]> = slot.bytes[..len].into();
@@ -300,6 +301,7 @@ pub unsafe extern "C" fn engine_drain_events(
 
         // Hot channel empty, try large channel
         if let Some(event) = eng.large_events.dequeue() {
+            eprintln!("[Rust FFI] engine_drain_events dequeued large event: {:?}", event);
             // Encode the large event into bytes
             if let Ok(vec) = postcard::to_allocvec(&event) {
                 let len = vec.len();

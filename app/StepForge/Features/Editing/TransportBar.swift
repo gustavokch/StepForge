@@ -46,7 +46,9 @@ struct TransportBar: View {
                 .foregroundStyle(Theme.textPrimary)
                 .multilineTextAlignment(.leading)
                 .frame(width: 74)
+                #if os(iOS)
                 .keyboardType(.decimalPad)
+                #endif
                 .focused($bpmFocused)
                 .onSubmit(commitBpm)
                 .onChange(of: bpmFocused) { _, focused in if !focused { commitBpm() } }

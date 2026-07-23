@@ -27,10 +27,13 @@ struct RootView: View {
         .background(Theme.Surface.lowest)
         .preferredColorScheme(.dark)
         .tint(Theme.primary)
+        .onAppear {
+            EngineLifecycle.handle(scenePhase, on: bridge)
+        }
         .onChange(of: scenePhase) { _, phase in
             EngineLifecycle.handle(phase, on: bridge)
         }
-        .sheet(isPresented: $showSettings) { SettingsSheet() }
+        .sheet(isPresented: $showSettings) { SettingsSheet().environmentObject(bridge) }
     }
 
     private var appBar: some View {

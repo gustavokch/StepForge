@@ -33,7 +33,9 @@ struct PatternOptionsSheet: View {
                 }
             }
             .navigationTitle("Pattern \(patternIdx + 1) Options")
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {

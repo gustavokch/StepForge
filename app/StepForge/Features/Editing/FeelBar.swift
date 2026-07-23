@@ -34,7 +34,7 @@ struct FeelBar: View {
         .popover(isPresented: $showPatterns) {
             PatternPickerPopover()
                 .environmentObject(bridge)
-                .frame(idealWidth: 240, idealHeight: 160)
+                .frame(idealWidth: 200, idealHeight: 210)
                 .presentationCompactAdaptation(.popover)
         }
     }
@@ -129,7 +129,7 @@ private struct PatternPickerPopover: View {
         VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
             SectionLabel("Pattern Bank")
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 48))], spacing: 8) {
-                ForEach(0..<8, id: \.self) { idx in
+                ForEach(0..<9, id: \.self) { idx in
                     let isActive = bridge.mirror.activePatternIndex == idx
                     let isQueued = bridge.mirror.queuedPatternIndex == idx
                     Button {
@@ -145,6 +145,7 @@ private struct PatternPickerPopover: View {
                             .overlay(
                                 RoundedRectangle(cornerRadius: Theme.Radius.sm)
                                     .stroke(isQueued ? Theme.primary : Theme.borderWeak, lineWidth: 1)
+                                    .allowsHitTesting(false)
                             )
                     }
                     .buttonStyle(.plain)
