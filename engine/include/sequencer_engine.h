@@ -78,7 +78,13 @@ enum EngineResult engine_stop(struct EngineHandle *engine);
 
 /**
  * Submit a command as postcard bytes. Returns `ErrDecode` on malformed bytes
- * (non-fatal). Stub: decodes only; the engine plan applies the command.
+ * (non-fatal).
+ *
+ * Apply path (Task 18+): the decoded command is applied SYNCHRONOUSLY on the
+ * caller thread until Task 20 wires the real lock-free MPSC queue + state
+ * worker (`engine_start`). This lets `LoadSession` / `SetBpm` / etc. round-trip
+ * through the C ABI in integration tests today; the queue/worker swap is
+ * mechanical and confined to this body + `engine_start`.
  *
  * # Safety
  * `cmd_ptr` is valid for `cmd_len` bytes for the duration of the call (or NULL
@@ -105,6 +111,11 @@ enum EngineResult engine_drain_events(struct EngineHandle *engine,
  * Serialize the current session into `*out_ptr`/`*out_len` as a versioned
  * postcard `SessionEnvelope`. The buffer is Rust-allocated and must be freed
  * with [`engine_free_bytes`] (Hard Rule 4).
+ *
+ * NULL contract asymmetry: unlike [`engine_drain_events`] — a pull that
+ * tolerates NULL out-params and no-ops when empty — this MUST receive non-NULL
+ * `out_ptr`/`out_len`, since it has to hand back both the buffer pointer and
+ * its length for the caller to read and later free (NULL → `ErrInvalidBuffer`).
  *
  * # Safety
  * `out_ptr`/`out_len` are valid writable, non-NULL pointers; `engine` is valid.

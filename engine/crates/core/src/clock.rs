@@ -52,8 +52,14 @@ pub fn effective_swing(global_pct: f32, track_pct: f32) -> f32 {
 
 /// Swing delays off-grid (odd 16th) steps by `swing_pct` of the step interval.
 /// Returns the micros offset for `step_idx` within a 16-step pattern.
-pub fn swing_offset_micros(effective_swing_pct: f32, step_idx: usize, step_period_micros: u64) -> i64 {
-    if step_idx % 2 == 0 { return 0; } // downbeats unaffected
+pub fn swing_offset_micros(
+    effective_swing_pct: f32,
+    step_idx: usize,
+    step_period_micros: u64,
+) -> i64 {
+    if step_idx % 2 == 0 {
+        return 0;
+    } // downbeats unaffected
     let frac = (effective_swing_pct / 100.0).clamp(0.0, 0.49);
     ((frac * step_period_micros as f32).round()) as i64
 }
@@ -137,16 +143,19 @@ mod timing_tests {
     #[test]
     fn swing_only_affects_off_grid_steps() {
         let p: u64 = 100_000; // 16th period in micros
-        assert_eq!(swing_offset_micros(50.0, 0, p), 0);  // even step: no offset
+        assert_eq!(swing_offset_micros(50.0, 0, p), 0); // even step: no offset
         assert_eq!(swing_offset_micros(50.0, 2, p), 0);
         let off = swing_offset_micros(50.0, 1, p);
-        assert!(off > 0 && off < p as i64, "odd step delayed within interval");
+        assert!(
+            off > 0 && off < p as i64,
+            "odd step delayed within interval"
+        );
     }
     #[test]
     fn micro_timing_clamps_to_half_step() {
         let p: u64 = 100_000;
         assert_eq!(micro_timing_offset_micros(0.25, p), 25_000);
-        assert_eq!(micro_timing_offset_micros(2.0, p), 50_000);  // clamped from above
+        assert_eq!(micro_timing_offset_micros(2.0, p), 50_000); // clamped from above
         assert_eq!(micro_timing_offset_micros(-2.0, p), -50_000); // clamped from below
     }
 }

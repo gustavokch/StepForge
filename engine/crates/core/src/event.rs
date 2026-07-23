@@ -68,7 +68,9 @@ pub enum EngineEvent {
         message: String,
     },
     /// A bounded queue dropped entries (E8). Hot-channel safe (small).
-    Overflow { dropped: u32 },
+    Overflow {
+        dropped: u32,
+    },
 }
 
 #[cfg(test)]
