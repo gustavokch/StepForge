@@ -38,9 +38,12 @@ struct PerformanceView: View {
             set: { selectedPatternIdxForOptions = $0?.id }
         )) { item in
             if let pattern = bridge.mirror.patterns.indices.contains(item.id) ? bridge.mirror.patterns[item.id] : nil {
+                let isActive = bridge.mirror.activePatternIndex == item.id
+                let loopsRemaining = isActive && bridge.mirror.playing ? max(0, Int(pattern.followAction.afterLoops) - Int(bridge.mirror.patternLoopCount)) : nil
                 PatternOptionsSheet(
                     patternIdx: item.id,
                     currentFollowAction: pattern.followAction,
+                    loopsRemaining: loopsRemaining,
                     onSaveFollowAction: { action in
                         bridge.submit(.setFollowAction(patternIdx: item.id, action: action))
                     }
@@ -192,7 +195,8 @@ struct PerformanceView: View {
                 }
 
                 if let fa = pattern?.followAction, fa.action != .none {
-                    Text("\(fa.action.shortLabel) (x\(fa.afterLoops))")
+                    let loopsRemaining = isActive && bridge.mirror.playing ? max(0, Int(fa.afterLoops) - Int(bridge.mirror.patternLoopCount)) : Int(fa.afterLoops)
+                    Text("\(fa.action.shortLabel) (x\(loopsRemaining) left)")
                         .chipStyle(foreground: Theme.primaryDim, background: Theme.Surface.low, border: Theme.borderStrong)
                 }
             }
@@ -205,6 +209,7 @@ struct PerformanceView: View {
                     .allowsHitTesting(false)
             )
             .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.lg))
+            .shadow(color: isNextActionDestination(idx: idx) ? Theme.primary.opacity(0.5) : .clear, radius: 8)
             .overlay(alignment: .bottom) {
                 if isActive && bridge.mirror.playing {
                     GeometryReader { geo in
@@ -248,6 +253,14 @@ struct PerformanceView: View {
                 selectedPatternIdxForOptions = idx
             }
         }
+    }
+
+    private func isNextActionDestination(idx: Int) -> Bool {
+        guard bridge.mirror.playing,
+              bridge.mirror.patterns.indices.contains(bridge.mirror.activePatternIndex) else {
+            return false
+        }
+        return bridge.mirror.nextPatternIndex(from: bridge.mirror.activePatternIndex) == idx
     }
 
     private func cellBackground(isFilled: Bool, isActive: Bool, isQueued: Bool) -> Color {

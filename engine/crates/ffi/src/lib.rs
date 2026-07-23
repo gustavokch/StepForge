@@ -259,7 +259,10 @@ pub unsafe extern "C" fn engine_submit_command(
                 }
                 Ok(())
             }
-            Err(_) => Err(EngineResult::ErrDecode),
+            Err(e) => {
+                println!("[Rust FFI] ERROR: decode_command failed: {:?}", e);
+                Err(EngineResult::ErrDecode)
+            }
         }
     })
 }
