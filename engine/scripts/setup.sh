@@ -18,9 +18,10 @@ fi
 echo "[setup] rustup default stable ..."
 rustup default stable >/dev/null
 
-echo "[setup] adding iOS targets ..."
+echo "[setup] adding iOS and macOS targets ..."
 rustup target add --toolchain stable \
-  aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
+  aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios \
+  aarch64-apple-darwin x86_64-apple-darwin
 
 echo "[setup] installing cbindgen (if missing) ..."
 if ! command -v cbindgen >/dev/null 2>&1; then
@@ -28,7 +29,7 @@ if ! command -v cbindgen >/dev/null 2>&1; then
 fi
 
 echo "[setup] verifying targets ..."
-for t in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
+for t in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios aarch64-apple-darwin x86_64-apple-darwin; do
   rustup target list --installed | grep -q "$t" || { echo "ERROR: target $t missing" >&2; exit 1; }
 done
 
