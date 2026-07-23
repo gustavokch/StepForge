@@ -36,7 +36,15 @@ struct SettingsSheet: View {
 
                 Section {
                     if midiManager.destinations.isEmpty {
-                        Text("No MIDI output destinations found").foregroundStyle(Theme.textMuted)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("No MIDI output destinations found.")
+                                .foregroundStyle(Theme.textPrimary)
+                            Text("StepForge is broadcasting to \"StepForge Virtual Out\". You can select this as an input in your DAW or MIDI monitor app without further configuration!")
+                                .font(.caption)
+                                .foregroundStyle(Theme.textMuted)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(.vertical, 4)
                     } else {
                         ForEach(midiManager.destinations) { dest in
                             Toggle(
@@ -82,6 +90,7 @@ struct SettingsSheet: View {
                 }
             }
         }
+        .frame(minWidth: 400, minHeight: 400)
         .preferredColorScheme(.dark)
     }
 }

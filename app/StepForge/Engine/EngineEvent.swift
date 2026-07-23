@@ -24,6 +24,7 @@ enum EngineEvent: Equatable {
     case serialized(bytes: [UInt8])                                   // 16
     case error(code: Int32, message: String)                          // 17
     case overflow(dropped: UInt32)                                    // 18
+    case linkPeersChanged(count: Int)                                 // 19
 
     /// Decode postcard bytes → event. nil on truncation or unknown variant.
     static func decode(_ bytes: [UInt8]) -> EngineEvent? {
@@ -87,6 +88,9 @@ enum EngineEvent: Equatable {
         case 18:
             guard let dropped = r.readU32() else { return nil; }
             return .overflow(dropped: dropped)
+        case 19:
+            guard let count = r.readUInt() else { return nil; }
+            return .linkPeersChanged(count: count)
         default:
             print("[EngineEvent] decode error: unknown variant \(tag)")
             return nil   // unknown variant — future-proof skip

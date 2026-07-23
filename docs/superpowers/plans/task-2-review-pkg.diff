@@ -1,0 +1,534 @@
+diff --git a/app/StepForge/Features/Editing/ActionDrawer.swift b/app/StepForge/Features/Editing/ActionDrawer.swift
+index 1d9b687..c5386e2 100644
+--- a/app/StepForge/Features/Editing/ActionDrawer.swift
++++ b/app/StepForge/Features/Editing/ActionDrawer.swift
+@@ -2,13 +2,15 @@ import SwiftUI
+ 
+ /// Track action drawer (ui-ux-spec §3.2): Roll / Vary / Cut / Copy / Paste / Trash,
+ /// plus ✓ keep (dismiss) and ✕ revert (`Undo` for this track). Presented as a
+-/// compact sheet from the track header's "…". Roll/Vary use a default strength;
+-/// the inline ✓/✕ affordance matches the spec's keep/revert after Roll/Vary.
++/// compact sheet from the track header's "…". Includes mini strength sliders for Roll/Vary.
+ struct ActionDrawer: View {
+     @EnvironmentObject private var bridge: EngineBridge
+     @Environment(\.dismiss) private var dismiss
+     let trackIdx: Int
+ 
++    @State private var rollStrength: Float = 0.6
++    @State private var varyStrength: Float = 0.5
++
+     private var trackName: String {
+         DrumNames.name(for: bridge.mirror.tracks[safe: trackIdx]?.midiNote ?? 0)
+     }
+@@ -39,9 +41,39 @@ struct ActionDrawer: View {
+                 .accessibilityLabel("Revert (undo)")
+             }
+ 
++            HStack(spacing: Theme.Spacing.md) {
++                VStack(alignment: .leading, spacing: 2) {
++                    HStack {
++                        Text("VARY STRENGTH")
++                            .font(Typography.sectionTag)
++                            .foregroundStyle(Theme.textMuted)
++                        Spacer()
++                        Text("\(Int((varyStrength * 100).rounded()))%")
++                            .font(Typography.monoValue)
++                            .foregroundStyle(Theme.textSecondary)
++                    }
++                    Slider(value: $varyStrength, in: 0...1)
++                        .tint(Theme.primary)
++                }
++
++                VStack(alignment: .leading, spacing: 2) {
++                    HStack {
++                        Text("ROLL STRENGTH")
++                            .font(Typography.sectionTag)
++                            .foregroundStyle(Theme.textMuted)
++                        Spacer()
++                        Text("\(Int((rollStrength * 100).rounded()))%")
++                            .font(Typography.monoValue)
++                            .foregroundStyle(Theme.textSecondary)
++                    }
++                    Slider(value: $rollStrength, in: 0...1)
++                        .tint(Theme.primary)
++                }
++            }
++
+             HStack(spacing: 6) {
+-                action("Vary", "wand.and.stars") { bridge.submit(.vary(trackIdx: trackIdx, strength: 0.5)) }
+-                action("Roll", "dice") { bridge.submit(.roll(trackIdx: trackIdx, strength: 0.6)) }
++                action("Vary", "wand.and.stars") { bridge.submit(.vary(trackIdx: trackIdx, strength: varyStrength)) }
++                action("Roll", "dice") { bridge.submit(.roll(trackIdx: trackIdx, strength: rollStrength)) }
+                 action("Copy", "doc.on.doc") { bridge.submit(.copy(trackIdx: trackIdx)) }
+                 action("Cut", "scissors") { bridge.submit(.cut(trackIdx: trackIdx)) }
+                 action("Paste", "doc.on.clipboard") { bridge.submit(.paste(trackIdx: trackIdx)) }
+diff --git a/app/StepForge/Features/Editing/EditingView.swift b/app/StepForge/Features/Editing/EditingView.swift
+index 9ddb3d0..8e854a9 100644
+--- a/app/StepForge/Features/Editing/EditingView.swift
++++ b/app/StepForge/Features/Editing/EditingView.swift
+@@ -57,7 +57,7 @@ struct EditingView: View {
+         }
+         .sheet(item: $drawerTarget) { target in
+             ActionDrawer(trackIdx: target.track)
+-                .presentationDetents([.height(132)])
++                .presentationDetents([.height(180)])
+         }
+     }
+ 
+diff --git a/app/StepForge/Features/Editing/FeelBar.swift b/app/StepForge/Features/Editing/FeelBar.swift
+index 602a5ba..0bc7fa1 100644
+--- a/app/StepForge/Features/Editing/FeelBar.swift
++++ b/app/StepForge/Features/Editing/FeelBar.swift
+@@ -1,17 +1,11 @@
+ import SwiftUI
+ 
+-/// Feel controls (ui-ux-spec §1.1 Row 2): global swing, humanize popover, and the
+-/// quantize-grain cycle. (Pattern management is reached via the Performance mode
+-/// toggle, so the Patterns button is omitted from this row.)
+-///
+-/// Swing and humanize have **no echo event** in the 18-event contract, so their
+-/// controls are driven by UI-local `@State` (seeded from the mirror, re-synced on
+-/// `FullSnapshot` for swing) and submitted to the engine on change — otherwise a
+-/// binding straight to `mirror.globalSwingPct` would snap back to 0 every drag tick.
+-/// The quantize grain is also UI-local default state (not persisted in `Session`).
++/// Feel controls (ui-ux-spec §1.1 Row 2): global swing, humanize popover,
++/// quantize-grain cycle, and patterns selector popover.
+ struct FeelBar: View {
+     @EnvironmentObject private var bridge: EngineBridge
+     @State private var showHumanize = false
++    @State private var showPatterns = false
+     @State private var humanizeTiming: Float = 0
+     @State private var humanizeVelocity: Float = 0
+     @State private var swingValue: Float = 0
+@@ -19,6 +13,7 @@ struct FeelBar: View {
+ 
+     var body: some View {
+         HStack(spacing: Theme.Spacing.sm) {
++            patternsControl
+             swingControl
+             humanizeControl
+             Spacer(minLength: Theme.Spacing.xs)
+@@ -36,6 +31,12 @@ struct FeelBar: View {
+             .frame(idealWidth: 280, idealHeight: 150)
+             .presentationCompactAdaptation(.popover)
+         }
++        .popover(isPresented: $showPatterns) {
++            PatternPickerPopover()
++                .environmentObject(bridge)
++                .frame(idealWidth: 240, idealHeight: 160)
++                .presentationCompactAdaptation(.popover)
++        }
+     }
+ 
+     private func seedFromMirror() {
+@@ -44,6 +45,24 @@ struct FeelBar: View {
+         humanizeVelocity = bridge.mirror.humanizeVelocity
+     }
+ 
++    private var patternsControl: some View {
++        Button { showPatterns.toggle() } label: {
++            HStack(spacing: 4) {
++                Image(systemName: "square.grid.2x2").font(.caption)
++                Text("PATTERNS").font(Typography.controlLabel)
++                Text("P\(bridge.mirror.activePatternIndex + 1)")
++                    .font(Typography.monoValue)
++                    .foregroundStyle(Theme.primary)
++            }
++            .foregroundStyle(Theme.textSecondary)
++            .contentShape(Rectangle())
++        }
++        .buttonStyle(.plain)
++        .padding(.horizontal, 8)
++        .padding(.vertical, 6)
++        .raisedStyle()
++    }
++
+     private var swingControl: some View {
+         HStack(spacing: 6) {
+             Text("GROOVE").font(Typography.controlLabel).foregroundStyle(Theme.textMuted)
+@@ -101,6 +120,42 @@ struct FeelBar: View {
+     }
+ }
+ 
++/// Pattern picker popover for quick pattern switching / queuing in Editing view.
++private struct PatternPickerPopover: View {
++    @EnvironmentObject private var bridge: EngineBridge
++    @Environment(\.dismiss) private var dismiss
++
++    var body: some View {
++        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
++            SectionLabel("Pattern Bank")
++            LazyVGrid(columns: [GridItem(.adaptive(minimum: 48))], spacing: 8) {
++                ForEach(0..<8, id: \.self) { idx in
++                    let isActive = bridge.mirror.activePatternIndex == idx
++                    let isQueued = bridge.mirror.queuedPatternIndex == idx
++                    Button {
++                        bridge.submit(.queuePattern(index: idx, quantize: .nextBar))
++                        dismiss()
++                    } label: {
++                        Text("P\(idx + 1)")
++                            .font(Typography.monoValue)
++                            .foregroundStyle(isActive ? Theme.onPrimary : (isQueued ? Theme.primary : Theme.textPrimary))
++                            .frame(width: 48, height: 36)
++                            .background(isActive ? Theme.primary : Theme.Surface.high)
++                            .cornerRadius(Theme.Radius.sm)
++                            .overlay(
++                                RoundedRectangle(cornerRadius: Theme.Radius.sm)
++                                    .stroke(isQueued ? Theme.primary : Theme.borderWeak, lineWidth: 1)
++                            )
++                    }
++                    .buttonStyle(.plain)
++                }
++            }
++        }
++        .padding()
++        .background(Theme.Surface.low)
++    }
++}
++
+ /// Humanize popover (ui-ux-spec §1.1 Row 2): Timing Jitter + Velocity
+ /// Randomization sliders. Commits via `onApply`.
+ private struct HumanizeEditor: View {
+diff --git a/app/StepForge/Features/Editing/NotePickerSheet.swift b/app/StepForge/Features/Editing/NotePickerSheet.swift
+new file mode 100644
+index 0000000..7361d98
+--- /dev/null
++++ b/app/StepForge/Features/Editing/NotePickerSheet.swift
+@@ -0,0 +1,105 @@
++import SwiftUI
++
++/// Hybrid Note Picker: GM Drum grid + 2-octave mini piano keyboard.
++struct NotePickerSheet: View {
++    let trackIdx: Int
++    let currentNote: UInt8
++    let onSelect: (UInt8) -> Void
++    @Environment(\.dismiss) private var dismiss
++
++    @State private var mode: PickerMode = .gmDrums
++
++    enum PickerMode: String, CaseIterable, Identifiable {
++        case gmDrums = "GM Drums"
++        case piano = "Piano Roll"
++        var id: String { rawValue }
++    }
++
++    private static let gmSoundNames: [(note: UInt8, name: String)] = [
++        (35, "Acoustic Bass Drum"), (36, "Bass Drum 1 (Kick)"),
++        (37, "Side Stick"), (38, "Acoustic Snare"),
++        (39, "Hand Clap"), (40, "Electric Snare"),
++        (41, "Low Floor Tom"), (42, "Closed Hi-Hat"),
++        (43, "High Floor Tom"), (44, "Pedal Hi-Hat"),
++        (45, "Low Tom"), (46, "Open Hi-Hat"),
++        (47, "Low-Mid Tom"), (48, "Hi-Mid Tom"),
++        (49, "Crash Cymbal 1"), (50, "High Tom")
++    ]
++
++    var body: some View {
++        NavigationStack {
++            VStack(spacing: 16) {
++                Picker("Mode", selection: $mode) {
++                    ForEach(PickerMode.allCases) { m in
++                        Text(m.rawValue).tag(m)
++                    }
++                }
++                .pickerStyle(.segmented)
++                .padding(.horizontal)
++
++                if mode == .gmDrums {
++                    ScrollView {
++                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 140))], spacing: 10) {
++                            ForEach(Self.gmSoundNames, id: \.note) { item in
++                                Button {
++                                    onSelect(item.note)
++                                    dismiss()
++                                } label: {
++                                    VStack(alignment: .leading, spacing: 4) {
++                                        Text(item.name)
++                                            .font(Typography.trackName)
++                                            .foregroundColor(item.note == currentNote ? Theme.primary : Theme.textPrimary)
++                                        Text("MIDI \(item.note)")
++                                            .font(Typography.badge)
++                                            .foregroundColor(Theme.textSecondary)
++                                    }
++                                    .frame(maxWidth: .infinity, alignment: .leading)
++                                    .padding(12)
++                                    .background(item.note == currentNote ? Theme.Surface.high : Theme.Surface.default)
++                                    .cornerRadius(Theme.Radius.md)
++                                    .overlay(
++                                        RoundedRectangle(cornerRadius: Theme.Radius.md)
++                                            .stroke(item.note == currentNote ? Theme.primary : Color.clear, lineWidth: 1)
++                                    )
++                                }
++                            }
++                        }
++                        .padding(.horizontal)
++                    }
++                } else {
++                    ScrollView(.horizontal, showsIndicators: false) {
++                        HStack(spacing: 2) {
++                            ForEach(36...60, id: \.self) { note in
++                                let isBlack = [1, 3, 6, 8, 10].contains(note % 12)
++                                Button {
++                                    onSelect(UInt8(note))
++                                    dismiss()
++                                } label: {
++                                    VStack {
++                                        Spacer()
++                                        Text("\(note)")
++                                            .font(Typography.badge)
++                                            .foregroundColor(isBlack ? .white : .black)
++                                            .padding(.bottom, 8)
++                                    }
++                                    .frame(width: isBlack ? 28 : 36, height: isBlack ? 120 : 180)
++                                    .background(note == Int(currentNote) ? Theme.primary : (isBlack ? Color.black : Color.white))
++                                    .cornerRadius(Theme.Radius.sm)
++                                }
++                            }
++                        }
++                        .padding()
++                    }
++                }
++            }
++            .navigationTitle("Select Track Note")
++            .navigationBarTitleDisplayMode(.inline)
++            .toolbar {
++                ToolbarItem(placement: .cancellationAction) {
++                    Button("Close") { dismiss() }
++                }
++            }
++            .background(Theme.Surface.lowest.ignoresSafeArea())
++        }
++    }
++}
+diff --git a/app/StepForge/Features/Editing/TrackHeader.swift b/app/StepForge/Features/Editing/TrackHeader.swift
+index b7c81e1..03ddb37 100644
+--- a/app/StepForge/Features/Editing/TrackHeader.swift
++++ b/app/StepForge/Features/Editing/TrackHeader.swift
+@@ -1,30 +1,42 @@
+ import SwiftUI
+ 
+ /// Pinned track header (ui-ux-spec §3.1): mute toggle, drum/note name, speed-ratio
+-/// chip, and "…" → opens the action drawer. Reads the `Track`; mute toggles submit
+-/// `SetTrackMuted`. (Note-name tap → Note Picker is Phase 4.)
++/// chip, length chip, note picker trigger, and "…" → opens the action drawer. Reads
++/// the `Track`; mute toggles submit `SetTrackMuted`. Note name tap opens `NotePickerSheet`.
+ struct TrackHeader: View {
+     @EnvironmentObject private var bridge: EngineBridge
+     let track: Track
+     let trackIdx: Int
+     let onOpenActions: () -> Void
+ 
++    @State private var showNotePicker = false
++
+     var body: some View {
+         HStack(spacing: 6) {
+             muteButton
+             VStack(alignment: .leading, spacing: 1) {
+                 HStack(spacing: 4) {
+-                    Text(DrumNames.name(for: track.midiNote))
+-                        .font(Typography.trackName)
+-                        .foregroundStyle(track.muted ? Theme.textMuted : Theme.textPrimary)
+-                        .lineLimit(1)
+-                    if abs(track.speedRatio - 1.0) > 0.001 {
+-                        Chip(text: SpeedRatio.label(track.speedRatio))
++                    Button {
++                        showNotePicker = true
++                    } label: {
++                        Text(DrumNames.name(for: track.midiNote))
++                            .font(Typography.trackName)
++                            .foregroundStyle(track.muted ? Theme.textMuted : Theme.textPrimary)
++                            .lineLimit(1)
+                     }
++                    .buttonStyle(.plain)
++
++                    speedMenu
++                    lengthMenu
++                }
++                Button {
++                    showNotePicker = true
++                } label: {
++                    Text("NOTE \(track.midiNote)")
++                        .font(Typography.badge)
++                        .foregroundStyle(Theme.textMuted)
+                 }
+-                Text("NOTE \(track.midiNote)")
+-                    .font(Typography.badge)
+-                    .foregroundStyle(Theme.textMuted)
++                .buttonStyle(.plain)
+             }
+             Spacer(minLength: 2)
+             Button(action: onOpenActions) {
+@@ -39,6 +51,52 @@ struct TrackHeader: View {
+         .padding(.horizontal, 6)
+         .frame(maxWidth: .infinity, alignment: .leading)
+         .background(Theme.Surface.low)
++        .sheet(isPresented: $showNotePicker) {
++            NotePickerSheet(
++                trackIdx: trackIdx,
++                currentNote: track.midiNote
++            ) { note in
++                bridge.submit(.setTrackNote(trackIdx: trackIdx, midiNote: note))
++            }
++        }
++    }
++
++    private var speedMenu: some View {
++        Menu {
++            ForEach([0.5, 1.0, 2.0, 3.0], id: \.self) { ratio in
++                Button {
++                    bridge.submit(.setTrackSpeedRatio(trackIdx: trackIdx, ratio: Float(ratio)))
++                } label: {
++                    HStack {
++                        Text(SpeedRatio.label(Float(ratio)))
++                        if abs(track.speedRatio - Float(ratio)) < 0.01 {
++                            Image(systemName: "checkmark")
++                        }
++                    }
++                }
++            }
++        } label: {
++            Chip(text: SpeedRatio.label(track.speedRatio), accent: abs(track.speedRatio - 1.0) > 0.001)
++        }
++    }
++
++    private var lengthMenu: some View {
++        Menu {
++            ForEach(1...16, id: \.self) { l in
++                Button {
++                    bridge.submit(.setTrackLength(trackIdx: trackIdx, length: l))
++                } label: {
++                    HStack {
++                        Text("\(l) steps")
++                        if track.length == l {
++                            Image(systemName: "checkmark")
++                        }
++                    }
++                }
++            }
++        } label: {
++            Chip(text: "\(track.length)s", accent: track.length != 16)
++        }
+     }
+ 
+     private var muteButton: some View {
+@@ -58,8 +116,7 @@ struct TrackHeader: View {
+     }
+ }
+ 
+-/// General-MIDI drum name lookup (falls back to the note number). (Note Picker
+-/// §5.2 is Phase 4; this is the read-only header label.)
++/// General-MIDI drum name lookup (falls back to the note number).
+ enum DrumNames {
+     private static let map: [UInt8: String] = [
+         35: "Kick", 36: "Kick", 37: "Side Stick", 38: "Snare", 39: "Clap", 40: "Snare",
+diff --git a/app/StepForge/Features/Editing/TrackList.swift b/app/StepForge/Features/Editing/TrackList.swift
+index b3c9d81..457a3c5 100644
+--- a/app/StepForge/Features/Editing/TrackList.swift
++++ b/app/StepForge/Features/Editing/TrackList.swift
+@@ -4,7 +4,8 @@ import SwiftUI
+ /// outside the horizontal scroll) beside that track's 16 `StepCell`s (in a single
+ /// shared horizontal scroll so columns stay aligned across rows). Reads tracks from
+ /// `bridge.mirror`; gesture callbacks bubble long-press (ratchet) and header "…"
+-/// (action drawer) up to `EditingView`.
++/// (action drawer) up to `EditingView`. Wraps vertical scroll in `ScrollViewReader`
++/// to auto-scroll when new tracks are added.
+ struct TrackList: View {
+     @EnvironmentObject private var bridge: EngineBridge
+     @Environment(\.horizontalSizeClass) private var hSize
+@@ -29,20 +30,21 @@ struct TrackList: View {
+     }
+ 
+     private func grid(metrics: GridMetrics, tracks: [Track]) -> some View {
+-        ScrollView(.vertical, showsIndicators: false) {
+-            HStack(alignment: .top, spacing: 0) {
+-                // Pinned header column — fixed width, NOT in the horizontal scroll.
+-                VStack(spacing: metrics.rowSpacing) {
+-                    ForEach(Array(tracks.enumerated()), id: \.element.id) { idx, track in
+-                        TrackHeader(track: track, trackIdx: idx) {
+-                            drawerTarget = DrawerTarget(track: idx)
++        ScrollViewReader { proxy in
++            ScrollView(.vertical, showsIndicators: false) {
++                HStack(alignment: .top, spacing: 0) {
++                    // Pinned header column — fixed width, NOT in the horizontal scroll.
++                    VStack(spacing: metrics.rowSpacing) {
++                        ForEach(Array(tracks.enumerated()), id: \.element.id) { idx, track in
++                            TrackHeader(track: track, trackIdx: idx) {
++                                drawerTarget = DrawerTarget(track: idx)
++                            }
++                            .frame(width: metrics.headerWidth, height: metrics.rowHeight)
++                            .id(track.id)
+                         }
+-                        .frame(width: metrics.headerWidth, height: metrics.rowHeight)
+                     }
+-                }
+ 
+-                // One shared horizontal scroller for every row's cells.
+-                ScrollViewReader { _ in
++                    // One shared horizontal scroller for every row's cells.
+                     ScrollView(.horizontal, showsIndicators: false) {
+                         VStack(spacing: metrics.rowSpacing) {
+                             ForEach(Array(tracks.enumerated()), id: \.element.id) { idx, track in
+@@ -55,14 +57,21 @@ struct TrackList: View {
+                         }
+                     }
+                 }
++                .padding(.vertical, Theme.Spacing.xs)
++            }
++            .onChange(of: tracks.count) { oldCount, newCount in
++                if newCount > oldCount, let last = tracks.last {
++                    withAnimation {
++                        proxy.scrollTo(last.id, anchor: .bottom)
++                    }
++                }
+             }
+-            .padding(.vertical, Theme.Spacing.xs)
+         }
+     }
+ 
+     private var emptyState: some View {
+         VStack(spacing: Theme.Spacing.sm) {
+-            Image(systemName: "drum.fill").font(.system(size: 40)).foregroundStyle(Theme.textMuted)
++            Image(systemName: "music.note").font(.system(size: 40)).foregroundStyle(Theme.textMuted)
+             Text("No tracks").font(Typography.controlLabel).foregroundStyle(Theme.textMuted)
+         }
+         .frame(maxWidth: .infinity, maxHeight: .infinity)
+diff --git a/app/StepForgeTests/EditingModeTests.swift b/app/StepForgeTests/EditingModeTests.swift
+new file mode 100644
+index 0000000..a938687
+--- /dev/null
++++ b/app/StepForgeTests/EditingModeTests.swift
+@@ -0,0 +1,34 @@
++import XCTest
++@testable import StepForge
++
++final class EditingModeTests: XCTestCase {
++    func testTrackHeaderCommandDispatches() {
++        let bridge = MockEngineBridge()
++        
++        bridge.submit(.setTrackLength(trackIdx: 0, length: 12))
++        XCTAssertEqual(bridge.mirror.patterns[0]?.tracks[0].length, 12)
++        
++        bridge.submit(.setTrackSpeedRatio(trackIdx: 0, ratio: 0.5))
++        XCTAssertEqual(bridge.mirror.patterns[0]?.tracks[0].speedRatio, 0.5)
++        
++        bridge.submit(.setTrackNote(trackIdx: 0, midiNote: 42))
++        XCTAssertEqual(bridge.mirror.patterns[0]?.tracks[0].midiNote, 42)
++    }
++
++    func testRollAndVaryCommandDispatches() {
++        let bridge = MockEngineBridge()
++        
++        bridge.submit(.roll(trackIdx: 0, strength: 0.8))
++        bridge.submit(.vary(trackIdx: 0, strength: 0.4))
++        // Verify mock bridge processes commands without runtime panic (Hard Rule 3)
++        XCTAssertNotNil(bridge.mirror.patterns[0]?.tracks[0])
++    }
++
++    func testTrackCountAutoScrollSupport() {
++        let bridge = MockEngineBridge()
++        XCTAssertEqual(bridge.mirror.tracks.count, 6)
++        
++        bridge.submit(.addTrack)
++        XCTAssertEqual(bridge.mirror.tracks.count, 7)
++    }
++}

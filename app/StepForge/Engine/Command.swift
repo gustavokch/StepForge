@@ -45,7 +45,7 @@ enum Command {
     case serialize                                                         // 31
     case loadSession(bytes: [UInt8])                                       // 32
     // -- sync (amendments A15 / E6) --
-    case linkPhase(beatsSinceOrigin: Double, phase: Double)                // 33
+    case setLinkEnabled(enabled: Bool)                                     // 33
     case midiClockTick                                                     // 34
 
     /// Postcard variant index (Rust declaration order). Asserted in `PostcardTests`.
@@ -59,7 +59,7 @@ enum Command {
         case .setGlobalSwing: 20; case .setHumanize: 21; case .setBpm: 22; case .setSyncSource: 23
         case .setQuantizeGrain: 24; case .setFollowAction: 25; case .setMidiDestinations: 26
         case .setGlobalMidiChannel: 27; case .play: 28; case .stop: 29; case .requestFullSnapshot: 30
-        case .serialize: 31; case .loadSession: 32; case .linkPhase: 33; case .midiClockTick: 34
+        case .serialize: 31; case .loadSession: 32; case .setLinkEnabled: 33; case .midiClockTick: 34
         }
     }
 
@@ -116,8 +116,8 @@ enum Command {
             break
         case .loadSession(let bytes):
             w.writeBytes(bytes)
-        case .linkPhase(let beats, let phase):
-            w.writeF64(beats); w.writeF64(phase)
+        case .setLinkEnabled(let enabled):
+            w.writeBool(enabled)
         }
         return w.bytes
     }

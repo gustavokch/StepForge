@@ -1,0 +1,149 @@
+diff --git a/app/StepForge/Engine/EngineBridge.swift b/app/StepForge/Engine/EngineBridge.swift
+index 056e140..0f87dea 100644
+--- a/app/StepForge/Engine/EngineBridge.swift
++++ b/app/StepForge/Engine/EngineBridge.swift
+@@ -69,13 +69,13 @@ class EngineBridge: ObservableObject, @unchecked Sendable {
+     }
+ 
+     deinit {
+-        // Backstop for the force-quit path. Normal teardown calls scene-phase
+-        // `stop()` first (didStop == true), so we skip the redundant engine_stop.
+-        // A drain handler holds `self` weakly, so once deinit begins no live drain
+-        // mutates; the timer is already cancelled by stop() in the normal path.
+         drainTimer?.cancel()
+-        if let h = handle, !didStop { _ = engine_stop(h); }
+-        if let h = handle { engine_free(h); }
++        let h = handle
++        let stopped = didStop
++        drainQueue.sync {
++            if let h, !stopped { _ = engine_stop(h) }
++            if let h { engine_free(h) }
++        }
+     }
+ 
+     // MARK: - Commands (non-blocking; ErrDecode is non-fatal — Hard Rule 3)
+@@ -120,7 +120,6 @@ class EngineBridge: ObservableObject, @unchecked Sendable {
+         guard let h = handle else { return; }
+         var events: [EngineEvent] = []
+         var playheads: [Int: Int] = [:]   // trackIdx -> latest stepIdx (coalesced)
+-        var sawSwitch = false
+         while true {
+             var outPtr: UnsafeMutablePointer<UInt8>? = nil
+             var outLen: UInt = 0
+@@ -129,15 +128,15 @@ class EngineBridge: ObservableObject, @unchecked Sendable {
+             let copy = Array(UnsafeBufferPointer(start: p, count: Int(outLen)))
+             engine_free_bytes(p, outLen)                        // borrowed + freed immediately
+             guard let event = EngineEvent.decode(copy) else { continue; } // malformed → drop
+-            if case .playhead(let t, let s) = event { playheads[t] = s; } // per-track coalesce
+-            else {
+-                if case .patternSwitched = event { sawSwitch = true; }
+-                events.append(event);
++            if case .playhead(let t, let s) = event {
++                playheads[t] = s
++            } else {
++                if case .patternSwitched = event {
++                    playheads.removeAll(keepingCapacity: true)
++                }
++                events.append(event)
+             }
+         }
+-        // A pattern switch mid-batch clears the RT counters; drop any playheads
+-        // collected before it so the new pattern doesn't briefly inherit the old.
+-        if sawSwitch { playheads.removeAll(keepingCapacity: true); }
+         guard !events.isEmpty || !playheads.isEmpty else { return; }
+         // One MainActor hop per batch (E7).
+         DispatchQueue.main.async { [weak self] in
+diff --git a/app/StepForge/Engine/SessionMirror.swift b/app/StepForge/Engine/SessionMirror.swift
+index 51c8261..d1f9a9a 100644
+--- a/app/StepForge/Engine/SessionMirror.swift
++++ b/app/StepForge/Engine/SessionMirror.swift
+@@ -45,6 +45,10 @@ struct SessionMirror: Equatable {
+     }
+     /// Tracks of the active pattern (empty if the slot has no pattern).
+     var tracks: [Track] { activePattern?.tracks ?? [] }
++    /// Patterns in the session.
++    var patterns: [Pattern?] { session.patterns }
++    /// Playhead step index for track 0.
++    var playheadStep: Int? { playheads[0] }
+ 
+     // MARK: Event application (runs on MainActor, one hop per drain batch)
+ 
+@@ -150,12 +154,24 @@ struct SessionMirror: Equatable {
+             playing = true
+         case .stop:
+             playing = false
+-        // Roll/Vary/Cut/Copy/Paste/Undo/pattern/sync/load — no deterministic
++        case .queuePattern(let index, let quantize):
++            queuedPatternIndex = index
++            queuedPatternQuantize = quantize
++        case .cancelQueuedPattern:
++            queuedPatternIndex = nil
++            queuedPatternQuantize = nil
++        case .setFollowAction(let patternIdx, let action):
++            if session.patterns.indices.contains(patternIdx), var pat = session.patterns[patternIdx] {
++                pat.followAction = action
++                session.patterns[patternIdx] = pat
++            }
++        case .setMidiDestinations(let endpoints):
++            session.midiDestinations = endpoints
++        // Roll/Vary/Cut/Copy/Paste/Undo/sync/load — no deterministic
+         // optimistic echo (engine logic / RNG / external state); the real engine
+         // echoes the result. The mock leaves the mirror untouched for these.
+         case .roll, .vary, .cut, .copy, .paste, .undo,
+-             .queuePattern, .cancelQueuedPattern, .retriggerPattern,
+-             .setFollowAction, .setMidiDestinations, .requestFullSnapshot,
++             .retriggerPattern, .requestFullSnapshot,
+              .serialize, .loadSession, .linkPhase, .midiClockTick:
+             break
+         }
+@@ -196,7 +212,7 @@ struct SessionMirror: Equatable {
+ extension SessionMirror {
+     /// A rich, deterministic mirror for SwiftUI previews and UI tests: 6 tracks
+     /// (Kick / Snare / Closed Hat / Open Hat / Perc / Bass) with varied steps,
+-    /// bpm 124, one pattern. Never touches the engine.
++    /// bpm 120, one pattern. Never touches the engine.
+     static var demoSeed: SessionMirror {
+         var m = SessionMirror()
+         let names: [(UInt8, String)] = [
+@@ -219,7 +235,7 @@ extension SessionMirror {
+         }
+         var pattern = Pattern(id: SeedUUID.pattern, tracks: tracks)
+         m.session.patterns[0] = pattern
+-        m.session.bpm = 124
++        m.session.bpm = 120
+         m.playheads = [0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0]
+         return m
+     }
+diff --git a/app/StepForgeTests/EngineBridgeTests.swift b/app/StepForgeTests/EngineBridgeTests.swift
+new file mode 100644
+index 0000000..81cadc3
+--- /dev/null
++++ b/app/StepForgeTests/EngineBridgeTests.swift
+@@ -0,0 +1,27 @@
++import XCTest
++@testable import StepForge
++
++final class EngineBridgeTests: XCTestCase {
++    func testMockBridgeOptimisticCommands() {
++        let bridge = MockEngineBridge()
++        XCTAssertEqual(bridge.mirror.bpm, 120.0)
++        
++        bridge.submit(.setBpm(bpm: 144.0))
++        XCTAssertEqual(bridge.mirror.bpm, 144.0)
++        
++        bridge.submit(.setTrackLength(trackIdx: 0, length: 8))
++        XCTAssertEqual(bridge.mirror.patterns[0]?.tracks[0].length, 8)
++        
++        bridge.submit(.setTrackSpeedRatio(trackIdx: 0, ratio: 2.0))
++        XCTAssertEqual(bridge.mirror.patterns[0]?.tracks[0].speedRatio, 2.0)
++        
++        bridge.submit(.setTrackNote(trackIdx: 0, midiNote: 38))
++        XCTAssertEqual(bridge.mirror.patterns[0]?.tracks[0].midiNote, 38)
++    }
++
++    func testSessionMirrorPlayheadApplication() {
++        var mirror = SessionMirror.demoSeed
++        mirror.applyPlayhead(trackIdx: 0, stepIdx: 4)
++        XCTAssertEqual(mirror.playheadStep, 4)
++    }
++}

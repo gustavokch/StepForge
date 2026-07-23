@@ -120,14 +120,15 @@ pub unsafe extern "C" fn engine_start(engine: *mut EngineHandle) -> EngineResult
         // Reset shutdown flag to false so worker and RT loops run (crucial if start is called again after stop)
         eng.shutdown.store(false, std::sync::atomic::Ordering::Release);
 
-        // Create CoreMIDI client and output port (engine owns these per Rule 7).
+        // Create CoreMIDI client, output port, and virtual source (engine owns these per Rule 7).
         // Non-fatal if CoreMIDI client creation fails (e.g. sandboxed / un-entitled);
         // worker and RT threads must still spawn so playback and UI commands work.
-        let (client, port) = unsafe { coremidi::create_client_and_port() }.unwrap_or((0, 0));
+        let (client, port, source) = unsafe { coremidi::create_client_and_port() }.unwrap_or((0, 0, 0));
 
-        // Store client/port in the engine for disposal in engine_stop
+        // Store client/port/source in the engine for disposal in engine_stop
         *eng.coremidi_client.lock().unwrap() = client;
         *eng.coremidi_port.lock().unwrap() = port;
+        *eng.coremidi_source.lock().unwrap() = source;
 
         // Clone Arc for each thread
         let eng_rt = Arc::clone(&eng);
@@ -145,10 +146,10 @@ pub unsafe extern "C" fn engine_start(engine: *mut EngineHandle) -> EngineResult
             eng_worker.run_worker_loop();
         });
 
-        // Spawn CoreMIDI worker thread only if port != 0
-        let coremidi_handle = if port != 0 {
+        // Spawn CoreMIDI worker thread only if port != 0 or source != 0
+        let coremidi_handle = if port != 0 || source != 0 {
             Some(std::thread::spawn(move || {
-                coremidi::run_coremidi_worker(&eng_coremidi, port);
+                coremidi::run_coremidi_worker(&eng_coremidi, port, source);
             }))
         } else {
             None
@@ -202,10 +203,12 @@ pub unsafe extern "C" fn engine_stop(engine: *mut EngineHandle) -> EngineResult 
         // Dispose CoreMIDI client and port
         let client = *eng.coremidi_client.lock().unwrap();
         let port = *eng.coremidi_port.lock().unwrap();
+        let source = *eng.coremidi_source.lock().unwrap();
         if client != 0 {
-            let _ = unsafe { coremidi::dispose_client_and_port(client, port) };
+            let _ = unsafe { coremidi::dispose_client_and_port(client, port, source) };
             *eng.coremidi_client.lock().unwrap() = 0;
             *eng.coremidi_port.lock().unwrap() = 0;
+            *eng.coremidi_source.lock().unwrap() = 0;
         }
 
         Ok(())
@@ -241,6 +244,7 @@ pub unsafe extern "C" fn engine_submit_command(
         };
         match command_codec::decode_command(bytes) {
             Ok(command) => {
+                println!("[Rust FFI] Decoded command: {:?}", command);
                 // Task 20a: enqueue into the command queue (drop-oldest on full).
                 // The state worker will apply this command.
                 use sequencer_engine::midi_out::push_drop_oldest;

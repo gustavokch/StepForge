@@ -1,0 +1,17 @@
+--- engine/crates/ffi/src/lib.rs
++++ engine/crates/ffi/src/lib.rs
+@@ -107,6 +107,10 @@
+ pub extern "C" fn engine_submit_command(engine: *mut EngineHandle, bytes: *const u8, len: usize) -> i32 {
+     let handle = unsafe { &*engine };
+     let slice = unsafe { std::slice::from_raw_parts(bytes, len) };
+     if let Ok(cmd) = postcard::from_bytes::<core::command::Command>(slice) {
++        println!("[Rust FFI] Decoded command: {:?}", cmd);
+         if let Err(_) = handle.command_tx.send(cmd) {
+             return -1; // MPSC disconnected
+         }
+         0 // SUCCESS
+     } else {
++        println!("[Rust FFI] Failed to decode command! Bytes: {:?}", slice);
+         -1 // ERR_DECODE
+     }
+ }

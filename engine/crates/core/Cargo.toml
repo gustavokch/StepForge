@@ -14,6 +14,7 @@ uuid = { workspace = true }
 arc-swap = { workspace = true }
 heapless = { workspace = true }
 postcard = { workspace = true }
+ableton-link-rs = "0.1.2"
 
 [dev-dependencies]
 postcard = { workspace = true }

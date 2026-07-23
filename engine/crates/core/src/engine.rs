@@ -125,6 +125,8 @@ pub struct ExternalClock {
     /// Absolute Link position as `beats_since_origin * 1_000_000` (integer
     /// micros-of-a-beat). RT computes target 16th-step from this.
     pub link_beats_micros: AtomicU64,
+    /// Whether the native Ableton Link session is enabled (Task 1).
+    pub link_enabled: AtomicBool,
 }
 impl ExternalClock {
     pub fn new() -> Self {
@@ -132,6 +134,7 @@ impl ExternalClock {
             midi_ticks: AtomicU32::new(0),
             midi_step_pulses: AtomicU32::new(0),
             link_beats_micros: AtomicU64::new(0),
+            link_enabled: AtomicBool::new(false),
         }
     }
 }
@@ -198,6 +201,8 @@ pub struct Engine {
     /// CoreMIDI output port reference (owned by engine). Pointer-sized for the
     /// same reason; 0 means uninitialized.
     pub coremidi_port: Mutex<usize>,
+    /// CoreMIDI virtual source reference (owned by engine).
+    pub coremidi_source: Mutex<usize>,
     /// Per-track, one-deep undo (Task 12). Mutex-guarded because the worker
     /// applies commands sequentially but the engine is `Send+Sync`; the lock is
     /// never held across an FFI call or on the RT path.
@@ -233,6 +238,7 @@ impl Engine {
             coremidi_handle: Mutex::new(None),
             coremidi_client: Mutex::new(0usize),
             coremidi_port: Mutex::new(0usize),
+            coremidi_source: Mutex::new(0usize),
             undo: Mutex::new(Undo::default()),
             clipboard: Mutex::new(Clipboard::default()),
             external_clock: Arc::new(ExternalClock::new()),
@@ -474,16 +480,10 @@ impl Engine {
                     &EngineEvent::SyncSourceChanged { source },
                 );
             }
-            LinkPhase {
-                beats_since_origin,
-                phase: _,
-            } => {
-                // Absolute Link position → micros-of-a-beat (integer). RT
-                // converts back to beats + 16th-steps. Release pairs with the
-                // RT loop's Acquire load.
+            SetLinkEnabled { enabled } => {
                 self.external_clock
-                    .link_beats_micros
-                    .store((beats_since_origin * 1_000_000.0) as u64, Ordering::Release);
+                    .link_enabled
+                    .store(enabled, Ordering::Release);
             }
             MidiClockTick => {
                 // 24 PPQN → 6 ticks per 16th step. Worker accumulates raw
