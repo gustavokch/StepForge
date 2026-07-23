@@ -25,6 +25,12 @@ pub struct Session {
 
 impl Default for Session {
     fn default() -> Self {
+        // Initialize all patterns with the default track layout (Kick, Snare, Hat, Clap)
+        // so that switching patterns via follow actions doesn't result in silent/empty patterns.
+        let mut patterns: [Option<Pattern>; PATTERN_SLOTS] = Default::default();
+        for i in 0..PATTERN_SLOTS {
+            patterns[i] = Some(Pattern::default());
+        }
         Self {
             bpm: 120.0,
             sync_source: SyncSource::Free,
@@ -33,7 +39,7 @@ impl Default for Session {
             humanize_velocity: 0.0,
             global_midi_channel: 10,
             active_pattern_index: 0,
-            patterns: Default::default(), // [None; 9]
+            patterns,
             midi_destinations: Vec::new(),
         }
     }
@@ -56,9 +62,12 @@ pub struct Pattern {
 
 impl Default for Pattern {
     fn default() -> Self {
+        // Default tracks cover the core GM drum kit so each track is visually
+        // distinct out of the box: Kick (36), Snare (38), Closed Hat (42), Clap (39).
+        const DEFAULT_NOTES: [u8; MIN_TRACKS] = [36, 38, 42, 39];
         Self {
-            id: Uuid::nil(),
-            tracks: (0..MIN_TRACKS).map(|_| Track::default()).collect(),
+            id: Uuid::new_v4(),
+            tracks: DEFAULT_NOTES.iter().map(|&n| Track::with_note(n)).collect(),
             follow_action: FollowAction::default(),
         }
     }
@@ -104,13 +113,23 @@ pub struct Track {
 impl Default for Track {
     fn default() -> Self {
         Self {
-            id: Uuid::nil(),
+            id: Uuid::new_v4(),
             midi_note: 36, // default Kick (C2 region)
             length: STEP_COUNT,
             speed_ratio: 1.0,
             swing_pct: 0.0,
             muted: false,
             steps: [Step::default(); STEP_COUNT],
+        }
+    }
+}
+
+impl Track {
+    /// Create a track with a specific MIDI note and a fresh UUID.
+    pub fn with_note(note: u8) -> Self {
+        Self {
+            midi_note: note,
+            ..Self::default()
         }
     }
 }

@@ -13,6 +13,7 @@ struct PanelBackground: ViewModifier {
             .overlay(
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
                     .stroke(border, lineWidth: Theme.borderWidth)
+                    .allowsHitTesting(false)
             )
             .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
     }
@@ -50,7 +51,7 @@ extension View {
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
             .background(background)
-            .overlay(Capsule().stroke(border, lineWidth: Theme.borderWidth))
+            .overlay(Capsule().stroke(border, lineWidth: Theme.borderWidth).allowsHitTesting(false))
             .clipShape(Capsule())
     }
 }

@@ -108,7 +108,7 @@ struct TrackHeader: View {
                 .foregroundStyle(track.muted ? Theme.onPrimary : Theme.textSecondary)
                 .frame(width: 20, height: 20)
                 .background(track.muted ? AnyShapeStyle(Theme.primary) : AnyShapeStyle(Theme.Surface.high))
-                .overlay(Capsule().stroke(track.muted ? Theme.primary : Theme.borderWeak, lineWidth: Theme.borderWidth))
+                .overlay(Capsule().stroke(track.muted ? Theme.primary : Theme.borderWeak, lineWidth: Theme.borderWidth).allowsHitTesting(false))
                 .clipShape(Capsule())
                 .contentShape(Capsule())
         }

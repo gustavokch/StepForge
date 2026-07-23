@@ -7,9 +7,24 @@ use crate::models::{Track, STEP_COUNT};
 pub fn roll(track: &mut Track, strength: f32, rng: &mut Rng) {
     let s = strength.clamp(0.0, 1.0);
     for i in 0..STEP_COUNT {
+        // Toggle step active state with a chance proportional to strength
+        // max 30% chance to flip at 1.0 strength
+        if rng.range(0, 100) < (s * 30.0) as i32 {
+            track.steps[i].active = !track.steps[i].active;
+        }
+
         if track.steps[i].active {
             let off = (rng.range(-50, 50) as f32 / 100.0) * s; // ±0.5 * strength
             track.steps[i].micro_timing_offset = off;
+
+            if rng.range(0, 100) < (s * 40.0) as i32 {
+                let v = rng.range(0, 3);
+                track.steps[i].velocity_zone = match v {
+                    0 => crate::models::VelocityZone::Low,
+                    1 => crate::models::VelocityZone::Mid,
+                    _ => crate::models::VelocityZone::Accent,
+                };
+            }
         }
     }
     // length / midi_note / speed_ratio untouched by construction.

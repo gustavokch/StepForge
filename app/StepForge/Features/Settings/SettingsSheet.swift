@@ -20,14 +20,18 @@ struct SettingsSheet: View {
             List {
                 Section {
                     LabeledContent("BPM", value: String(format: "%.1f", bridge.mirror.bpm))
+                        .foregroundStyle(Theme.textPrimary)
                     Picker("Global MIDI Channel", selection: globalChannelBinding) {
                         ForEach(UInt8(1)...UInt8(16), id: \.self) { ch in
                             Text("Channel \(ch)\(ch == 10 ? " (GM Drums)" : "")")
                                 .tag(ch)
                         }
                     }
+                    .foregroundStyle(Theme.textPrimary)
                     LabeledContent("Sync Source", value: bridge.mirror.syncSource.label)
+                        .foregroundStyle(Theme.textPrimary)
                     LabeledContent("Swing", value: "\(Int((bridge.mirror.globalSwingPct * 100).rounded()))%")
+                        .foregroundStyle(Theme.textPrimary)
                 } header: { Text("Session") }
 
                 Section {
@@ -61,10 +65,19 @@ struct SettingsSheet: View {
                     Text("Free / MIDI Clock / Link — Phase 3").foregroundStyle(Theme.textMuted)
                 } header: { Text("Sync") }
             }
+            #if os(macOS)
+            .listStyle(.inset)
+            #else
+            .listStyle(.insetGrouped)
+            #endif
+            .scrollContentBackground(.hidden)
+            .background(Theme.Surface.lowest.ignoresSafeArea())
             .navigationTitle("Settings")
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }.tint(Theme.primary)
                 }
             }

@@ -60,6 +60,7 @@ struct NotePickerSheet: View {
                                     .overlay(
                                         RoundedRectangle(cornerRadius: Theme.Radius.md)
                                             .stroke(item.note == currentNote ? Theme.primary : Color.clear, lineWidth: 1)
+                                            .allowsHitTesting(false)
                                     )
                                 }
                             }
@@ -93,7 +94,9 @@ struct NotePickerSheet: View {
                 }
             }
             .navigationTitle("Select Track Note")
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") { dismiss() }

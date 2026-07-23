@@ -42,6 +42,9 @@ pub enum EngineEvent {
     PatternCleared {
         index: usize,
     },
+    PatternLoopCountChanged {
+        count: u32,
+    },
     FollowActionChanged {
         pattern_idx: usize,
         action: FollowAction,

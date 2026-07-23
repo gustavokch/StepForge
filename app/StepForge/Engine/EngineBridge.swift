@@ -127,7 +127,10 @@ class EngineBridge: ObservableObject, @unchecked Sendable {
             guard outLen > 0, let p = outPtr else { break; }   // empty = drained (A13)
             let copy = Array(UnsafeBufferPointer(start: p, count: Int(outLen)))
             engine_free_bytes(p, outLen)                        // borrowed + freed immediately
-            guard let event = EngineEvent.decode(copy) else { continue; } // malformed → drop
+            guard let event = EngineEvent.decode(copy) else {
+                print("[EngineBridge] ERROR: Failed to decode EngineEvent of length \(outLen) bytes!")
+                continue
+            } // malformed → drop
             if case .playhead(let t, let s) = event {
                 playheads[t] = s
             } else {

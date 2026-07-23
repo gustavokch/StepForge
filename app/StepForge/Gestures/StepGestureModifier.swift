@@ -31,18 +31,27 @@ struct StepGestureModifier: ViewModifier {
             .onLongPressGesture(minimumDuration: 0.45, maximumDistance: 12) {
                 onRatchetRequest()
             } onPressingChanged: { _ in }
-            // double-tap → delete (declared before count:1 so SwiftUI prefers it)
-            .onTapGesture(count: 2) {
-                guard isActive else { return }
-                if Date().timeIntervalSince(lastPlacementAt) >= deleteGuard { onDelete() }
-            }
+            // double-tap → delete
+            // When isActive=true, it's enabled and causes a 300ms delay on the single-tap, 
+            // which is fine because single-tap is a no-op.
+            // When isActive=false, it's disabled, so the single-tap fires INSTANTLY without delay.
+            .gesture(
+                TapGesture(count: 2)
+                    .onEnded {
+                        if Date().timeIntervalSince(lastPlacementAt) >= deleteGuard { onDelete() }
+                    },
+                including: isActive ? .all : .none
+            )
             // single-tap → place (empty) / no-op (filled) + placement timestamp
-            .onTapGesture(count: 1) {
-                if !isActive {
-                    onPlaceMid()
-                    lastPlacementAt = Date()
-                }
-            }
+            .gesture(
+                TapGesture(count: 1)
+                    .onEnded {
+                        if !isActive {
+                            onPlaceMid()
+                            lastPlacementAt = Date()
+                        }
+                    }
+            )
             // vertical drag → velocity zone
             .gesture(
                 DragGesture(minimumDistance: 8)

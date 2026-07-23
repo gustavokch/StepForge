@@ -3,15 +3,17 @@ import SwiftUI
 struct PatternOptionsSheet: View {
     let patternIdx: Int
     let currentFollowAction: FollowAction
+    let loopsRemaining: Int?
     let onSaveFollowAction: (FollowAction) -> Void
     @Environment(\.dismiss) private var dismiss
 
     @State private var afterLoops: Int
     @State private var actionType: FollowActionType
 
-    init(patternIdx: Int, currentFollowAction: FollowAction, onSaveFollowAction: @escaping (FollowAction) -> Void) {
+    init(patternIdx: Int, currentFollowAction: FollowAction, loopsRemaining: Int?, onSaveFollowAction: @escaping (FollowAction) -> Void) {
         self.patternIdx = patternIdx
         self.currentFollowAction = currentFollowAction
+        self.loopsRemaining = loopsRemaining
         self.onSaveFollowAction = onSaveFollowAction
         _afterLoops = State(initialValue: Int(currentFollowAction.afterLoops))
         _actionType = State(initialValue: currentFollowAction.action)
@@ -21,6 +23,11 @@ struct PatternOptionsSheet: View {
         NavigationStack {
             Form {
                 Section("Follow Action") {
+                    if let loopsLeft = loopsRemaining, actionType != .none {
+                        Text("\(loopsLeft) loops remaining")
+                            .font(Typography.badge)
+                            .foregroundStyle(Theme.primaryDim)
+                    }
                     Stepper("After Loops: \(afterLoops)", value: $afterLoops, in: 1...16)
                     
                     Picker("Action Type", selection: $actionType) {
@@ -33,7 +40,9 @@ struct PatternOptionsSheet: View {
                 }
             }
             .navigationTitle("Pattern \(patternIdx + 1) Options")
+            #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {

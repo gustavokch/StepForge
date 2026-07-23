@@ -13,16 +13,17 @@ enum EngineEvent: Equatable {
     case patternQueued(index: Int, quantize: QuantizeGrain)           // 5
     case patternSwitched(index: Int)                                  // 6
     case patternCleared(index: Int)                                   // 7
-    case followActionChanged(patternIdx: Int, action: FollowAction)   // 8
-    case playhead(trackIdx: Int, stepIdx: Int)                        // 9
-    case playStateChanged(playing: Bool)                              // 10
-    case bpmChanged(bpm: Double)                                      // 11
-    case syncSourceChanged(source: SyncSource)                        // 12
-    case undoAvailable(trackIdx: Int, available: Bool)                // 13
-    case fullSnapshot(session: Session)                               // 14
-    case serialized(bytes: [UInt8])                                   // 15
-    case error(code: Int32, message: String)                          // 16
-    case overflow(dropped: UInt32)                                    // 17
+    case patternLoopCountChanged(count: UInt32)                       // 8
+    case followActionChanged(patternIdx: Int, action: FollowAction)   // 9
+    case playhead(trackIdx: Int, stepIdx: Int)                        // 10
+    case playStateChanged(playing: Bool)                              // 11
+    case bpmChanged(bpm: Double)                                      // 12
+    case syncSourceChanged(source: SyncSource)                        // 13
+    case undoAvailable(trackIdx: Int, available: Bool)                // 14
+    case fullSnapshot(session: Session)                               // 15
+    case serialized(bytes: [UInt8])                                   // 16
+    case error(code: Int32, message: String)                          // 17
+    case overflow(dropped: UInt32)                                    // 18
 
     /// Decode postcard bytes → event. nil on truncation or unknown variant.
     static func decode(_ bytes: [UInt8]) -> EngineEvent? {
@@ -54,36 +55,40 @@ enum EngineEvent: Equatable {
             guard let i = r.readUInt() else { return nil; }
             return .patternCleared(index: i)
         case 8:
+            guard let count = r.readU32() else { return nil; }
+            return .patternLoopCountChanged(count: count)
+        case 9:
             guard let p = r.readUInt(), let action = FollowAction(from: &r) else { return nil; }
             return .followActionChanged(patternIdx: p, action: action)
-        case 9:
+        case 10:
             guard let t = r.readUInt(), let s = r.readUInt() else { return nil; }
             return .playhead(trackIdx: t, stepIdx: s)
-        case 10:
+        case 11:
             guard let playing = r.readBool() else { return nil; }
             return .playStateChanged(playing: playing)
-        case 11:
+        case 12:
             guard let bpm = r.readF64() else { return nil; }
             return .bpmChanged(bpm: bpm)
-        case 12:
+        case 13:
             guard let source = SyncSource(from: &r) else { return nil; }
             return .syncSourceChanged(source: source)
-        case 13:
+        case 14:
             guard let t = r.readUInt(), let available = r.readBool() else { return nil; }
             return .undoAvailable(trackIdx: t, available: available)
-        case 14:
+        case 15:
             guard let session = Session(from: &r) else { return nil; }
             return .fullSnapshot(session: session)
-        case 15:
+        case 16:
             guard let bytes = r.readBytes() else { return nil; }
             return .serialized(bytes: bytes)
-        case 16:
+        case 17:
             guard let code = r.readI32(), let message = r.readString() else { return nil; }
             return .error(code: code, message: message)
-        case 17:
+        case 18:
             guard let dropped = r.readU32() else { return nil; }
             return .overflow(dropped: dropped)
         default:
+            print("[EngineEvent] decode error: unknown variant \(tag)")
             return nil   // unknown variant — future-proof skip
         }
     }

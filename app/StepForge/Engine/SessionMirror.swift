@@ -22,6 +22,7 @@ struct SessionMirror: Equatable {
     var playing: Bool = false
     var queuedPatternIndex: Int? = nil
     var queuedPatternQuantize: QuantizeGrain? = nil
+    var patternLoopCount: UInt32 = 0
     /// Per-track latest step index — the coalesced result of `Playhead` events
     /// (amendment E7: one entry per track per drain batch, not a single global).
     var playheads: [Int: Int] = [:]
@@ -50,6 +51,30 @@ struct SessionMirror: Equatable {
     /// Playhead step index for track 0.
     var playheadStep: Int? { playheads[0] }
 
+    /// Calculates the next pattern index based on the follow action of the specified pattern index.
+    /// Returns nil if there is no next pattern (e.g. action is none or stop).
+    func nextPatternIndex(from patternIdx: Int) -> Int? {
+        guard patterns.indices.contains(patternIdx),
+              let pattern = patterns[patternIdx],
+              pattern.followAction.action != .none,
+              pattern.followAction.action != .stop else {
+            return nil
+        }
+        
+        switch pattern.followAction.action {
+        case .playNext:
+            return (patternIdx + 1) % patterns.count
+        case .playPrevious:
+            return (patternIdx + patterns.count - 1) % patterns.count
+        case .playSpecific(let id):
+            return patterns.firstIndex(where: { $0?.id == id }) ?? patternIdx
+        case .playRandom:
+            return nil // Random is non-deterministic, no glow
+        default:
+            return nil
+        }
+    }
+
     // MARK: Event application (runs on MainActor, one hop per drain batch)
 
     mutating func apply(_ event: EngineEvent) {
@@ -69,20 +94,27 @@ struct SessionMirror: Equatable {
         case .patternSwitched(let i):
             session.activePatternIndex = i
             queuedPatternIndex = nil; queuedPatternQuantize = nil
+            patternLoopCount = 0
             playheads.removeAll(keepingCapacity: true)   // RT resets its counters on switch
             undoAvailable.removeAll(keepingCapacity: true) // undo is pattern-scoped
         case .patternCleared(let i):
             if session.patterns.indices.contains(i) { session.patterns[i] = nil }
+            if i == session.activePatternIndex { queuedPatternIndex = nil }
+        case .patternLoopCountChanged(let count):
+            patternLoopCount = count
         case .followActionChanged(let p, let action):
-            if session.patterns.indices.contains(p), var pat = session.patterns[p] {
-                pat.followAction = action; session.patterns[p] = pat
+            if session.patterns.indices.contains(p) {
+                session.patterns[p]?.followAction = action
             }
         case .playhead:
             break   // never reaches apply(); handled via applyPlayhead (coalesced)
-        case .playStateChanged(let p):
-            playing = p
-        case .bpmChanged(let b):
-            session.bpm = b
+        case .playStateChanged(let isPlaying):
+            playing = isPlaying
+            if !isPlaying {
+                patternLoopCount = 0
+            }
+        case .bpmChanged(let bpm):
+            session.bpm = bpm
         case .syncSourceChanged(let s):
             session.syncSource = s
         case .undoAvailable(let t, let available):
@@ -90,6 +122,7 @@ struct SessionMirror: Equatable {
         case .fullSnapshot(let snapshot):
             session = snapshot
             queuedPatternIndex = nil; queuedPatternQuantize = nil
+            patternLoopCount = 0
             playheads.removeAll(keepingCapacity: true)
             undoAvailable.removeAll(keepingCapacity: true)   // fresh session → no stale undo
             lastError = nil
@@ -154,6 +187,7 @@ struct SessionMirror: Equatable {
             playing = true
         case .stop:
             playing = false
+            patternLoopCount = 0
         case .queuePattern(let index, let quantize):
             queuedPatternIndex = index
             queuedPatternQuantize = quantize
@@ -161,9 +195,8 @@ struct SessionMirror: Equatable {
             queuedPatternIndex = nil
             queuedPatternQuantize = nil
         case .setFollowAction(let patternIdx, let action):
-            if session.patterns.indices.contains(patternIdx), var pat = session.patterns[patternIdx] {
-                pat.followAction = action
-                session.patterns[patternIdx] = pat
+            if session.patterns.indices.contains(patternIdx) {
+                session.patterns[patternIdx]?.followAction = action
             }
         case .setMidiDestinations(let endpoints):
             session.midiDestinations = endpoints

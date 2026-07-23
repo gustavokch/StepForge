@@ -158,6 +158,8 @@ pub struct RtState {
     /// scheduler boundary detection (`check_scheduler`). +1 per `process` call
     /// when playing; reset on play-start / retrigger / pattern switch.
     pub global_step: u32,
+    pub track_count: usize,
+    pub loop_count: u32,
 }
 impl RtState {
     pub fn new(seed: u64) -> Self {
@@ -169,6 +171,8 @@ impl RtState {
             rng: Rng::new(seed),
             link_step_count: 0,
             global_step: 0,
+            track_count: 0,
+            loop_count: 0,
         }
     }
 }
@@ -358,11 +362,14 @@ impl Engine {
     /// Atomic loads + a bounded all-notes-off ring burst + local counter resets
     /// only — no alloc/lock/FFI (Hard Rule 1).
     fn check_scheduler(&self, rt: &mut RtState, snap: &Session) {
+        let mut reset_occurred = false;
         if self.scheduler.take_retrigger() {
             for s in rt.per_track.iter_mut() {
                 s.step_idx = 0;
             }
             rt.global_step = 0;
+            rt.loop_count = 0;
+            reset_occurred = true;
         }
         if let Some(idx) = self.scheduler.take_if_due(rt.global_step) {
             crate::scheduler::all_notes_off_burst(snap, &self.midi);
@@ -371,6 +378,62 @@ impl Engine {
                 s.step_idx = 0;
             }
             rt.global_step = 0;
+            rt.loop_count = 0;
+            reset_occurred = true;
+        }
+
+        if !reset_occurred && rt.global_step == 0 {
+            rt.loop_count += 1;
+            let _ = crate::midi_out::push_event(
+                &self.hot_events,
+                &crate::event::EngineEvent::PatternLoopCountChanged { count: rt.loop_count },
+            );
+            if let Some(pattern) = snap.patterns.get(snap.active_pattern_index).and_then(|p| p.as_ref()) {
+                let fa = &pattern.follow_action;
+                if fa.action != crate::models::FollowActionType::None && rt.loop_count >= fa.after_loops {
+                    let mut next_idx = snap.active_pattern_index;
+                    let mut do_stop = false;
+
+                    match fa.action {
+                        crate::models::FollowActionType::PlayNext => {
+                            next_idx = (snap.active_pattern_index + 1) % snap.patterns.len();
+                        }
+                        crate::models::FollowActionType::PlayPrevious => {
+                            next_idx = (snap.active_pattern_index + snap.patterns.len() - 1) % snap.patterns.len();
+                        }
+                        crate::models::FollowActionType::PlaySpecific(id) => {
+                            next_idx = snap.patterns.iter().position(|p| p.as_ref().map_or(false, |pat| pat.id == id)).unwrap_or(snap.active_pattern_index);
+                        }
+                        crate::models::FollowActionType::PlayRandom => {
+                            next_idx = rt.rng.range(0, snap.patterns.len() as i32 - 1) as usize;
+                        }
+                        crate::models::FollowActionType::Stop => {
+                            do_stop = true;
+                        }
+                        crate::models::FollowActionType::None => {}
+                    }
+
+                    if do_stop {
+                        self.transport.is_playing.store(false, std::sync::atomic::Ordering::Release);
+                        self.transport.stop_generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                        let _ = crate::midi_out::push_event(
+                            &self.hot_events,
+                            &crate::event::EngineEvent::PlayStateChanged { playing: false },
+                        );
+                        rt.loop_count = 0;
+                    } else if next_idx != snap.active_pattern_index {
+                        crate::scheduler::all_notes_off_burst(snap, &self.midi);
+                        self.scheduler.request_switch(next_idx);
+                        for s in rt.per_track.iter_mut() {
+                            s.step_idx = 0;
+                        }
+                        rt.global_step = 0;
+                        rt.loop_count = 0;
+                    } else {
+                        rt.loop_count = 0;
+                    }
+                }
+            }
         }
     }
 
@@ -381,12 +444,20 @@ impl Engine {
         match cmd {
             Play => {
                 self.transport.is_playing.store(true, Ordering::Release);
+                crate::midi_out::push_event(
+                    &self.hot_events,
+                    &EngineEvent::PlayStateChanged { playing: true },
+                );
             }
             Stop => {
                 self.transport.is_playing.store(false, Ordering::Release);
                 self.transport
                     .stop_generation
                     .fetch_add(1, Ordering::AcqRel);
+                crate::midi_out::push_event(
+                    &self.hot_events,
+                    &EngineEvent::PlayStateChanged { playing: false },
+                );
             }
             // E6: external sync. `SetSyncSource` is an outer arm because it
             // publishes a fresh session (the RT loop branches on `sync_source`
@@ -396,8 +467,12 @@ impl Engine {
             // atomics for the RT loop to read.
             SetSyncSource { source } => {
                 let mut s = (*self.snapshot.load_full()).clone();
-                s.sync_source = source;
+                s.sync_source = source.clone();
                 self.publish(s);
+                crate::midi_out::push_event(
+                    &self.hot_events,
+                    &EngineEvent::SyncSourceChanged { source },
+                );
             }
             LinkPhase {
                 beats_since_origin,
@@ -538,6 +613,11 @@ impl Engine {
                 }
                 let avail = self.undo.lock().unwrap().available(track_idx);
                 self.publish(s);
+                let snap = self.snapshot.load_full();
+                crate::midi_out::push_large_event(
+                    &self.large_events,
+                    EngineEvent::FullSnapshot { session: (*snap).clone() }
+                );
                 crate::midi_out::push_event(
                     &self.hot_events,
                     &EngineEvent::UndoAvailable {
@@ -562,43 +642,97 @@ impl Engine {
             }
             other => {
                 let mut s = (*self.snapshot.load_full()).clone();
+                let mut needs_full_snapshot = false;
                 match other {
-                    SetBpm { bpm } => s.bpm = bpm,
-                    SetGlobalSwing { pct } => s.global_swing_pct = pct,
+                    SetBpm { bpm } => {
+                        s.bpm = bpm;
+                        crate::midi_out::push_event(
+                            &self.hot_events,
+                            &EngineEvent::BpmChanged { bpm },
+                        );
+                    }
+                    SetGlobalSwing { pct } => {
+                        s.global_swing_pct = pct;
+                        needs_full_snapshot = true;
+                    }
                     SetHumanize { timing, velocity } => {
                         s.humanize_timing = timing;
                         s.humanize_velocity = velocity;
+                        needs_full_snapshot = true;
                     }
                     // SetSyncSource is handled in the outer match (publishes a
                     // fresh session so the RT loop branches on the new source).
                     SetQuantizeGrain { grain: _ } => { /* stored on the scheduler in Task 16 */ }
-                    SetGlobalMidiChannel { channel } => s.global_midi_channel = channel,
-                    SetMidiDestinations { endpoints } => s.midi_destinations = endpoints,
+                    SetGlobalMidiChannel { channel } => {
+                        s.global_midi_channel = channel;
+                        needs_full_snapshot = true;
+                    }
+                    SetMidiDestinations { endpoints } => {
+                        s.midi_destinations = endpoints;
+                        needs_full_snapshot = true;
+                    }
                     SetTrackLength { track_idx, length } => {
                         with_track_mut(&mut s, track_idx, |t| {
                             t.length = length.clamp(1, crate::models::STEP_COUNT);
+                            crate::midi_out::push_event(
+                                &self.hot_events,
+                                &EngineEvent::TrackLengthChanged { track_idx, length: t.length },
+                            );
                         });
                     }
                     SetTrackMuted { track_idx, muted } => {
-                        with_track_mut(&mut s, track_idx, |t| t.muted = muted);
+                        with_track_mut(&mut s, track_idx, |t| {
+                            t.muted = muted;
+                            crate::midi_out::push_event(
+                                &self.hot_events,
+                                &EngineEvent::TrackMutedChanged { track_idx, muted },
+                            );
+                        });
                     }
                     SetTrackNote {
                         track_idx,
                         midi_note,
                     } => {
                         with_track_mut(&mut s, track_idx, |t| t.midi_note = midi_note);
+                        needs_full_snapshot = true;
                     }
                     SetTrackSpeedRatio { track_idx, ratio } => {
                         with_track_mut(&mut s, track_idx, |t| t.speed_ratio = ratio);
+                        needs_full_snapshot = true;
                     }
                     SetTrackSwing {
                         track_idx,
                         swing_pct,
                     } => {
                         with_track_mut(&mut s, track_idx, |t| t.swing_pct = swing_pct);
+                        needs_full_snapshot = true;
                     }
-                    AddTrack => add_track(&mut s),
-                    RemoveTrack => remove_track(&mut s),
+                    AddTrack => {
+                        let old_len = active_pattern_mut(&mut s).map_or(0, |p| p.tracks.len());
+                        add_track(&mut s);
+                        if let Some(p) = active_pattern_mut(&mut s) {
+                            if p.tracks.len() > old_len {
+                                let track_idx = p.tracks.len() - 1;
+                                let track = p.tracks[track_idx].clone();
+                                crate::midi_out::push_large_event(
+                                    &self.large_events,
+                                    EngineEvent::TrackAdded { track_idx, track },
+                                );
+                            }
+                        }
+                    }
+                    RemoveTrack => {
+                        let old_len = active_pattern_mut(&mut s).map_or(0, |p| p.tracks.len());
+                        remove_track(&mut s);
+                        if let Some(p) = active_pattern_mut(&mut s) {
+                            if p.tracks.len() < old_len {
+                                crate::midi_out::push_event(
+                                    &self.hot_events,
+                                    &EngineEvent::TrackRemoved { track_idx: p.tracks.len() },
+                                );
+                            }
+                        }
+                    }
                     SetStep {
                         track_idx,
                         step_idx,
@@ -608,6 +742,14 @@ impl Engine {
                             if step_idx < t.steps.len() {
                                 t.steps[step_idx].active = true;
                                 t.steps[step_idx].velocity_zone = zone;
+                                crate::midi_out::push_event(
+                                    &self.hot_events,
+                                    &EngineEvent::StepChanged {
+                                        track_idx,
+                                        step_idx,
+                                        step: t.steps[step_idx].clone(),
+                                    },
+                                );
                             }
                         });
                     }
@@ -618,6 +760,14 @@ impl Engine {
                         with_track_mut(&mut s, track_idx, |t| {
                             if step_idx < t.steps.len() {
                                 t.steps[step_idx].active = false;
+                                crate::midi_out::push_event(
+                                    &self.hot_events,
+                                    &EngineEvent::StepChanged {
+                                        track_idx,
+                                        step_idx,
+                                        step: t.steps[step_idx].clone(),
+                                    },
+                                );
                             }
                         });
                     }
@@ -629,14 +779,42 @@ impl Engine {
                         with_track_mut(&mut s, track_idx, |t| {
                             if step_idx < t.steps.len() {
                                 t.steps[step_idx].ratchet = ratchet;
+                                crate::midi_out::push_event(
+                                    &self.hot_events,
+                                    &EngineEvent::StepChanged {
+                                        track_idx,
+                                        step_idx,
+                                        step: t.steps[step_idx].clone(),
+                                    },
+                                );
                             }
                         });
                     }
-                    SetFollowAction { .. } => { /* Task 16 */ }
+                    SetFollowAction { pattern_idx, action } => {
+                        if pattern_idx < s.patterns.len() {
+                            if let Some(p) = s.patterns[pattern_idx].as_mut() {
+                                p.follow_action = action.clone();
+                            }
+                            let _ = crate::midi_out::push_event(
+                                &self.hot_events,
+                                &EngineEvent::FollowActionChanged {
+                                    pattern_idx,
+                                    action,
+                                },
+                            );
+                        }
+                    }
                     // unreachable: the match arms above are exhaustive with the outer match
                     _ => {}
                 }
                 self.publish(s);
+                if needs_full_snapshot {
+                    let snap = self.snapshot.load_full();
+                    crate::midi_out::push_large_event(
+                        &self.large_events,
+                        EngineEvent::FullSnapshot { session: (*snap).clone() },
+                    );
+                }
             }
         }
     }
@@ -1075,5 +1253,34 @@ mod tests {
             "retrigger resets step counters"
         );
         assert_eq!(rt.global_step, 0);
+    }
+
+    #[test]
+    fn scheduler_evaluates_follow_action_play_next() {
+        use crate::models::{Pattern, FollowAction, FollowActionType};
+        let e = Engine::new();
+        let mut s = Session::default();
+        let mut p0 = Pattern::default();
+        p0.follow_action = FollowAction {
+            after_loops: 2,
+            action: FollowActionType::PlayNext,
+        };
+        s.patterns[0] = Some(p0);
+        s.patterns[1] = Some(Pattern::default());
+        s.active_pattern_index = 0;
+        e.publish(s);
+
+        let mut rt = e.new_rt_state();
+        let snap = e.snapshot_arc();
+        
+        // Loop 1
+        rt.global_step = 0;
+        e.check_scheduler(&mut rt, &snap);
+        assert_eq!(e.scheduler.take_switch(), None, "Should not switch on loop 1");
+
+        // Loop 2
+        rt.global_step = 0;
+        e.check_scheduler(&mut rt, &snap);
+        assert_eq!(e.scheduler.take_switch(), Some(1), "Should switch to pattern 1 on loop 2");
     }
 }
