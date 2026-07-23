@@ -13,7 +13,7 @@ use crate::midi_out::{
     command_queue, hot_event_channel, large_event_channel, midi_out_ring, push_large_event,
     CommandQueue, HotEventChannel, LargeEventChannel, MidiOutRing,
 };
-use crate::models::{Session, MAX_TRACKS, STEP_COUNT};
+use crate::models::{Session, MAX_TRACKS, MIN_TRACKS, PATTERN_SLOTS, STEP_COUNT};
 use crate::undo::Undo;
 use arc_swap::ArcSwap;
 use std::sync::atomic::Ordering;
@@ -65,6 +65,37 @@ fn remove_track(s: &mut Session) {
             p.tracks.pop();
         }
     }
+}
+
+/// Validate an untrusted deserialized `Session` before publishing it
+/// (`LoadSession` restore path). Returns `true` only if the invariants that
+/// several worker/RT paths assume unchecked hold:
+///
+/// - `active_pattern_index < PATTERN_SLOTS` — `active_pattern_mut`,
+///   `track_mut`, and the RT `process()` index `patterns[active_pattern_index]`;
+///   a corrupt index would panic the worker (or worse, the RT thread).
+/// - every `Some(pattern)` has `tracks.len()` between `MIN_TRACKS` and
+///   `MAX_TRACKS` (inclusive).
+/// - every track has `length` in `1..=STEP_COUNT`.
+///
+/// Command-driven mutations stay safe without this (`SetTrackLength` clamps;
+/// `AddTrack`/`RemoveTrack` respect bounds); this guards the restore path,
+/// which is the entry point for untrusted sessions (Task 18, amendment A15).
+pub fn validate_session(s: &Session) -> bool {
+    if s.active_pattern_index >= PATTERN_SLOTS {
+        return false;
+    }
+    for p in s.patterns.iter().flatten() {
+        if !(MIN_TRACKS..=MAX_TRACKS).contains(&p.tracks.len()) {
+            return false;
+        }
+        for t in p.tracks.iter() {
+            if !(1..=STEP_COUNT).contains(&t.length) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 pub struct Transport {
@@ -158,6 +189,11 @@ pub struct Engine {
     /// External-clock shared state (E6). Worker writes via `apply_command`
     /// (`LinkPhase` / `MidiClockTick`); the RT loop reads via atomic loads.
     pub external_clock: Arc<ExternalClock>,
+    /// Monotonic counter bumped each time a `LoadSession` restores the session
+    /// (amendment A15). Lets the RT/CoreMIDI side detect a reload and react
+    /// (e.g. drop stale per-track state). Read via `Acquire`; the worker bumps
+    /// via `AcqRel` after `publish`.
+    pub reload_generation: AtomicU32,
 }
 
 impl Engine {
@@ -175,6 +211,7 @@ impl Engine {
             undo: Mutex::new(Undo::default()),
             clipboard: Mutex::new(Clipboard::default()),
             external_clock: Arc::new(ExternalClock::new()),
+            reload_generation: AtomicU32::new(0),
         }
     }
     /// Worker: publish a new authoritative session (COW).
@@ -355,8 +392,39 @@ impl Engine {
                     push_large_event(&self.large_events, EngineEvent::Serialized { bytes });
                 }
             }
-            // LoadSession apply arrives in Task 18.
-            LoadSession { .. } => { /* Task 18 */ }
+            // LoadSession restore (amendment A15). The bytes are a
+            // `SessionEnvelope` (the output of `engine_serialize`). The worker
+            // deserializes, validates the version + structural invariants, and
+            // — only if both pass — publishes the new session (COW), bumps the
+            // reload generation (so RT/CoreMIDI can react), and emits a
+            // `FullSnapshot` on the off-RT LARGE channel. A bad envelope,
+            // version, or structurally-invalid session is rejected: no swap, no
+            // event, no panic (Task 18 validation correction).
+            //
+            // `FullSnapshot` rides `large_events` (D5/A2), never the 128-byte
+            // hot slot — a real `Session` exceeds `MAX_EVENT_BYTES` and would
+            // panic `push_event`. Submit-time decode failure is already caught
+            // upstream as `ErrDecode` in the FFI shim.
+            LoadSession { bytes } => {
+                use crate::serde_ext::{SessionEnvelope, SESSION_FORMAT_VERSION};
+                match postcard::from_bytes::<SessionEnvelope>(&bytes) {
+                    Ok(env)
+                        if env.version == SESSION_FORMAT_VERSION
+                            && validate_session(&env.session) =>
+                    {
+                        self.publish(env.session);
+                        self.reload_generation.fetch_add(1, Ordering::AcqRel);
+                        let snap = self.snapshot.load_full();
+                        push_large_event(
+                            &self.large_events,
+                            EngineEvent::FullSnapshot {
+                                session: (*snap).clone(),
+                            },
+                        );
+                    }
+                    _ => { /* bad envelope/version/session: no swap, no event */ }
+                }
+            }
             // Algorithm/clipboard/undo arm (Task 15). `ref track_idx` keeps
             // `cmd` from being moved so the inner `match cmd` can dispatch by
             // variant (and recover `strength` for Roll/Vary).
@@ -719,6 +787,134 @@ mod tests {
         assert!(
             e.large_events.dequeue().is_none(),
             "Serialize produced more than one event"
+        );
+    }
+
+    /// Task 18: `LoadSession` of a valid envelope publishes the session, bumps
+    /// `reload_generation`, and emits exactly one `FullSnapshot` on the off-RT
+    /// LARGE channel (never the 128-byte hot slot — a real Session exceeds
+    /// MAX_EVENT_BYTES). Mirrors the Serialize arm's channel discipline.
+    #[test]
+    fn load_session_emits_full_snapshot_on_large_channel() {
+        use crate::serde_ext::SessionEnvelope;
+        let e = Engine::new();
+        // Build a valid envelope (default session, correct version).
+        let env = SessionEnvelope::wrap(Session {
+            bpm: 77.0,
+            ..Default::default()
+        });
+        let bytes = postcard::to_allocvec(&env).unwrap();
+        let gen_before = e.reload_generation.load(Ordering::Acquire);
+        e.apply_command(Command::LoadSession { bytes });
+        // reload_generation bumped exactly once.
+        assert_eq!(
+            e.reload_generation.load(Ordering::Acquire),
+            gen_before + 1,
+            "reload_generation must bump on a successful LoadSession"
+        );
+        // Session was published.
+        assert_eq!(e.snapshot_arc().bpm, 77.0);
+        // Hot channel must be empty — FullSnapshot rides the large channel only.
+        assert!(
+            e.hot_events.dequeue().is_none(),
+            "FullSnapshot must not ride the hot channel"
+        );
+        let ev = e
+            .large_events
+            .dequeue()
+            .expect("FullSnapshot event pushed to large channel");
+        match ev {
+            EngineEvent::FullSnapshot { session } => {
+                assert_eq!(
+                    session.bpm, 77.0,
+                    "snapshot must reflect the loaded session"
+                );
+            }
+            other => panic!("expected FullSnapshot, got {other:?}"),
+        }
+        assert!(
+            e.large_events.dequeue().is_none(),
+            "LoadSession produced more than one event"
+        );
+    }
+
+    /// Task 18 validation correction: a structurally-valid envelope with a bad
+    /// `active_pattern_index` (>= PATTERN_SLOTS) is rejected at the engine layer
+    /// — no publish, no reload_generation bump, no event. The C-ABI test covers
+    /// the end-to-end no-swap; this pins the engine-layer guards directly.
+    #[test]
+    fn load_session_invalid_session_is_dropped_no_event() {
+        use crate::serde_ext::{SessionEnvelope, SESSION_FORMAT_VERSION};
+        let e = Engine::new();
+        let bad = SessionEnvelope {
+            version: SESSION_FORMAT_VERSION,
+            session: Session {
+                active_pattern_index: crate::models::PATTERN_SLOTS, // == 9 is out of range
+                ..Default::default()
+            },
+        };
+        let bytes = postcard::to_allocvec(&bad).unwrap();
+        let gen_before = e.reload_generation.load(Ordering::Acquire);
+        e.apply_command(Command::LoadSession { bytes });
+        assert_eq!(
+            e.reload_generation.load(Ordering::Acquire),
+            gen_before,
+            "reload_generation must NOT bump on a rejected LoadSession"
+        );
+        assert_eq!(e.snapshot_arc().bpm, 120.0, "session must be unchanged");
+        assert!(
+            e.large_events.dequeue().is_none(),
+            "rejected LoadSession must not emit an event"
+        );
+        assert!(
+            e.hot_events.dequeue().is_none(),
+            "rejected LoadSession must not emit a hot event"
+        );
+    }
+
+    /// `validate_session` directly: the invariants the restore path relies on.
+    #[test]
+    fn validate_session_accepts_default_rejects_corrupt() {
+        use crate::models::{Pattern, PATTERN_SLOTS, STEP_COUNT};
+        // Helper: a Session with `patterns[0]` set to the given pattern.
+        fn with_pattern(p: Pattern) -> Session {
+            let mut patterns = <[Option<Pattern>; PATTERN_SLOTS]>::default();
+            patterns[0] = Some(p);
+            Session {
+                patterns,
+                ..Default::default()
+            }
+        }
+        assert!(validate_session(&Session::default()), "default is valid");
+        // active_pattern_index out of range.
+        let s = Session {
+            active_pattern_index: PATTERN_SLOTS,
+            ..Default::default()
+        };
+        assert!(
+            !validate_session(&s),
+            "active_pattern_index >= PATTERN_SLOTS"
+        );
+        // track length 0 (below the 1..=STEP_COUNT bound).
+        let mut p = Pattern::default();
+        p.tracks[0].length = 0;
+        assert!(
+            !validate_session(&with_pattern(p)),
+            "track length 0 is invalid"
+        );
+        // length > STEP_COUNT.
+        let mut p = Pattern::default();
+        p.tracks[0].length = STEP_COUNT + 1;
+        assert!(
+            !validate_session(&with_pattern(p)),
+            "track length > STEP_COUNT is invalid"
+        );
+        // length == STEP_COUNT boundary is valid.
+        let mut p = Pattern::default();
+        p.tracks[0].length = STEP_COUNT;
+        assert!(
+            validate_session(&with_pattern(p)),
+            "length == STEP_COUNT is valid"
         );
     }
 }

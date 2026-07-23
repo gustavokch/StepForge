@@ -102,7 +102,13 @@ pub unsafe extern "C" fn engine_stop(engine: *mut EngineHandle) -> EngineResult 
 }
 
 /// Submit a command as postcard bytes. Returns `ErrDecode` on malformed bytes
-/// (non-fatal). Stub: decodes only; the engine plan applies the command.
+/// (non-fatal).
+///
+/// Apply path (Task 18+): the decoded command is applied SYNCHRONOUSLY on the
+/// caller thread until Task 20 wires the real lock-free MPSC queue + state
+/// worker (`engine_start`). This lets `LoadSession` / `SetBpm` / etc. round-trip
+/// through the C ABI in integration tests today; the queue/worker swap is
+/// mechanical and confined to this body + `engine_start`.
 ///
 /// # Safety
 /// `cmd_ptr` is valid for `cmd_len` bytes for the duration of the call (or NULL
@@ -113,7 +119,7 @@ pub unsafe extern "C" fn engine_submit_command(
     cmd_ptr: *const u8,
     cmd_len: usize,
 ) -> EngineResult {
-    run_void(engine, |_eng| {
+    run_void(engine, |eng| {
         if cmd_ptr.is_null() && cmd_len != 0 {
             return Err(EngineResult::ErrInvalidBuffer);
         }
@@ -124,7 +130,12 @@ pub unsafe extern "C" fn engine_submit_command(
             unsafe { core::slice::from_raw_parts(cmd_ptr, cmd_len) }
         };
         match command_codec::decode_command(bytes) {
-            Ok(_command) => Ok(()), // engine plan applies it.
+            Ok(command) => {
+                // Task 18: apply synchronously; Task 20 replaces with
+                // `eng.commands.enqueue(command)` + a state worker drain.
+                eng.apply_command(command);
+                Ok(())
+            }
             Err(_) => Err(EngineResult::ErrDecode),
         }
     })
