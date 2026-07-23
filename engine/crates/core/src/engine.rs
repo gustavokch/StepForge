@@ -2,6 +2,7 @@
 //! shutdown flag, and thread handles. The state worker is sole writer of the
 //! Session (publish); the RT thread is a lock-free reader (snapshot_arc / load).
 
+use crate::clipboard::Clipboard;
 use crate::clock::{
     advance_speed_ratio, micro_timing_offset_micros, swing_offset_micros, to_q16_16, Clock, Rng,
 };
@@ -13,6 +14,7 @@ use crate::midi_out::{
     CommandQueue, HotEventChannel, LargeEventChannel, MidiOutRing,
 };
 use crate::models::{Session, MAX_TRACKS, STEP_COUNT};
+use crate::undo::Undo;
 use arc_swap::ArcSwap;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU32};
@@ -28,6 +30,27 @@ fn with_track_mut<R>(
 ) -> Option<R> {
     let p = active_pattern_mut(s)?;
     p.tracks.get_mut(idx).map(f)
+}
+/// Algorithm/clipboard/undo helper: bounds-checked `&mut Track` on the active
+/// pattern. Out-of-range `idx` returns `None` (no-op) — never panics the worker
+/// on a malformed command. `active_pattern_index` is read by direct index
+/// (matches `active_pattern_mut`; Task 18 validates it on `LoadSession`).
+fn track_mut(s: &mut Session, idx: usize) -> Option<&mut crate::models::Track> {
+    s.patterns[s.active_pattern_index]
+        .as_mut()?
+        .tracks
+        .get_mut(idx)
+}
+/// Deterministic per-track RNG seed: hash of (track_idx, bpm). Stable across
+/// the COW snapshot (only `idx` + `bpm` are hashed), so Roll/Vary reproducibly
+/// perturb the same active steps for a given BPM until the user changes state.
+fn seed_from(s: &Session, idx: usize) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    idx.hash(&mut h);
+    s.bpm.to_bits().hash(&mut h);
+    h.finish()
 }
 fn add_track(s: &mut Session) {
     if let Some(p) = active_pattern_mut(s) {
@@ -91,6 +114,12 @@ pub struct Engine {
     pub shutdown: Arc<AtomicBool>,
     pub rt_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     pub worker_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Per-track, one-deep undo (Task 12). Mutex-guarded because the worker
+    /// applies commands sequentially but the engine is `Send+Sync`; the lock is
+    /// never held across an FFI call or on the RT path.
+    pub undo: Mutex<Undo>,
+    /// Single-track clipboard (Task 13). Same ownership rules as `undo`.
+    pub clipboard: Mutex<Clipboard>,
 }
 
 impl Engine {
@@ -105,6 +134,8 @@ impl Engine {
             shutdown: Arc::new(AtomicBool::new(false)),
             rt_handle: Mutex::new(None),
             worker_handle: Mutex::new(None),
+            undo: Mutex::new(Undo::default()),
+            clipboard: Mutex::new(Clipboard::default()),
         }
     }
     /// Worker: publish a new authoritative session (COW).
@@ -203,17 +234,74 @@ impl Engine {
             }
             // LoadSession apply arrives in Task 18.
             LoadSession { .. } => { /* Task 18 */ }
-            // Algorithms/scheduler arms added in Tasks 14-16.
-            Roll { .. }
-            | Vary { .. }
-            | Cut { .. }
-            | Copy { .. }
-            | Paste { .. }
-            | Trash { .. }
-            | Undo { .. }
-            | QueuePattern { .. }
-            | CancelQueuedPattern
-            | RetriggerPattern { .. } => { /* later tasks */ }
+            // Algorithm/clipboard/undo arm (Task 15). `ref track_idx` keeps
+            // `cmd` from being moved so the inner `match cmd` can dispatch by
+            // variant (and recover `strength` for Roll/Vary).
+            Roll { ref track_idx, .. }
+            | Vary { ref track_idx, .. }
+            | Cut { ref track_idx }
+            | Copy { ref track_idx }
+            | Paste { ref track_idx }
+            | Trash { ref track_idx }
+            | Undo { ref track_idx } => {
+                let track_idx = *track_idx;
+                let mut s = (*self.snapshot.load_full()).clone();
+                // push undo BEFORE mutating for the mutating commands.
+                // Copy and Undo are excluded (non-mutating).
+                let mutating = matches!(
+                    cmd,
+                    Roll { .. } | Vary { .. } | Cut { .. } | Paste { .. } | Trash { .. }
+                );
+                if mutating {
+                    if let Some(t) = s.patterns[s.active_pattern_index]
+                        .as_ref()
+                        .and_then(|p| p.tracks.get(track_idx))
+                    {
+                        self.undo.lock().unwrap().push(track_idx, &t.steps);
+                    }
+                }
+                match cmd {
+                    Roll { strength, .. } => {
+                        // Seed first to release the immutable borrow of `s`
+                        // before `track_mut` takes the mutable borrow.
+                        let seed = seed_from(&s, track_idx);
+                        if let Some(t) = track_mut(&mut s, track_idx) {
+                            crate::algorithms::roll::roll(t, strength, &mut Rng::new(seed));
+                        }
+                    }
+                    Vary { strength, .. } => {
+                        let seed = seed_from(&s, track_idx);
+                        if let Some(t) = track_mut(&mut s, track_idx) {
+                            crate::algorithms::vary::vary(t, strength, &mut Rng::new(seed));
+                        }
+                    }
+                    Cut { .. } => self.clipboard.lock().unwrap().cut(&mut s, track_idx),
+                    Copy { .. } => self.clipboard.lock().unwrap().copy(&s, track_idx),
+                    Paste { .. } => {
+                        self.clipboard.lock().unwrap().paste(&mut s, track_idx);
+                    }
+                    Trash { .. } => {
+                        if let Some(t) = track_mut(&mut s, track_idx) {
+                            t.steps = [crate::models::Step::default(); crate::models::STEP_COUNT];
+                        }
+                    }
+                    Undo { .. } => {
+                        self.undo.lock().unwrap().undo(&mut s, track_idx);
+                    }
+                    _ => {}
+                }
+                let avail = self.undo.lock().unwrap().available(track_idx);
+                self.publish(s);
+                crate::midi_out::push_event(
+                    &self.hot_events,
+                    &EngineEvent::UndoAvailable {
+                        track_idx,
+                        available: avail,
+                    },
+                );
+            }
+            // Scheduler stubs — Task 16 wires the pattern queue + quantize.
+            QueuePattern { .. } | CancelQueuedPattern | RetriggerPattern { .. } => { /* Task 16 */ }
             other => {
                 let mut s = (*self.snapshot.load_full()).clone();
                 match other {
