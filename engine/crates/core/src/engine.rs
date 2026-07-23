@@ -17,7 +17,7 @@ use crate::models::{Session, MAX_TRACKS, STEP_COUNT};
 use crate::undo::Undo;
 use arc_swap::ArcSwap;
 use std::sync::atomic::Ordering;
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 fn active_pattern_mut(s: &mut Session) -> Option<&mut crate::models::Pattern> {
@@ -80,6 +80,36 @@ impl Default for Transport {
     }
 }
 
+/// External-clock shared state (E6). Worker writes via `apply_command`
+/// (`LinkPhase` / `MidiClockTick`); the RT loop reads via atomic loads in
+/// `run_rt_loop`. All fields are lock-free atomics so the RT thread never
+/// blocks (Hard Rule 1). `Arc`-shared so the engine and RT thread see the
+/// same counters.
+pub struct ExternalClock {
+    /// Raw 24-PPQN MIDI Clock tick count — worker increments per `MidiClockTick`.
+    pub midi_ticks: AtomicU32,
+    /// One pulse per 6 MIDI ticks (= one 16th step). RT consumes via
+    /// `swap(0, AcqRel)` each tick; worker `fetch_add`s under it.
+    pub midi_step_pulses: AtomicU32,
+    /// Absolute Link position as `beats_since_origin * 1_000_000` (integer
+    /// micros-of-a-beat). RT computes target 16th-step from this.
+    pub link_beats_micros: AtomicU64,
+}
+impl ExternalClock {
+    pub fn new() -> Self {
+        Self {
+            midi_ticks: AtomicU32::new(0),
+            midi_step_pulses: AtomicU32::new(0),
+            link_beats_micros: AtomicU64::new(0),
+        }
+    }
+}
+impl Default for ExternalClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Clone)]
 pub struct TrackRtState {
     pub step_idx: usize,
@@ -89,6 +119,10 @@ pub struct TrackRtState {
 pub struct RtState {
     pub per_track: [TrackRtState; MAX_TRACKS],
     pub rng: Rng,
+    /// 16th-step position consumed by the RT loop's `Link` branch (E6). The RT
+    /// thread is the sole writer; `begin_play` resets it to 0 so the loop
+    /// catches up to the current Link position on play-start.
+    pub link_step_count: u64,
 }
 impl RtState {
     pub fn new(seed: u64) -> Self {
@@ -98,6 +132,7 @@ impl RtState {
                 speed_acc: 0,
             }),
             rng: Rng::new(seed),
+            link_step_count: 0,
         }
     }
 }
@@ -120,6 +155,9 @@ pub struct Engine {
     pub undo: Mutex<Undo>,
     /// Single-track clipboard (Task 13). Same ownership rules as `undo`.
     pub clipboard: Mutex<Clipboard>,
+    /// External-clock shared state (E6). Worker writes via `apply_command`
+    /// (`LinkPhase` / `MidiClockTick`); the RT loop reads via atomic loads.
+    pub external_clock: Arc<ExternalClock>,
 }
 
 impl Engine {
@@ -136,6 +174,7 @@ impl Engine {
             worker_handle: Mutex::new(None),
             undo: Mutex::new(Undo::default()),
             clipboard: Mutex::new(Clipboard::default()),
+            external_clock: Arc::new(ExternalClock::new()),
         }
     }
     /// Worker: publish a new authoritative session (COW).
@@ -169,10 +208,23 @@ impl Engine {
         RtState::new(1)
     }
 
-    /// RT thread body (Free-clock branch only; Task 17 adds MidiClock/Link).
-    /// `elevate_priority` runs ONCE at spawn; per-tick work is allocation-free:
-    /// one `ArcSwap` `Guard` load (zero-alloc), transport atomic reads,
-    /// [`process`], then `sleep_until` the next 16th deadline.
+    /// RT thread body (E6 mode-switch). `elevate_priority` runs ONCE at spawn;
+    /// per-tick work branches on `snap.sync_source` and is allocation-free
+    /// across all three branches:
+    ///
+    /// - **Free** — internal clock: one [`process`] + `sleep_until` the next
+    ///   16th deadline (Task 11 cadence, unchanged).
+    /// - **MidiClock** — `swap(0, AcqRel)` the accumulated 16th-step pulses and
+    ///   call `process` once per pulse; then a short 500 µs poll-sleep (the
+    ///   worker increments pulses under the atomic — RT only consumes).
+    /// - **Link** — read `link_beats_micros`, compute the target 16th-step
+    ///   count since origin, and catch up by calling `process` until
+    ///   `rt.link_step_count` reaches it; then a short 500 µs poll-sleep.
+    ///
+    /// `process` stays source-agnostic (advances one step per call); the loop
+    /// decides cadence. The external branches perform ONLY atomic loads +
+    /// `process` calls — no allocation, no lock, no FFI, no CoreMIDI
+    /// (Hard Rule 1).
     pub fn run_rt_loop(self: &Arc<Engine>, clock: &dyn Clock) {
         clock.elevate_priority(); // ONCE at spawn
         let mut rt = self.new_rt_state();
@@ -190,9 +242,43 @@ impl Engine {
                 began = false;
             }
             let snap = self.snapshot.load(); // zero-alloc Guard; immutable for the tick
-            process(&mut rt, &snap, playing, now, &self.midi, &self.hot_events);
-            let period = (60.0 / snap.bpm / 4.0 * 1_000_000.0) as u64;
-            clock.sleep_until(now + period);
+            match snap.sync_source {
+                crate::models::SyncSource::Free => {
+                    process(&mut rt, &snap, playing, now, &self.midi, &self.hot_events);
+                    let period = (60.0 / snap.bpm / 4.0 * 1_000_000.0) as u64;
+                    clock.sleep_until(now + period);
+                }
+                crate::models::SyncSource::MidiClock => {
+                    // Acquire-load pairs with the worker's Release store; the
+                    // swap clears so pulses never accumulate across ticks.
+                    let pulses = self
+                        .external_clock
+                        .midi_step_pulses
+                        .swap(0, Ordering::AcqRel);
+                    for _ in 0..pulses {
+                        process(&mut rt, &snap, playing, now, &self.midi, &self.hot_events);
+                    }
+                    // Short poll-sleep: external clocks drive cadence, the RT
+                    // thread just needs to wake often enough to consume pulses
+                    // without burning a core.
+                    clock.sleep_until(now + 500);
+                }
+                crate::models::SyncSource::Link => {
+                    let link_micros = self
+                        .external_clock
+                        .link_beats_micros
+                        .load(Ordering::Acquire);
+                    // `link_beats_micros` is `beats_since_origin * 1_000_000`;
+                    // convert back to beats, then to 16th-steps (×4).
+                    let beats = link_micros as f64 / 1_000_000.0;
+                    let target = (beats * 4.0) as u64;
+                    while rt.link_step_count < target {
+                        process(&mut rt, &snap, playing, now, &self.midi, &self.hot_events);
+                        rt.link_step_count += 1;
+                    }
+                    clock.sleep_until(now + 500);
+                }
+            }
         }
     }
 
@@ -209,6 +295,43 @@ impl Engine {
                 self.transport
                     .stop_generation
                     .fetch_add(1, Ordering::AcqRel);
+            }
+            // E6: external sync. `SetSyncSource` is an outer arm because it
+            // publishes a fresh session (the RT loop branches on `sync_source`
+            // each tick via the snapshot). `LinkPhase` / `MidiClockTick` live
+            // outside the inner `other` block so they don't wastefully
+            // clone-mutate-publish an unchanged session — they only store
+            // atomics for the RT loop to read.
+            SetSyncSource { source } => {
+                let mut s = (*self.snapshot.load_full()).clone();
+                s.sync_source = source;
+                self.publish(s);
+            }
+            LinkPhase {
+                beats_since_origin,
+                phase: _,
+            } => {
+                // Absolute Link position → micros-of-a-beat (integer). RT
+                // converts back to beats + 16th-steps. Release pairs with the
+                // RT loop's Acquire load.
+                self.external_clock
+                    .link_beats_micros
+                    .store((beats_since_origin * 1_000_000.0) as u64, Ordering::Release);
+            }
+            MidiClockTick => {
+                // 24 PPQN → 6 ticks per 16th step. Worker accumulates raw
+                // ticks; every 6th tick adds one 16th-step pulse that the RT
+                // loop consumes via `swap(0, AcqRel)`.
+                let t = self
+                    .external_clock
+                    .midi_ticks
+                    .fetch_add(1, Ordering::AcqRel)
+                    + 1;
+                if t.is_multiple_of(6) {
+                    self.external_clock
+                        .midi_step_pulses
+                        .fetch_add(1, Ordering::AcqRel);
+                }
             }
             RequestFullSnapshot => {
                 let snap = self.snapshot.load_full();
@@ -311,7 +434,8 @@ impl Engine {
                         s.humanize_timing = timing;
                         s.humanize_velocity = velocity;
                     }
-                    SetSyncSource { source } => s.sync_source = source,
+                    // SetSyncSource is handled in the outer match (publishes a
+                    // fresh session so the RT loop branches on the new source).
                     SetQuantizeGrain { grain: _ } => { /* stored on the scheduler in Task 16 */ }
                     SetGlobalMidiChannel { channel } => s.global_midi_channel = channel,
                     SetMidiDestinations { endpoints } => s.midi_destinations = endpoints,
