@@ -25,8 +25,12 @@ pub struct Session {
 
 impl Default for Session {
     fn default() -> Self {
+        // Initialize all patterns with the default track layout (Kick, Snare, Hat, Clap)
+        // so that switching patterns via follow actions doesn't result in silent/empty patterns.
         let mut patterns: [Option<Pattern>; PATTERN_SLOTS] = Default::default();
-        patterns[0] = Some(Pattern::default());
+        for i in 0..PATTERN_SLOTS {
+            patterns[i] = Some(Pattern::default());
+        }
         Self {
             bpm: 120.0,
             sync_source: SyncSource::Free,

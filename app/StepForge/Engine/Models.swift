@@ -274,17 +274,19 @@ struct Session: PostcardDecodable, Equatable {
     /// Default session matching the engine's `Session::default()` (bpm 120, ch 10,
     /// 4 tracks, 9 empty pattern slots, no destinations).
     init() {
-        self.bpm = 120
+        self.bpm = 120.0
         self.syncSource = .free
-        self.globalSwingPct = 0
-        self.humanizeTiming = 0
-        self.humanizeVelocity = 0
+        self.globalSwingPct = 0.0
+        self.humanizeTiming = 0.0
+        self.humanizeVelocity = 0.0
         self.globalMidiChannel = 10
         self.activePatternIndex = 0
-        self.patterns = Array(repeating: nil, count: 9)
+        
         // Match Rust Pattern::default(): Kick (36), Snare (38), Closed Hat (42), Clap (39)
         let defaultNotes: [UInt8] = [36, 38, 42, 39]
-        self.patterns[0] = Pattern(tracks: defaultNotes.map { Track(midiNote: $0) })
+        let defaultPattern = Pattern(tracks: defaultNotes.map { Track(midiNote: $0) })
+        self.patterns = Array(repeating: defaultPattern, count: 9)
+        
         self.midiDestinations = []
     }
 }
