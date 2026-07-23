@@ -86,45 +86,16 @@ extern "C" {
         outPort: *mut MIDIPortRef,
     ) -> OSStatus;
 
-    /// MIDIDestinationCreate - creates a virtual destination endpoint.
-    #[allow(non_snake_case)]
-    fn MIDIDestinationCreate(
-        client: MIDIClientRef,
-        name: CFStringRef,
-        readProc: MIDIReadProc,
-        refCon: *mut (),
-        outDest: *mut MIDIEndpointRef,
-    ) -> OSStatus;
-
-    /// MIDISourceCreate - creates a virtual source endpoint.
-    /// A virtual source can receive packets via MIDIReceived for same-process loopback testing.
-    #[allow(non_snake_case)]
-    fn MIDISourceCreate(
-        client: MIDIClientRef,
-        name: CFStringRef,
-        outSrc: *mut MIDIEndpointRef,
-    ) -> OSStatus;
-
-    /// MIDIReceived - injects packets at a virtual source endpoint.
-    /// Use this for same-process loopback: call on a virtual source, and CoreMIDI
-    /// will route to any connected virtual destinations (triggering their read procs).
-    #[allow(non_snake_case)]
-    fn MIDIReceived(src: MIDIEndpointRef, pktlist: *const MIDIPacketList) -> OSStatus;
-
-    /// MIDIEndpointDispose - disposes of an endpoint.
-    #[allow(non_snake_case)]
-    fn MIDIEndpointDispose(endpoint: MIDIEndpointRef) -> OSStatus;
+    /// MIDIDestinationCreate / MIDISourceCreate / MIDIReceived / MIDIEndpointDispose
+    /// and the MIDIReadProc type were test-only (same-process loopback) and are
+    /// declared locally in `tests/coremidi_host.rs` instead — keeping them here
+    /// (private) made them dead code in the lib build. Production uses only the
+    /// client/port/send/dispose functions above + below.
 
     /// MIDIClientDispose - disposes of a client.
     #[allow(non_snake_case)]
     fn MIDIClientDispose(client: MIDIClientRef) -> OSStatus;
 }
-
-/// MIDI read callback type (for virtual destination in tests only).
-/// Private to avoid leaking into public C header.
-#[allow(non_snake_case)]
-type MIDIReadProc =
-    extern "C" fn(pktlist: *const MIDIPacketList, srcConnRefCon: *mut (), refCon: *mut ());
 
 // ============================================================================
 // MIDIPacketList layout

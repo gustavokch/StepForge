@@ -154,6 +154,10 @@ pub struct RtState {
     /// thread is the sole writer; `begin_play` resets it to 0 so the loop
     /// catches up to the current Link position on play-start.
     pub link_step_count: u64,
+    /// Global 16th-step position within the 16-step bar (0..STEP_COUNT). Drives
+    /// scheduler boundary detection (`check_scheduler`). +1 per `process` call
+    /// when playing; reset on play-start / retrigger / pattern switch.
+    pub global_step: u32,
 }
 impl RtState {
     pub fn new(seed: u64) -> Self {
@@ -164,6 +168,7 @@ impl RtState {
             }),
             rng: Rng::new(seed),
             link_step_count: 0,
+            global_step: 0,
         }
     }
 }
@@ -198,6 +203,10 @@ pub struct Engine {
     /// External-clock shared state (E6). Worker writes via `apply_command`
     /// (`LinkPhase` / `MidiClockTick`); the RT loop reads via atomic loads.
     pub external_clock: Arc<ExternalClock>,
+    /// Scheduler shared state. Worker writes (`QueuePattern`/`CancelQueuedPattern`/
+    /// `RetriggerPattern`); the RT loop reads/fires at quantize boundaries
+    /// (`check_scheduler`); the worker observes the resulting `switch_request`.
+    pub scheduler: Arc<crate::scheduler::SchedulerClock>,
     /// Monotonic counter bumped each time a `LoadSession` restores the session
     /// (amendment A15). Lets the RT/CoreMIDI side detect a reload and react
     /// (e.g. drop stale per-track state). Read via `Acquire`; the worker bumps
@@ -223,6 +232,7 @@ impl Engine {
             undo: Mutex::new(Undo::default()),
             clipboard: Mutex::new(Clipboard::default()),
             external_clock: Arc::new(ExternalClock::new()),
+            scheduler: Arc::new(crate::scheduler::SchedulerClock::default()),
             reload_generation: AtomicU32::new(0),
         }
     }
@@ -293,7 +303,7 @@ impl Engine {
             let snap = self.snapshot.load(); // zero-alloc Guard; immutable for the tick
             match snap.sync_source {
                 crate::models::SyncSource::Free => {
-                    process(&mut rt, &snap, playing, now, &self.midi, &self.hot_events);
+                    self.process_one(&mut rt, &snap, playing, now);
                     let period = (60.0 / snap.bpm / 4.0 * 1_000_000.0) as u64;
                     clock.sleep_until(now + period);
                 }
@@ -305,7 +315,7 @@ impl Engine {
                         .midi_step_pulses
                         .swap(0, Ordering::AcqRel);
                     for _ in 0..pulses {
-                        process(&mut rt, &snap, playing, now, &self.midi, &self.hot_events);
+                        self.process_one(&mut rt, &snap, playing, now);
                     }
                     // Short poll-sleep: external clocks drive cadence, the RT
                     // thread just needs to wake often enough to consume pulses
@@ -322,12 +332,45 @@ impl Engine {
                     let beats = link_micros as f64 / 1_000_000.0;
                     let target = (beats * 4.0) as u64;
                     while rt.link_step_count < target {
-                        process(&mut rt, &snap, playing, now, &self.midi, &self.hot_events);
+                        self.process_one(&mut rt, &snap, playing, now);
                         rt.link_step_count += 1;
                     }
                     clock.sleep_until(now + 500);
                 }
             }
+        }
+    }
+
+    /// One global 16th step: dispatch via [`process`], advance the bar position,
+    /// and check the scheduler at the resulting boundary. RT-safe — `process` is,
+    /// and `check_scheduler` does only atomic ops + a bounded ring push + local
+    /// counter resets (Hard Rule 1).
+    fn process_one(&self, rt: &mut RtState, snap: &Session, playing: bool, now_micros: u64) {
+        process(rt, snap, playing, now_micros, &self.midi, &self.hot_events);
+        if !playing {
+            return;
+        }
+        rt.global_step = (rt.global_step + 1) % crate::models::STEP_COUNT as u32;
+        self.check_scheduler(rt, snap);
+    }
+
+    /// RT: fire a queued pattern switch / retrigger at the current boundary.
+    /// Atomic loads + a bounded all-notes-off ring burst + local counter resets
+    /// only — no alloc/lock/FFI (Hard Rule 1).
+    fn check_scheduler(&self, rt: &mut RtState, snap: &Session) {
+        if self.scheduler.take_retrigger() {
+            for s in rt.per_track.iter_mut() {
+                s.step_idx = 0;
+            }
+            rt.global_step = 0;
+        }
+        if let Some(idx) = self.scheduler.take_if_due(rt.global_step) {
+            crate::scheduler::all_notes_off_burst(snap, &self.midi);
+            self.scheduler.request_switch(idx);
+            for s in rt.per_track.iter_mut() {
+                s.step_idx = 0;
+            }
+            rt.global_step = 0;
         }
     }
 
@@ -503,8 +546,20 @@ impl Engine {
                     },
                 );
             }
-            // Scheduler stubs — Task 16 wires the pattern queue + quantize.
-            QueuePattern { .. } | CancelQueuedPattern | RetriggerPattern { .. } => { /* Task 16 */ }
+            // Scheduler (Task 16 module, wired here): the worker records the
+            // request in atomics; the RT loop fires it at the quantize boundary
+            // (`check_scheduler`); the worker then publishes the switch.
+            QueuePattern { index, quantize } => {
+                self.scheduler.queue(index, quantize);
+            }
+            CancelQueuedPattern => {
+                self.scheduler.cancel();
+            }
+            RetriggerPattern { .. } => {
+                // Retrigger restarts the current pattern from step 0; the RT loop
+                // resets step counters at the next step boundary (NextStep semantics).
+                self.scheduler.request_retrigger();
+            }
             other => {
                 let mut s = (*self.snapshot.load_full()).clone();
                 match other {
@@ -589,6 +644,14 @@ impl Engine {
     /// Worker thread body: drain commands until shutdown.
     pub fn run_worker_loop(self: &Arc<Engine>) {
         while !self.shutdown.load(Ordering::Acquire) {
+            // Apply any RT-requested pattern switch promptly (the RT loop fired it
+            // at a quantize boundary; publish the new active_pattern_index + emit
+            // PatternSwitched). Wrapped in catch_unwind like commands.
+            if let Some(idx) = self.scheduler.take_switch() {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.apply_pattern_switch(idx)
+                }));
+            }
             if let Some(cmd) = self.commands.dequeue() {
                 // Panic-proof the worker: a panicking command is dropped and the
                 // worker survives (mirrors the FFI catch_unwind panic-safety).
@@ -603,6 +666,21 @@ impl Engine {
                 std::thread::sleep(std::time::Duration::from_micros(200));
             }
         }
+    }
+
+    /// Worker: publish an RT-requested pattern switch (COW) + emit `PatternSwitched`.
+    /// Validates the index (defensive against a corrupt request).
+    fn apply_pattern_switch(&self, idx: usize) {
+        if idx >= crate::models::PATTERN_SLOTS {
+            return;
+        }
+        let mut s = (*self.snapshot.load_full()).clone();
+        s.active_pattern_index = idx;
+        self.publish(s);
+        crate::midi_out::push_event(
+            &self.hot_events,
+            &EngineEvent::PatternSwitched { index: idx },
+        );
     }
 }
 
@@ -928,5 +1006,74 @@ mod tests {
             validate_session(&with_pattern(p)),
             "length == STEP_COUNT is valid"
         );
+    }
+
+    #[test]
+    fn scheduler_wiring_queue_fires_and_switches() {
+        // Full no-threads wiring: worker queues → RT fires at the boundary →
+        // worker publishes the switch + emits PatternSwitched.
+        use crate::command::Command;
+        use crate::models::{Pattern, QuantizeGrain, Step, VelocityZone};
+        let e = Engine::new();
+        // two populated patterns, active = 0
+        let mut s = Session::default();
+        s.patterns[0] = Some(Pattern::default());
+        let mut p1 = Pattern::default();
+        p1.tracks[0].steps[0] = Step {
+            active: true,
+            velocity_zone: VelocityZone::Accent,
+            ..Default::default()
+        };
+        s.patterns[1] = Some(p1);
+        s.active_pattern_index = 0;
+        e.publish(s);
+
+        // worker: queue pattern 1 at NextBar
+        e.apply_command(Command::QueuePattern {
+            index: 1,
+            quantize: QuantizeGrain::NextBar,
+        });
+
+        // RT: at a bar boundary (global_step 0 → EndOfPattern), check_scheduler fires.
+        // global_step 0 satisfies NextBar (via EndOfPattern).
+        let mut rt = e.new_rt_state(); // global_step == 0
+        let snap = e.snapshot_arc();
+        e.check_scheduler(&mut rt, &snap);
+        // RT requested the switch; all-notes-off burst pushed (MAX_TRACKS msgs)
+        assert_eq!(e.scheduler.take_switch(), Some(1));
+        for _ in 0..crate::models::MAX_TRACKS {
+            assert!(e.midi.dequeue().is_some(), "all-notes-off burst pushed");
+        }
+
+        // worker: apply the switch → active_pattern_index == 1 + PatternSwitched
+        e.apply_pattern_switch(1);
+        assert_eq!(e.snapshot_arc().active_pattern_index, 1);
+        let slot = e.hot_events.dequeue().expect("a PatternSwitched event");
+        let ev: crate::event::EngineEvent =
+            postcard::from_bytes(&slot.bytes[..slot.len as usize]).unwrap();
+        assert_eq!(ev, crate::event::EngineEvent::PatternSwitched { index: 1 });
+    }
+
+    #[test]
+    fn scheduler_retrigger_resets_step_counters() {
+        use crate::command::Command;
+        use crate::models::Pattern;
+        let e = Engine::new();
+        let mut s = Session::default();
+        s.patterns[0] = Some(Pattern::default());
+        e.publish(s);
+        let mut rt = e.new_rt_state();
+        rt.per_track[0].step_idx = 7; // mid-pattern
+        rt.global_step = 5;
+        e.apply_command(Command::RetriggerPattern {
+            quantize: crate::models::QuantizeGrain::NextStep,
+        });
+        let snap = e.snapshot_arc();
+        e.check_scheduler(&mut rt, &snap);
+        assert_eq!(
+            rt.per_track[0].step_idx, 0,
+            "retrigger resets step counters"
+        );
+        assert_eq!(rt.global_step, 0);
     }
 }

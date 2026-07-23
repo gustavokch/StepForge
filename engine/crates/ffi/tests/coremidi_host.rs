@@ -28,6 +28,9 @@
 //! ```
 
 #![cfg(target_os = "macos")]
+// Local CoreMIDI/CoreFoundation FFI plumbing: Apple's C API uses CamelCase +
+// some reference declarations are unused in the host test. Allow both file-wide.
+#![allow(non_snake_case, dead_code)]
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -55,11 +58,16 @@ struct MIDIPacketList {
 type MIDIPacket = ();
 
 // MIDI read callback type
-type MIDIReadProc = extern "C" fn(pktlist: *const MIDIPacketList, srcConnRefCon: *mut (), refCon: *mut ());
+type MIDIReadProc =
+    extern "C" fn(pktlist: *const MIDIPacketList, srcConnRefCon: *mut (), refCon: *mut ());
 
 extern "C" {
     #[allow(non_snake_case)]
-    fn MIDISend(port: MIDIPortRef, dest: MIDIEndpointRef, pktlist: *const MIDIPacketList) -> OSStatus;
+    fn MIDISend(
+        port: MIDIPortRef,
+        dest: MIDIEndpointRef,
+        pktlist: *const MIDIPacketList,
+    ) -> OSStatus;
 
     #[allow(non_snake_case)]
     fn MIDIPacketListInit(pktlist: *mut MIDIPacketList) -> *mut MIDIPacket;
@@ -75,13 +83,26 @@ extern "C" {
     ) -> *mut MIDIPacket;
 
     #[allow(non_snake_case)]
-    fn CFStringCreateWithCString(alloc: CFAllocatorRef, cStr: *const i8, encoding: u32) -> CFStringRef;
+    fn CFStringCreateWithCString(
+        alloc: CFAllocatorRef,
+        cStr: *const i8,
+        encoding: u32,
+    ) -> CFStringRef;
 
     #[allow(non_snake_case)]
-    fn MIDIClientCreate(name: CFStringRef, notify: *const (), refCon: *mut (), outClient: *mut MIDIClientRef) -> OSStatus;
+    fn MIDIClientCreate(
+        name: CFStringRef,
+        notify: *const (),
+        refCon: *mut (),
+        outClient: *mut MIDIClientRef,
+    ) -> OSStatus;
 
     #[allow(non_snake_case)]
-    fn MIDIOutputPortCreate(client: MIDIClientRef, portName: CFStringRef, outPort: *mut MIDIPortRef) -> OSStatus;
+    fn MIDIOutputPortCreate(
+        client: MIDIClientRef,
+        portName: CFStringRef,
+        outPort: *mut MIDIPortRef,
+    ) -> OSStatus;
 
     #[allow(non_snake_case)]
     fn MIDIDestinationCreate(
@@ -93,7 +114,11 @@ extern "C" {
     ) -> OSStatus;
 
     #[allow(non_snake_case)]
-    fn MIDISourceCreate(client: MIDIClientRef, name: CFStringRef, outSrc: *mut MIDIEndpointRef) -> OSStatus;
+    fn MIDISourceCreate(
+        client: MIDIClientRef,
+        name: CFStringRef,
+        outSrc: *mut MIDIEndpointRef,
+    ) -> OSStatus;
 
     #[allow(non_snake_case)]
     fn MIDIReceived(src: MIDIEndpointRef, pktlist: *const MIDIPacketList) -> OSStatus;
@@ -523,9 +548,8 @@ fn coremidi_ffi_bindings_are_callable() {
 
     // Client create/dispose
     let mut client: usize = 0;
-    let status = unsafe {
-        MIDIClientCreate(cfstr, std::ptr::null(), std::ptr::null_mut(), &mut client)
-    };
+    let status =
+        unsafe { MIDIClientCreate(cfstr, std::ptr::null(), std::ptr::null_mut(), &mut client) };
     assert_eq!(status, 0, "MIDIClientCreate should succeed");
     assert_ne!(client, 0, "Client should be non-zero");
 

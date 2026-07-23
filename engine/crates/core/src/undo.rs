@@ -19,7 +19,11 @@ pub struct TrackSnapshot {
 
 impl TrackSnapshot {
     pub fn of(track: &Track) -> Self {
-        Self { steps: track.steps, length: track.length, speed_ratio: track.speed_ratio }
+        Self {
+            steps: track.steps,
+            length: track.length,
+            speed_ratio: track.speed_ratio,
+        }
     }
 }
 
@@ -28,7 +32,9 @@ pub struct Undo {
 }
 impl Default for Undo {
     fn default() -> Self {
-        Self { slots: std::array::from_fn(|_| None) }
+        Self {
+            slots: std::array::from_fn(|_| None),
+        }
     }
 }
 
@@ -48,7 +54,11 @@ impl Undo {
         let Some(snap) = self.slots[idx].take() else {
             return false;
         };
-        let Some(p) = s.patterns.get_mut(s.active_pattern_index).and_then(|opt| opt.as_mut()) else {
+        let Some(p) = s
+            .patterns
+            .get_mut(s.active_pattern_index)
+            .and_then(|opt| opt.as_mut())
+        else {
             return false;
         };
         let Some(t) = p.tracks.get_mut(idx) else {
