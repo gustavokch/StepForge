@@ -14,7 +14,8 @@ uuid = { workspace = true }
 arc-swap = { workspace = true }
 heapless = { workspace = true }
 postcard = { workspace = true }
-ableton-link-rs = "0.1.2"
+ableton-link = { package = "ableton-link-rs", version = "0.1.2" }
+tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread"] }
 
 [dev-dependencies]
 postcard = { workspace = true }

@@ -19,6 +19,7 @@ use arc_swap::ArcSwap;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
+use ableton_link::link::BasicLink as Link;
 
 fn active_pattern_mut(s: &mut Session) -> Option<&mut crate::models::Pattern> {
     s.patterns[s.active_pattern_index].as_mut()
@@ -127,14 +128,23 @@ pub struct ExternalClock {
     pub link_beats_micros: AtomicU64,
     /// Whether the native Ableton Link session is enabled (Task 1).
     pub link_enabled: AtomicBool,
+    pub link: Mutex<Link>,
+    pub tokio_rt: tokio::runtime::Runtime,
 }
 impl ExternalClock {
     pub fn new() -> Self {
+        let tokio_rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let link = tokio_rt.block_on(Link::new(120.0));
         Self {
             midi_ticks: AtomicU32::new(0),
             midi_step_pulses: AtomicU32::new(0),
             link_beats_micros: AtomicU64::new(0),
             link_enabled: AtomicBool::new(false),
+            link: Mutex::new(link),
+            tokio_rt,
         }
     }
 }
@@ -163,6 +173,7 @@ pub struct RtState {
     pub global_step: u32,
     pub track_count: usize,
     pub loop_count: u32,
+    pub link_peers: usize,
 }
 impl RtState {
     pub fn new(seed: u64) -> Self {
@@ -176,6 +187,7 @@ impl RtState {
             global_step: 0,
             track_count: 0,
             loop_count: 0,
+            link_peers: 0,
         }
     }
 }
@@ -333,17 +345,23 @@ impl Engine {
                     clock.sleep_until(now + 500);
                 }
                 crate::models::SyncSource::Link => {
-                    let link_micros = self
-                        .external_clock
-                        .link_beats_micros
-                        .load(Ordering::Acquire);
-                    // `link_beats_micros` is `beats_since_origin * 1_000_000`;
-                    // convert back to beats, then to 16th-steps (×4).
-                    let beats = link_micros as f64 / 1_000_000.0;
-                    let target = (beats * 4.0) as u64;
-                    while rt.link_step_count < target {
-                        self.process_one(&mut rt, &snap, playing, now);
-                        rt.link_step_count += 1;
+                    if let Ok(link) = self.external_clock.link.try_lock() {
+                        let state = link.capture_app_session_state();
+                        let time = link.clock().micros();
+                        let beats = state.beat_at_time(time, 4.0);
+                        let target = (beats * 4.0) as u64;
+                        while rt.link_step_count < target {
+                            self.process_one(&mut rt, &snap, playing, now);
+                            rt.link_step_count += 1;
+                        }
+                        let peers = link.num_peers();
+                        if peers as usize != rt.link_peers {
+                            rt.link_peers = peers as usize;
+                            let _ = crate::midi_out::push_event(
+                                &self.hot_events,
+                                &crate::event::EngineEvent::LinkPeersChanged { count: peers as usize },
+                            );
+                        }
                     }
                     clock.sleep_until(now + 500);
                 }
@@ -481,6 +499,13 @@ impl Engine {
                 );
             }
             SetLinkEnabled { enabled } => {
+                if let Ok(mut link) = self.external_clock.link.lock() {
+                    if enabled {
+                        self.external_clock.tokio_rt.block_on(link.enable());
+                    } else {
+                        self.external_clock.tokio_rt.block_on(link.disable());
+                    }
+                }
                 self.external_clock
                     .link_enabled
                     .store(enabled, Ordering::Release);
