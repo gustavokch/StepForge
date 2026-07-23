@@ -19,7 +19,32 @@ use arc_swap::ArcSwap;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
+#[cfg(not(target_os = "ios"))]
 use ableton_link::link::BasicLink as Link;
+
+#[cfg(target_os = "ios")]
+pub struct Link;
+#[cfg(target_os = "ios")]
+impl Link {
+    pub fn new(_bpm: f64) -> Self { Self }
+    pub async fn enable(&mut self) {}
+    pub async fn disable(&mut self) {}
+    pub fn capture_app_session_state(&self) -> DummySessionState { DummySessionState }
+    pub fn clock(&self) -> DummyClock { DummyClock }
+    pub fn num_peers(&self) -> u32 { 0 }
+}
+#[cfg(target_os = "ios")]
+pub struct DummySessionState;
+#[cfg(target_os = "ios")]
+impl DummySessionState {
+    pub fn beat_at_time(&self, _time: u64, _quantum: f64) -> f64 { 0.0 }
+}
+#[cfg(target_os = "ios")]
+pub struct DummyClock;
+#[cfg(target_os = "ios")]
+impl DummyClock {
+    pub fn micros(&self) -> u64 { 0 }
+}
 
 fn active_pattern_mut(s: &mut Session) -> Option<&mut crate::models::Pattern> {
     s.patterns[s.active_pattern_index].as_mut()
@@ -129,21 +154,28 @@ pub struct ExternalClock {
     /// Whether the native Ableton Link session is enabled (Task 1).
     pub link_enabled: AtomicBool,
     pub link: Mutex<Link>,
+    #[cfg(not(target_os = "ios"))]
     pub tokio_rt: tokio::runtime::Runtime,
 }
 impl ExternalClock {
     pub fn new() -> Self {
+        #[cfg(not(target_os = "ios"))]
         let tokio_rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .unwrap();
+        #[cfg(not(target_os = "ios"))]
         let link = tokio_rt.block_on(Link::new(120.0));
+        #[cfg(target_os = "ios")]
+        let link = Link::new(120.0);
+
         Self {
             midi_ticks: AtomicU32::new(0),
             midi_step_pulses: AtomicU32::new(0),
             link_beats_micros: AtomicU64::new(0),
             link_enabled: AtomicBool::new(false),
             link: Mutex::new(link),
+            #[cfg(not(target_os = "ios"))]
             tokio_rt,
         }
     }
@@ -500,11 +532,16 @@ impl Engine {
             }
             SetLinkEnabled { enabled } => {
                 if let Ok(mut link) = self.external_clock.link.lock() {
-                    if enabled {
-                        self.external_clock.tokio_rt.block_on(link.enable());
-                    } else {
-                        self.external_clock.tokio_rt.block_on(link.disable());
+                    #[cfg(not(target_os = "ios"))]
+                    {
+                        if enabled {
+                            self.external_clock.tokio_rt.block_on(link.enable());
+                        } else {
+                            self.external_clock.tokio_rt.block_on(link.disable());
+                        }
                     }
+                    #[cfg(target_os = "ios")]
+                    let _ = &mut link;
                 }
                 self.external_clock
                     .link_enabled

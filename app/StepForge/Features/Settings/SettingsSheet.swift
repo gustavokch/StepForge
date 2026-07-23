@@ -70,8 +70,25 @@ struct SettingsSheet: View {
                 } header: { Text("MIDI Routing") }
 
                 Section {
-                    Text("Free / MIDI Clock / Link — Phase 3").foregroundStyle(Theme.textMuted)
-                } header: { Text("Sync") }
+                    Picker("Sync Source", selection: Binding(
+                        get: { bridge.mirror.syncSource },
+                        set: { bridge.submit(.setSyncSource(source: $0)) }
+                    )) {
+                        ForEach(SyncSource.allCases, id: \.self) { source in
+                            Text(source.label).tag(source)
+                        }
+                    }
+                    .foregroundStyle(Theme.textPrimary)
+
+                    Toggle("Enable Ableton Link", isOn: Binding(
+                        get: { bridge.mirror.linkEnabled },
+                        set: { bridge.submit(.setLinkEnabled(enabled: $0)) }
+                    ))
+                    .tint(Theme.primary)
+
+                    LabeledContent("Connected Link Peers", value: "\(bridge.mirror.linkPeers)")
+                        .foregroundStyle(Theme.textPrimary)
+                } header: { Text("Sync & Ableton Link") }
             }
             #if os(macOS)
             .listStyle(.inset)
