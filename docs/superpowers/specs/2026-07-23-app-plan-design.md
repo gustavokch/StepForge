@@ -60,8 +60,7 @@ This design document specifies the complete architecture, UI component extension
    - Add strength slider dials ($0.0 .. 1.0$, default $0.6$ for Roll, $0.5$ for Vary) before triggering Roll/Vary actions.
    - Retain `✕ Revert` (submits `Command.undo(trackIdx:)`) and `✓ Keep` affordances.
 
-3. **Transport & Feel Bar Additions (`TransportBar.swift`, `FeelBar.swift`)**:
-   - **Tap Tempo**: Tap-tempo button in `TransportBar` calculating average delta between taps and submitting `Command.setBpm(bpm:)`.
+3. **Feel Bar Addition (`FeelBar.swift`)**:
    - **Pattern Management Button**: Add Patterns button to `FeelBar` (Row 2) to open the 3x3 pattern popover directly from Editing View.
 
 4. **Track List Auto-Scroll (`TrackList.swift`)**:
