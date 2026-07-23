@@ -101,8 +101,19 @@ fn midisend_to_virtual_destination() {
         let dest_name = cfstring_from_str("StepForge-recv");
         let port_name = cfstring_from_str("StepForge-out");
 
-        MIDIClientCreate(client_name, std::ptr::null(), std::ptr::null_mut(), &mut client);
-        MIDIDestinationCreate(client, dest_name, read_proc, std::ptr::null_mut(), &mut destination);
+        MIDIClientCreate(
+            client_name,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            &mut client,
+        );
+        MIDIDestinationCreate(
+            client,
+            dest_name,
+            read_proc,
+            std::ptr::null_mut(),
+            &mut destination,
+        );
         MIDIOutputPortCreate(client, port_name, &mut port);
     }
 
@@ -113,12 +124,11 @@ fn midisend_to_virtual_destination() {
 
     unsafe {
         let mut buffer: [u8; 256] = [0; 256];
-        let pktlist_ptr = buffer.as_mut_ptr() as *mut sequencer_engine_ffi::coremidi::MIDIPacketList;
+        let pktlist_ptr =
+            buffer.as_mut_ptr() as *mut sequencer_engine_ffi::coremidi::MIDIPacketList;
         let pkt_ptr = MIDIPacketListInit(pktlist_ptr);
 
-        let result = MIDIPacketListAdd(
-            pktlist_ptr, 256, pkt_ptr, 0, 3, note_on.as_ptr(),
-        );
+        let result = MIDIPacketListAdd(pktlist_ptr, 256, pkt_ptr, 0, 3, note_on.as_ptr());
         assert!(!result.is_null());
 
         // This will not deliver to same-process virtual destination
@@ -169,9 +179,8 @@ fn midisend_to_virtual_destination() {
 #[ignore = "CoreMIDI same-process virtual endpoint routing is environment-dependent"]
 fn midi_received_from_virtual_source_to_destination() {
     use sequencer_engine_ffi::coremidi::{
-        cfstring_from_str, MIDIClientCreate, MIDIClientDispose,
-        MIDIDestinationCreate, MIDIEndpointDispose, MIDISourceCreate, MIDIReceived,
-        MIDIPacketListAdd, MIDIPacketListInit,
+        cfstring_from_str, MIDIClientCreate, MIDIClientDispose, MIDIDestinationCreate,
+        MIDIEndpointDispose, MIDIPacketListAdd, MIDIPacketListInit, MIDIReceived, MIDISourceCreate,
     };
 
     let mut client: usize = 0;
@@ -183,9 +192,20 @@ fn midi_received_from_virtual_source_to_destination() {
         let src_name = cfstring_from_str("StepForge-source");
         let dest_name = cfstring_from_str("StepForge-dest");
 
-        MIDIClientCreate(client_name, std::ptr::null(), std::ptr::null_mut(), &mut client);
+        MIDIClientCreate(
+            client_name,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            &mut client,
+        );
         MIDISourceCreate(client, src_name, &mut source);
-        MIDIDestinationCreate(client, dest_name, read_proc, std::ptr::null_mut(), &mut destination);
+        MIDIDestinationCreate(
+            client,
+            dest_name,
+            read_proc,
+            std::ptr::null_mut(),
+            &mut destination,
+        );
     }
 
     RECV.lock().unwrap().clear();
@@ -194,12 +214,11 @@ fn midi_received_from_virtual_source_to_destination() {
 
     unsafe {
         let mut buffer: [u8; 256] = [0; 256];
-        let pktlist_ptr = buffer.as_mut_ptr() as *mut sequencer_engine_ffi::coremidi::MIDIPacketList;
+        let pktlist_ptr =
+            buffer.as_mut_ptr() as *mut sequencer_engine_ffi::coremidi::MIDIPacketList;
         let pkt_ptr = MIDIPacketListInit(pktlist_ptr);
 
-        let result = MIDIPacketListAdd(
-            pktlist_ptr, 256, pkt_ptr, 0, 3, note_on.as_ptr(),
-        );
+        let result = MIDIPacketListAdd(pktlist_ptr, 256, pkt_ptr, 0, 3, note_on.as_ptr());
         assert!(!result.is_null());
 
         let status = MIDIReceived(source, pktlist_ptr);
@@ -243,9 +262,8 @@ fn midi_received_from_virtual_source_to_destination() {
 #[ignore = "CoreMIDI same-process virtual endpoint routing is environment-dependent"]
 fn midi_received_multiple_packets_in_order() {
     use sequencer_engine_ffi::coremidi::{
-        cfstring_from_str, MIDIClientCreate, MIDIClientDispose,
-        MIDIDestinationCreate, MIDIEndpointDispose, MIDISourceCreate, MIDIReceived,
-        MIDIPacketListAdd, MIDIPacketListInit,
+        cfstring_from_str, MIDIClientCreate, MIDIClientDispose, MIDIDestinationCreate,
+        MIDIEndpointDispose, MIDIPacketListAdd, MIDIPacketListInit, MIDIReceived, MIDISourceCreate,
     };
 
     let mut client: usize = 0;
@@ -257,9 +275,20 @@ fn midi_received_multiple_packets_in_order() {
         let src_name = cfstring_from_str("StepForge-source-multi");
         let dest_name = cfstring_from_str("StepForge-dest-multi");
 
-        MIDIClientCreate(client_name, std::ptr::null(), std::ptr::null_mut(), &mut client);
+        MIDIClientCreate(
+            client_name,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            &mut client,
+        );
         MIDISourceCreate(client, src_name, &mut source);
-        MIDIDestinationCreate(client, dest_name, read_proc, std::ptr::null_mut(), &mut destination);
+        MIDIDestinationCreate(
+            client,
+            dest_name,
+            read_proc,
+            std::ptr::null_mut(),
+            &mut destination,
+        );
     }
 
     RECV.lock().unwrap().clear();
@@ -269,17 +298,14 @@ fn midi_received_multiple_packets_in_order() {
 
     unsafe {
         let mut buffer: [u8; 256] = [0; 256];
-        let pktlist_ptr = buffer.as_mut_ptr() as *mut sequencer_engine_ffi::coremidi::MIDIPacketList;
+        let pktlist_ptr =
+            buffer.as_mut_ptr() as *mut sequencer_engine_ffi::coremidi::MIDIPacketList;
         let mut pkt_ptr = MIDIPacketListInit(pktlist_ptr);
 
-        pkt_ptr = MIDIPacketListAdd(
-            pktlist_ptr, 256, pkt_ptr, 0, 3, note_on.as_ptr(),
-        );
+        pkt_ptr = MIDIPacketListAdd(pktlist_ptr, 256, pkt_ptr, 0, 3, note_on.as_ptr());
         assert!(!pkt_ptr.is_null());
 
-        let result = MIDIPacketListAdd(
-            pktlist_ptr, 256, pkt_ptr, 0, 3, note_off.as_ptr(),
-        );
+        let result = MIDIPacketListAdd(pktlist_ptr, 256, pkt_ptr, 0, 3, note_off.as_ptr());
         assert!(!result.is_null());
 
         let status = MIDIReceived(source, pktlist_ptr);
@@ -379,8 +405,8 @@ fn send_one_builds_wellformed_packet_list() {
             pktlist_ptr,
             256,
             pkt_ptr,
-            0,          // timeStamp = 0 (immediate)
-            3,          // data length
+            0, // timeStamp = 0 (immediate)
+            3, // data length
             test_bytes.as_ptr(),
         );
 
@@ -437,12 +463,7 @@ fn coremidi_ffi_bindings_are_callable() {
     // Client create/dispose
     let mut client: usize = 0;
     let status = unsafe {
-        coremidi::MIDIClientCreate(
-            cfstr,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            &mut client,
-        )
+        coremidi::MIDIClientCreate(cfstr, std::ptr::null(), std::ptr::null_mut(), &mut client)
     };
     assert_eq!(status, 0, "MIDIClientCreate should succeed");
     assert_ne!(client, 0, "Client should be non-zero");
@@ -507,18 +528,29 @@ fn worker_schedules_note_on_then_note_off() {
     assert_eq!(pending.len(), 2, "Should have Note-On and Note-Off");
 
     // Verify order: Note-On before Note-Off
-    assert!(pending[0].0 < pending[1].0, "Note-On should fire before Note-Off");
+    assert!(
+        pending[0].0 < pending[1].0,
+        "Note-On should fire before Note-Off"
+    );
 
     // Verify Note-On content
     assert_eq!(pending[0].1, endpoint, "Note-On endpoint should match");
-    assert_eq!(pending[0].2[0], 0x90 | channel, "Note-On status should match");
+    assert_eq!(
+        pending[0].2[0],
+        0x90 | channel,
+        "Note-On status should match"
+    );
     assert_eq!(pending[0].2[1], note, "Note-On note should match");
     assert_eq!(pending[0].2[2], velocity, "Note-On velocity should match");
 
     // Verify Note-Off content
     // Note: Worker uses Note-On with velocity 0 for Note-Off (valid MIDI convention)
     assert_eq!(pending[1].1, endpoint, "Note-Off endpoint should match");
-    assert_eq!(pending[1].2[0], 0x90 | channel, "Note-Off (Note-On v=0) status should match");
+    assert_eq!(
+        pending[1].2[0],
+        0x90 | channel,
+        "Note-Off (Note-On v=0) status should match"
+    );
     assert_eq!(pending[1].2[1], note, "Note-Off note should match");
     assert_eq!(pending[1].2[2], 0, "Note-Off velocity should be 0");
 
@@ -566,7 +598,10 @@ fn stop_generation_change_clears_pending_sends() {
     }
 
     // Verify queue is now empty
-    assert!(eng.midi.dequeue().is_none(), "Queue should be empty after drain");
+    assert!(
+        eng.midi.dequeue().is_none(),
+        "Queue should be empty after drain"
+    );
 }
 
 /// Validates All-Notes-Off message format for a given channel.

@@ -57,7 +57,7 @@ pub fn swing_offset_micros(
     step_idx: usize,
     step_period_micros: u64,
 ) -> i64 {
-    if step_idx % 2 == 0 {
+    if step_idx.is_multiple_of(2) {
         return 0;
     } // downbeats unaffected
     let frac = (effective_swing_pct / 100.0).clamp(0.0, 0.49);

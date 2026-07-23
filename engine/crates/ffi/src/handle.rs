@@ -42,7 +42,9 @@ pub unsafe fn free_handle(handle: *mut EngineHandle) {
     // signal it now and join any still-running threads.
     // This prevents a runaway RT thread from reading freed memory.
     if !engine.shutdown.load(std::sync::atomic::Ordering::Acquire) {
-        engine.shutdown.store(true, std::sync::atomic::Ordering::Release);
+        engine
+            .shutdown
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     // Join RT handle if still Some

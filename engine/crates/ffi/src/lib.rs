@@ -101,6 +101,11 @@ pub unsafe extern "C" fn engine_free(engine: *mut EngineHandle) {
 /// Returns `ErrOther` if CoreMIDI client/port creation fails (non-fatal —
 /// playback runs but MIDI won't send). The handle becomes shared across
 /// the three threads via `Arc<Engine>` (Task 20a).
+///
+/// # Safety
+/// `engine` is NULL or a handle from [`engine_new`]; caller upholds Hard Rule 5
+/// (no concurrent `engine_*` calls on the same handle). Must not be called on a
+/// handle that is already running or that has been freed.
 #[no_mangle]
 pub unsafe extern "C" fn engine_start(engine: *mut EngineHandle) -> EngineResult {
     match catch_unwind(AssertUnwindSafe(|| {
@@ -167,11 +172,17 @@ pub unsafe extern "C" fn engine_start(engine: *mut EngineHandle) -> EngineResult
 
 /// Stop playback. Signals shutdown, joins all three threads, and disposes
 /// the CoreMIDI client/port. Must return before `engine_free` (Rule 5).
+///
+/// # Safety
+/// `engine` is NULL or a handle from [`engine_new`] that was previously started
+/// with [`engine_start`]; caller upholds Hard Rule 5 (no concurrent `engine_*`
+/// calls on the same handle). NULL returns `ErrInvalidHandle`.
 #[no_mangle]
 pub unsafe extern "C" fn engine_stop(engine: *mut EngineHandle) -> EngineResult {
     run_void(engine, |eng| {
         // Signal shutdown
-        eng.shutdown.store(true, std::sync::atomic::Ordering::Release);
+        eng.shutdown
+            .store(true, std::sync::atomic::Ordering::Release);
 
         // Join RT thread
         if let Some(handle) = eng.rt_handle.lock().unwrap().take() {
@@ -239,7 +250,12 @@ pub unsafe extern "C" fn engine_submit_command(
                     use sequencer_engine::event::EngineEvent;
                     use sequencer_engine::midi_out::push_event;
                     let dropped_u32 = dropped as u32;
-                    let _ = push_event(&eng.hot_events, &EngineEvent::Overflow { dropped: dropped_u32 });
+                    let _ = push_event(
+                        &eng.hot_events,
+                        &EngineEvent::Overflow {
+                            dropped: dropped_u32,
+                        },
+                    );
                 }
                 Ok(())
             }

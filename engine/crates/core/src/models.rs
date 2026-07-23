@@ -79,20 +79,15 @@ impl Default for FollowAction {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub enum FollowActionType {
+    #[default]
     None,
     PlayNext,
     PlaySpecific(Uuid),
     PlayPrevious,
     Stop,
     PlayRandom,
-}
-
-impl Default for FollowActionType {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
