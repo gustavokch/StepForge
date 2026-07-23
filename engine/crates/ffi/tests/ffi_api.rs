@@ -263,39 +263,87 @@ fn load_session_bad_active_pattern_index_no_swap() {
 }
 
 /// Task 20a lifecycle test: full engine lifecycle with threads.
-/// `engine_new → engine_start → submit Play → drain → engine_stop → engine_free`
-/// Verifies no crash and returns Ok throughout. The RT thread only emits
-/// events when there's an active pattern with steps, so we don't assert
-/// event counts here (see set_bpm_integration for a state-change test).
+/// `engine_new → LoadSession(active pattern) → engine_start → Play → drain →
+///  engine_stop → engine_free`.
+///
+/// Verifies no crash and returns Ok throughout, AND asserts the hot channel
+/// actually delivers a real `EngineEvent::Playhead` end-to-end. The default
+/// session has no pattern in any slot, so `process()` emits nothing — to
+/// exercise the hot-drain path we first `LoadSession` a hand-built session
+/// with `patterns[0]` set (active step on track 0). bpm 300 → 50ms per 16th
+/// step, so a 200ms drain window comfortably captures several ticks (each
+/// tick emits one Playhead per non-muted track; 4 default tracks → ~16 events,
+/// well under the 32-slot hot-channel depth).
 #[test]
 fn lifecycle_new_start_play_drain_stop_free_no_crash() {
     use sequencer_engine::command::Command;
+    use sequencer_engine::event::EngineEvent;
+    use sequencer_engine::models::{Pattern, Session, PATTERN_SLOTS};
+    use sequencer_engine::serde_ext::{SessionEnvelope, SESSION_FORMAT_VERSION};
 
     // Create engine
     let h = sequencer_engine_ffi::engine_new();
     assert!(!h.is_null());
 
-    // Start threads (RT + worker + CoreMIDI)
+    // Before start: build a session with an active pattern + an active step so
+    // the RT thread's `process()` emits Playhead events once playing. bpm 300
+    // keeps the 16th-step period at ~50ms so a short drain window suffices.
+    let mut pattern = Pattern::default();
+    pattern.tracks[0].steps[0].active = true;
+    let mut patterns = <[Option<Pattern>; PATTERN_SLOTS]>::default();
+    patterns[0] = Some(pattern);
+    let session = Session {
+        bpm: 300.0,
+        patterns,
+        ..Default::default()
+    };
+    let env = SessionEnvelope {
+        version: SESSION_FORMAT_VERSION,
+        session,
+    };
+    let env_bytes = postcard::to_allocvec(&env).unwrap();
+    let load = postcard::to_allocvec(&Command::LoadSession { bytes: env_bytes }).unwrap();
+    let r = unsafe { sequencer_engine_ffi::engine_submit_command(h, load.as_ptr(), load.len()) };
+    assert_eq!(r, EngineResult::Ok, "LoadSession submit must succeed");
+
+    // Start threads (RT + worker + CoreMIDI). The worker now drains the queued
+    // LoadSession and publishes the active-pattern session (COW snapshot).
     let r = unsafe { sequencer_engine_ffi::engine_start(h) };
     assert_eq!(r, EngineResult::Ok, "engine_start must succeed");
 
-    // Submit Play command
+    // Submit Play — the RT thread begins dispatching once the worker applies it.
     let cmd = postcard::to_allocvec(&Command::Play).unwrap();
     let r = unsafe { sequencer_engine_ffi::engine_submit_command(h, cmd.as_ptr(), cmd.len()) };
     assert_eq!(r, EngineResult::Ok, "Play submit must succeed");
 
-    // Drain a few times (may be empty if no pattern is active)
-    for _ in 0..5 {
+    // Give worker + RT time: worker applies LoadSession + Play; RT ticks at
+    // ~50ms (bpm 300). 200ms captures several Playhead emissions.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // Drain events, decoding each; assert at least one Playhead was delivered
+    // (proves the hot channel → drain → caller-buffer path actually works).
+    let mut saw_playhead = false;
+    for _ in 0..128 {
         let mut ptr = std::ptr::null_mut();
         let mut len = 0usize;
         let r = unsafe { sequencer_engine_ffi::engine_drain_events(h, &mut ptr, &mut len) };
         assert_eq!(r, EngineResult::Ok);
-        if len > 0 {
-            unsafe { sequencer_engine_ffi::engine_free_bytes(ptr, len) };
-        } else {
-            break; // Drained
+        if len == 0 {
+            break;
         }
+        let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
+        if let Ok(ev) = postcard::from_bytes::<EngineEvent>(bytes) {
+            if matches!(ev, EngineEvent::Playhead { .. }) {
+                saw_playhead = true;
+            }
+        }
+        unsafe { sequencer_engine_ffi::engine_free_bytes(ptr, len) };
     }
+    assert!(
+        saw_playhead,
+        "expected at least one Playhead event drained from the hot channel after \
+         Play with an active pattern"
+    );
 
     // Submit Stop command
     let cmd = postcard::to_allocvec(&Command::Stop).unwrap();

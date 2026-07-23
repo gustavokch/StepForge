@@ -112,15 +112,17 @@ pub unsafe extern "C" fn engine_start(engine: *mut EngineHandle) -> EngineResult
         // and the caller upholds Hard Rule 5 (no concurrent free).
         let eng = unsafe { Arc::from_raw(engine as *const Engine) };
 
-        // Create CoreMIDI client and output port (engine owns these per Rule 7)
-        let mut client: coremidi::MIDIClientRef = 0;
-        let mut port: coremidi::MIDIPortRef = 0;
-        let status = unsafe { coremidi::create_client_and_port(&mut client, &mut port) };
-        if status != 0 {
-            // Don't forget eng - we need to decrement the refcount since we're erroring
-            drop(eng);
-            return Err(EngineResult::ErrOther);
-        }
+        // Create CoreMIDI client and output port (engine owns these per Rule 7).
+        // Returns `(usize, usize)` — pointer-sized so the refs survive regardless
+        // of how Apple defines MIDIClientRef/MIDIPortRef (Fix 1, Task 20a review).
+        let (client, port) = match unsafe { coremidi::create_client_and_port() } {
+            Ok(pair) => pair,
+            Err(_) => {
+                // Don't forget eng - decrement the refcount since we're erroring
+                drop(eng);
+                return Err(EngineResult::ErrOther);
+            }
+        };
 
         // Store client/port in the engine for disposal in engine_stop
         *eng.coremidi_client.lock().unwrap() = client;

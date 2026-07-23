@@ -182,11 +182,13 @@ pub struct Engine {
     pub worker_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// CoreMIDI worker handle. NULL before `engine_start` (Task 20a).
     pub coremidi_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
-    /// CoreMIDI client reference (owned by engine, Rule 7). Stored as u32
-    /// (MIDIClientRef) for FFI; 0 means uninitialized.
-    pub coremidi_client: Mutex<u32>,
-    /// CoreMIDI output port reference (owned by engine). 0 means uninitialized.
-    pub coremidi_port: Mutex<u32>,
+    /// CoreMIDI client reference (owned by engine, Rule 7). Stored as `usize`
+    /// (pointer-sized) so the ref survives regardless of how Apple defines
+    /// `MIDIClientRef`; 0 means uninitialized.
+    pub coremidi_client: Mutex<usize>,
+    /// CoreMIDI output port reference (owned by engine). Pointer-sized for the
+    /// same reason; 0 means uninitialized.
+    pub coremidi_port: Mutex<usize>,
     /// Per-track, one-deep undo (Task 12). Mutex-guarded because the worker
     /// applies commands sequentially but the engine is `Send+Sync`; the lock is
     /// never held across an FFI call or on the RT path.
@@ -216,8 +218,8 @@ impl Engine {
             rt_handle: Mutex::new(None),
             worker_handle: Mutex::new(None),
             coremidi_handle: Mutex::new(None),
-            coremidi_client: Mutex::new(0),
-            coremidi_port: Mutex::new(0),
+            coremidi_client: Mutex::new(0usize),
+            coremidi_port: Mutex::new(0usize),
             undo: Mutex::new(Undo::default()),
             clipboard: Mutex::new(Clipboard::default()),
             external_clock: Arc::new(ExternalClock::new()),

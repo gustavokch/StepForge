@@ -92,9 +92,9 @@ fn midisend_to_virtual_destination() {
         MIDIEndpointDispose, MIDIOutputPortCreate, MIDIPacketListAdd, MIDIPacketListInit,
     };
 
-    let mut client: u32 = 0;
-    let mut destination: u32 = 0;
-    let mut port: u32 = 0;
+    let mut client: usize = 0;
+    let mut destination: usize = 0;
+    let mut port: usize = 0;
 
     unsafe {
         let client_name = cfstring_from_str("StepForge-test");
@@ -174,9 +174,9 @@ fn midi_received_from_virtual_source_to_destination() {
         MIDIPacketListAdd, MIDIPacketListInit,
     };
 
-    let mut client: u32 = 0;
-    let mut source: u32 = 0;
-    let mut destination: u32 = 0;
+    let mut client: usize = 0;
+    let mut source: usize = 0;
+    let mut destination: usize = 0;
 
     unsafe {
         let client_name = cfstring_from_str("StepForge-test");
@@ -248,9 +248,9 @@ fn midi_received_multiple_packets_in_order() {
         MIDIPacketListAdd, MIDIPacketListInit,
     };
 
-    let mut client: u32 = 0;
-    let mut source: u32 = 0;
-    let mut destination: u32 = 0;
+    let mut client: usize = 0;
+    let mut source: usize = 0;
+    let mut destination: usize = 0;
 
     unsafe {
         let client_name = cfstring_from_str("StepForge-test-multi");
@@ -335,9 +335,9 @@ fn send_one_builds_wellformed_packet_list() {
     use sequencer_engine_ffi::coremidi;
 
     // Create a dummy client/port for the test
-    let mut client: u32 = 0;
-    let mut port: u32 = 0;
-    let mut destination: u32 = 0;
+    let mut client: usize = 0;
+    let mut port: usize = 0;
+    let mut destination: usize = 0;
 
     unsafe {
         let client_name = coremidi::cfstring_from_str("StepForge-packet-test");
@@ -435,7 +435,7 @@ fn coremidi_ffi_bindings_are_callable() {
     assert!(!cfstr.is_null());
 
     // Client create/dispose
-    let mut client: u32 = 0;
+    let mut client: usize = 0;
     let status = unsafe {
         coremidi::MIDIClientCreate(
             cfstr,

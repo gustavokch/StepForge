@@ -18,10 +18,13 @@ use std::time::{Duration, Instant};
 pub use core_foundation_sys::string::CFStringRef;
 pub use core_foundation_sys::base::CFAllocatorRef;
 
-// CoreMIDI types
-pub type MIDIClientRef = u32;       // 32-bit opaque reference
-pub type MIDIEndpointRef = u32;    // 32-bit opaque reference
-pub type MIDIPortRef = u32;        // 32-bit opaque reference
+// CoreMIDI types. Apple's MIDIClientRef/MIDIPortRef/MIDIEndpointRef are
+// pointer-sized on modern macOS/iOS (CoreMIDI "modern types"). A u32 would
+// truncate the ref at the FFI boundary, so these are `usize` (Rust's
+// pointer-sized integer). The Engine stores these as `usize` too.
+pub type MIDIClientRef = usize;
+pub type MIDIEndpointRef = usize;
+pub type MIDIPortRef = usize;
 pub type OSStatus = i32;
 
 pub type ByteCount = usize;
@@ -211,20 +214,24 @@ pub fn run_coremidi_worker(engine: &Arc<Engine>, port: MIDIPortRef) {
             // Note-On (0x9n): schedule at offset + gate-synth Note-Off
             if m.status & 0xF0 == 0x90 {
                 let fire_at = Instant::now() + Duration::from_micros(m.send_at_offset_micros as u64);
-                let _ = pending.push((fire_at, m.endpoint, [m.status, m.note, m.velocity]));
+                let _ = pending.push((
+                    fire_at,
+                    m.endpoint as MIDIEndpointRef,
+                    [m.status, m.note, m.velocity],
+                ));
 
                 if m.gate_micros > 0 {
                     let off_at = fire_at + Duration::from_micros(m.gate_micros as u64);
                     // Note-Off uses the same channel, 0 velocity
                     let _ = pending.push((
                         off_at,
-                        m.endpoint,
+                        m.endpoint as MIDIEndpointRef,
                         [(m.status & 0xF0) | (m.channel & 0x0F), m.note, 0],
                     ));
                 }
             } else {
                 // Non-Note-On (including CC All-Notes-Off): send immediately
-                let _ = send_one(port, m.endpoint, &[m.status, m.note, m.velocity]);
+                let _ = send_one(port, m.endpoint as MIDIEndpointRef, &[m.status, m.note, m.velocity]);
             }
         }
 
@@ -285,7 +292,7 @@ fn send_cc_all_notes_off(port: MIDIPortRef, engine: &Engine) -> OSStatus {
     // Send to all destinations (empty vec -> no-op, one endpoint -> single send)
     let mut last_status: OSStatus = 0;
     for endpoint in snap.midi_destinations.iter() {
-        last_status = send_one(port, *endpoint, &bytes);
+        last_status = send_one(port, *endpoint as MIDIEndpointRef, &bytes);
     }
     last_status
 }
@@ -294,50 +301,49 @@ fn send_cc_all_notes_off(port: MIDIPortRef, engine: &Engine) -> OSStatus {
 ///
 /// Per Rule 7: The engine owns its own send-client and output port.
 /// Swift owns the discovery client and endpoint lifecycle.
-/// Returns `(client, port)` on success; returns `(0, 0)` on failure
-/// (non-fatal — playback will simply not send MIDI).
-///
-/// # Safety
-/// Caller must ensure `out_client` and `out_port` are valid pointers.
-pub unsafe fn create_client_and_port(
-    out_client: *mut MIDIClientRef,
-    out_port: *mut MIDIPortRef,
-) -> OSStatus {
+/// Returns `Ok((client, port))` — both already `usize` for direct Engine
+/// storage — on success; `Err(status)` on failure (non-fatal — playback will
+/// simply not send MIDI). The real CoreMIDI ref types (`MIDIClientRef` /
+/// `MIDIPortRef`) live only here at the FFI boundary; the Engine stores them
+/// as `usize` so the ref fits regardless of how Apple defines it.
+pub unsafe fn create_client_and_port() -> Result<(usize, usize), OSStatus> {
     let name = cfstring_from_str("StepForge Engine\0");
     if name.is_null() {
-        return -1;
+        return Err(-1);
     }
 
     let mut client: MIDIClientRef = 0;
     let status = MIDIClientCreate(name, std::ptr::null(), std::ptr::null_mut(), &mut client);
-
     if status != 0 {
-        return status;
+        return Err(status);
     }
 
     let port_name = cfstring_from_str("StepForge Output\0");
     if port_name.is_null() {
         let _ = MIDIClientDispose(client);
-        return -1;
+        return Err(-1);
     }
 
     let mut port: MIDIPortRef = 0;
     let status = MIDIOutputPortCreate(client, port_name, &mut port);
+    if status != 0 {
+        let _ = MIDIClientDispose(client);
+        return Err(status);
+    }
 
-    *out_client = client;
-    *out_port = port;
-
-    status
+    // Hand back both refs as `usize` for Engine storage. The aliases are
+    // already `usize`, so this is a direct representation — the Engine never
+    // holds the typed CoreMIDI ref, only the pointer-sized integer.
+    Ok((client, port))
 }
 
 /// Disposes of the CoreMIDI client and port.
 ///
 /// Returns `OSStatus` (0 = success). Per Rule 7, this is called by
-/// `engine_stop` after the CoreMIDI worker thread has joined.
-///
-/// # Safety
-/// `client` must be a valid `MIDIClientRef` created by `create_client_and_port`.
-pub unsafe fn dispose_client_and_port(client: MIDIClientRef, _port: MIDIPortRef) -> OSStatus {
+/// `engine_stop` after the CoreMIDI worker thread has joined. `client`/`port`
+/// arrive as `usize` (Engine storage) and are passed straight to
+/// `MIDIClientDispose` (the alias is `usize`, so the ref round-trips exactly).
+pub unsafe fn dispose_client_and_port(client: usize, _port: usize) -> OSStatus {
     // Port is disposed automatically when the client is disposed.
     MIDIClientDispose(client)
 }
