@@ -31,7 +31,7 @@ pub type MidiTimeStamp = u64;
 extern "C" {
     /// MIDISend - sends a MIDI packet list to a destination.
     #[allow(non_snake_case)]
-    fn MIDISend(
+    pub fn MIDISend(
         port: MIDIPortRef,
         dest: MIDIEndpointRef,
         pktlist: *const MIDIPacketList,
@@ -39,11 +39,11 @@ extern "C" {
 
     /// MIDIPacketListInit - initializes a MIDIPacketList for adding packets.
     #[allow(non_snake_case)]
-    fn MIDIPacketListInit(pktlist: *mut MIDIPacketList) -> *mut MIDIPacket;
+    pub fn MIDIPacketListInit(pktlist: *mut MIDIPacketList) -> *mut MIDIPacket;
 
     /// MIDIPacketListAdd - adds a packet to a MIDIPacketList.
     #[allow(non_snake_case)]
-    fn MIDIPacketListAdd(
+    pub fn MIDIPacketListAdd(
         pktlist: *mut MIDIPacketList,
         listSize: ByteCount,
         curPacket: *mut MIDIPacket,
@@ -91,6 +91,24 @@ extern "C" {
         readProc: MIDIReadProc,
         refCon: *mut (),
         outDest: *mut MIDIEndpointRef,
+    ) -> OSStatus;
+
+    /// MIDISourceCreate - creates a virtual source endpoint.
+    /// A virtual source can receive packets via MIDIReceived for same-process loopback testing.
+    #[allow(non_snake_case)]
+    pub fn MIDISourceCreate(
+        client: MIDIClientRef,
+        name: CFStringRef,
+        outSrc: *mut MIDIEndpointRef,
+    ) -> OSStatus;
+
+    /// MIDIReceived - injects packets at a virtual source endpoint.
+    /// Use this for same-process loopback: call on a virtual source, and CoreMIDI
+    /// will route to any connected virtual destinations (triggering their read procs).
+    #[allow(non_snake_case)]
+    pub fn MIDIReceived(
+        src: MIDIEndpointRef,
+        pktlist: *const MIDIPacketList,
     ) -> OSStatus;
 
     /// MIDIEndpointDispose - disposes of an endpoint.
