@@ -2,31 +2,15 @@ import SwiftUI
 
 @main
 struct StepForgeApp: App {
+    /// Single engine bridge, owned for the app's lifetime. `@StateObject` keeps it
+    /// alive across re-renders; injected into the view tree as an `@EnvironmentObject`
+    /// so feature views observe `mirror` and submit commands through it.
+    @StateObject private var bridge = EngineBridge()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
-        }
-    }
-}
-
-struct ContentView: View {
-    @State private var engineReady = false
-    private let bridge = EngineBridge()
-
-    var body: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "drum.fill")
-                .font(.system(size: 64))
-            Text("StepForge")
-                .font(.largeTitle.bold())
-            Text(engineReady ? "engine: ready" : "engine: starting")
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black.opacity(0.05))
-        .onAppear {
-            bridge.start()
-            engineReady = bridge.hasHandle
+            RootView()
+                .environmentObject(bridge)
         }
     }
 }

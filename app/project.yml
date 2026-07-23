@@ -18,9 +18,11 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.stepforge.app
+        TARGETED_DEVICE_FAMILY: "1,2"
         GENERATE_INFOPLIST_FILE: "YES"
         INFOPLIST_KEY_UILaunchScreen_Generation: "YES"
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: "YES"
+        INFOPLIST_KEY_UIUserInterfaceStyle: "Dark"
         SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/../engine/include/sequencer_engine.h"
         USER_HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../engine/include"
         HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../engine/include"
@@ -33,3 +35,10 @@ targets:
       - script: 'bash "$SRCROOT/../engine/scripts/build_engine.sh"'
         name: Build Rust Engine
         shell: /bin/sh
+  StepForgeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: StepForgeTests
+    dependencies:
+      - target: StepForge
