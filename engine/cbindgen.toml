@@ -38,4 +38,8 @@ exclude = [
     "MIDIReceived",
     "MIDIEndpointDispose",
     "MIDIClientDispose",
+    "CFRelease",
+    "CFTypeRef",
+    "CFAllocatorRef",
+    "CFStringRef",
 ]

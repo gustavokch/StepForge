@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 // <CoreFoundation/CFBase.h>. All `unsafe` is confined to this module.
 
 // CoreFoundation types (opaque pointers) - private to avoid leaking into public header
-use core_foundation_sys::base::CFAllocatorRef;
+use core_foundation_sys::base::{CFAllocatorRef, CFTypeRef};
 use core_foundation_sys::string::CFStringRef;
 
 // CoreMIDI types. Apple's MIDIClientRef/MIDIPortRef/MIDIEndpointRef are
@@ -67,6 +67,13 @@ extern "C" {
         cStr: *const i8,
         encoding: u32,
     ) -> CFStringRef;
+
+    /// CFRelease (CoreFoundation) — decrements the retain count of a
+    /// CoreFoundation object. CoreMIDI retains the name strings it receives,
+    /// so the caller MUST release its own +1 reference (from
+    /// [`CFStringCreateWithCString`]) after the create call.
+    #[allow(non_snake_case)]
+    fn CFRelease(cf: CFTypeRef);
 
     /// MIDIClientCreate - creates a MIDI client.
     /// Returns 0 (noErr) on success.
@@ -291,7 +298,10 @@ pub unsafe fn create_client_and_port() -> Result<(usize, usize), OSStatus> {
     }
 
     let mut client: MIDIClientRef = 0;
+    // CoreMIDI retains `name` internally, so release our +1 reference here
+    // regardless of outcome (the client keeps its own copy, or the call failed).
     let status = MIDIClientCreate(name, std::ptr::null(), std::ptr::null_mut(), &mut client);
+    CFRelease(name as CFTypeRef);
     if status != 0 {
         return Err(status);
     }
@@ -303,7 +313,9 @@ pub unsafe fn create_client_and_port() -> Result<(usize, usize), OSStatus> {
     }
 
     let mut port: MIDIPortRef = 0;
+    // Same as above: MIDIOutputPortCreate retains `port_name`.
     let status = MIDIOutputPortCreate(client, port_name, &mut port);
+    CFRelease(port_name as CFTypeRef);
     if status != 0 {
         let _ = MIDIClientDispose(client);
         return Err(status);
@@ -331,15 +343,16 @@ pub unsafe fn dispose_client_and_port(client: usize, _port: usize) -> OSStatus {
     MIDIClientDispose(client)
 }
 
-/// Creates a CFStringRef from a UTF-8 string.
+/// Creates a CFStringRef from a UTF-8 string (+1 retain count).
 ///
 /// # Safety
-/// Caller is responsible for releasing the returned CFStringRef via
-/// `CFRelease` (not needed for static strings passed to CoreMIDI, which
-/// retains them internally).
+/// Caller owns the returned CFStringRef and MUST release it via `CFRelease`
+/// once CoreMIDI has retained it — CoreMIDI keeps its own reference and does
+/// NOT release the caller's. See [`create_client_and_port`].
 ///
 /// # Note
-/// This function is pub for integration tests; it is only called from tests.
+/// The production caller is [`create_client_and_port`] (the `engine_start`
+/// path); it is also `pub` for integration tests.
 pub unsafe fn cfstring_from_str(s: &str) -> CFStringRef {
     let c_str = s.as_ptr() as *const i8;
     CFStringCreateWithCString(std::ptr::null(), c_str, 0x08000100)
