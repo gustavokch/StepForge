@@ -7,6 +7,7 @@
 
 use sequencer_engine::engine::Engine;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::Arc;
 
 pub mod command_codec;
 pub mod coremidi;
@@ -50,16 +51,22 @@ impl From<postcard::Error> for CodecError {
 
 /// Run a void FFI body with a validated, borrowed `Engine`, catching any panic.
 /// Null handle → `ErrInvalidHandle`; panic → `ErrOther`.
+///
+/// The handle stores an `Arc<Engine>` as a raw pointer from `Arc::into_raw`.
+/// We borrow it as `&Engine` for the call duration (the Arc's memory is stable
+/// as long as the handle is valid per Hard Rule 5).
 fn run_void(
     engine: *mut EngineHandle,
-    body: impl FnOnce(&mut Engine) -> Result<(), EngineResult>,
+    body: impl FnOnce(&Engine) -> Result<(), EngineResult>,
 ) -> EngineResult {
     match catch_unwind(AssertUnwindSafe(|| {
         if engine.is_null() {
             return Err(EngineResult::ErrInvalidHandle);
         }
         // SAFETY: caller upholds Hard Rule 5 (no concurrent free; stop before free).
-        let eng = unsafe { &mut *(engine as *mut Engine) };
+        // The handle is `*const Engine` from `Arc::into_raw`, cast to `*mut EngineHandle`.
+        // We reinterpret it as `&Engine` for borrowing (the Arc allocation is stable).
+        let eng = unsafe { &*(engine as *const Engine) };
         body(eng)
     })) {
         Ok(Ok(())) => EngineResult::Ok,
@@ -89,26 +96,116 @@ pub unsafe extern "C" fn engine_free(engine: *mut EngineHandle) {
     }));
 }
 
-/// Start playback. Stub: no-op, returns Ok. The engine plan implements.
+/// Start playback. Spawns the RT, worker, and CoreMIDI worker threads.
+///
+/// Returns `ErrOther` if CoreMIDI client/port creation fails (non-fatal —
+/// playback runs but MIDI won't send). The handle becomes shared across
+/// the three threads via `Arc<Engine>` (Task 20a).
 #[no_mangle]
 pub unsafe extern "C" fn engine_start(engine: *mut EngineHandle) -> EngineResult {
-    run_void(engine, |_eng| Ok(()))
+    match catch_unwind(AssertUnwindSafe(|| {
+        if engine.is_null() {
+            return Err(EngineResult::ErrInvalidHandle);
+        }
+        // Reconstruct the Arc<Engine> from the raw pointer.
+        // This is safe because the handle was created via Arc::into_raw
+        // and the caller upholds Hard Rule 5 (no concurrent free).
+        let eng = unsafe { Arc::from_raw(engine as *const Engine) };
+
+        // Create CoreMIDI client and output port (engine owns these per Rule 7)
+        let mut client: coremidi::MIDIClientRef = 0;
+        let mut port: coremidi::MIDIPortRef = 0;
+        let status = unsafe { coremidi::create_client_and_port(&mut client, &mut port) };
+        if status != 0 {
+            // Don't forget eng - we need to decrement the refcount since we're erroring
+            drop(eng);
+            return Err(EngineResult::ErrOther);
+        }
+
+        // Store client/port in the engine for disposal in engine_stop
+        *eng.coremidi_client.lock().unwrap() = client;
+        *eng.coremidi_port.lock().unwrap() = port;
+
+        // Clone Arc for each thread
+        let eng_rt = Arc::clone(&eng);
+        let eng_worker = Arc::clone(&eng);
+        let eng_coremidi = Arc::clone(&eng);
+
+        // Spawn RT thread with InstantClock
+        let clock = coremidi::InstantClock::new();
+        let rt_handle = std::thread::spawn(move || {
+            eng_rt.run_rt_loop(&clock);
+        });
+
+        // Spawn state worker thread
+        let worker_handle = std::thread::spawn(move || {
+            eng_worker.run_worker_loop();
+        });
+
+        // Spawn CoreMIDI worker thread
+        let coremidi_handle = std::thread::spawn(move || {
+            coremidi::run_coremidi_worker(&eng_coremidi, port);
+        });
+
+        // Store handles in the engine
+        *eng.rt_handle.lock().unwrap() = Some(rt_handle);
+        *eng.worker_handle.lock().unwrap() = Some(worker_handle);
+        *eng.coremidi_handle.lock().unwrap() = Some(coremidi_handle);
+
+        // Forget the Arc so it doesn't drop - the handle still owns it
+        std::mem::forget(eng);
+
+        Ok(())
+    })) {
+        Ok(Ok(())) => EngineResult::Ok,
+        Ok(Err(e)) => e,
+        Err(_) => EngineResult::ErrOther,
+    }
 }
 
-/// Stop playback. Stub: no-op. Must be called and return before `engine_free`.
+/// Stop playback. Signals shutdown, joins all three threads, and disposes
+/// the CoreMIDI client/port. Must return before `engine_free` (Rule 5).
 #[no_mangle]
 pub unsafe extern "C" fn engine_stop(engine: *mut EngineHandle) -> EngineResult {
-    run_void(engine, |_eng| Ok(()))
+    run_void(engine, |eng| {
+        // Signal shutdown
+        eng.shutdown.store(true, std::sync::atomic::Ordering::Release);
+
+        // Join RT thread
+        if let Some(handle) = eng.rt_handle.lock().unwrap().take() {
+            let _ = handle.join();
+        }
+
+        // Join worker thread
+        if let Some(handle) = eng.worker_handle.lock().unwrap().take() {
+            let _ = handle.join();
+        }
+
+        // Join CoreMIDI worker thread
+        if let Some(handle) = eng.coremidi_handle.lock().unwrap().take() {
+            let _ = handle.join();
+        }
+
+        // Dispose CoreMIDI client and port
+        let client = *eng.coremidi_client.lock().unwrap();
+        let port = *eng.coremidi_port.lock().unwrap();
+        if client != 0 {
+            let _ = unsafe { coremidi::dispose_client_and_port(client, port) };
+            *eng.coremidi_client.lock().unwrap() = 0;
+            *eng.coremidi_port.lock().unwrap() = 0;
+        }
+
+        Ok(())
+    })
 }
 
 /// Submit a command as postcard bytes. Returns `ErrDecode` on malformed bytes
 /// (non-fatal).
 ///
-/// Apply path (Task 18+): the decoded command is applied SYNCHRONOUSLY on the
-/// caller thread until Task 20 wires the real lock-free MPSC queue + state
-/// worker (`engine_start`). This lets `LoadSession` / `SetBpm` / etc. round-trip
-/// through the C ABI in integration tests today; the queue/worker swap is
-/// mechanical and confined to this body + `engine_start`.
+/// The command is enqueued into the lock-free MPSC queue for the state worker
+/// to apply (Task 20a). If the queue is full, the oldest command is dropped
+/// and an `Overflow` event is emitted (E8). Returns `Ok` even on overflow
+/// (the event makes the drop observable).
 ///
 /// # Safety
 /// `cmd_ptr` is valid for `cmd_len` bytes for the duration of the call (or NULL
@@ -131,9 +228,17 @@ pub unsafe extern "C" fn engine_submit_command(
         };
         match command_codec::decode_command(bytes) {
             Ok(command) => {
-                // Task 18: apply synchronously; Task 20 replaces with
-                // `eng.commands.enqueue(command)` + a state worker drain.
-                eng.apply_command(command);
+                // Task 20a: enqueue into the command queue (drop-oldest on full).
+                // The state worker will apply this command.
+                use sequencer_engine::midi_out::push_drop_oldest;
+                let dropped = push_drop_oldest(&eng.commands, command);
+                if dropped > 0 {
+                    // Emit Overflow event on the hot channel
+                    use sequencer_engine::event::EngineEvent;
+                    use sequencer_engine::midi_out::push_event;
+                    let dropped_u32 = dropped as u32;
+                    let _ = push_event(&eng.hot_events, &EngineEvent::Overflow { dropped: dropped_u32 });
+                }
                 Ok(())
             }
             Err(_) => Err(EngineResult::ErrDecode),
@@ -142,9 +247,11 @@ pub unsafe extern "C" fn engine_submit_command(
 }
 
 /// Drain at most one event into `*out_ptr`/`*out_len`. An empty/zero-length
-/// result means the queue is drained (design decision D5 / amendment A13).
-/// Stub: always drained (no events produced yet). Buffers must be freed via
-/// [`engine_free_bytes`].
+/// result means both channels are drained. Tries the hot channel first, then
+/// the large channel. Buffers must be freed via [`engine_free_bytes`].
+///
+/// NULL-tolerant: if `out_ptr`/`out_len` are NULL, the event is dequeued and
+/// discarded (useful for just draining without reading).
 ///
 /// # Safety
 /// `out_ptr`/`out_len` are valid writable pointers (or NULL); `engine` is valid.
@@ -154,7 +261,47 @@ pub unsafe extern "C" fn engine_drain_events(
     out_ptr: *mut *mut u8,
     out_len: *mut usize,
 ) -> EngineResult {
-    run_void(engine, |_eng| {
+    run_void(engine, |eng| {
+        // Try hot channel first (for playhead coalescing, E7)
+        if let Some(slot) = eng.hot_events.dequeue() {
+            // Box the event bytes for Swift to own
+            let len = slot.len as usize;
+            let mut bytes: Box<[u8]> = slot.bytes[..len].into();
+            let ptr = bytes.as_mut_ptr();
+            std::mem::forget(bytes); // Transfer ownership to caller
+
+            // NULL-tolerant: if out-params are NULL, just discard
+            if !out_ptr.is_null() {
+                unsafe { *out_ptr = ptr };
+            }
+            if !out_len.is_null() {
+                unsafe { *out_len = len };
+            }
+            return Ok(());
+        }
+
+        // Hot channel empty, try large channel
+        if let Some(event) = eng.large_events.dequeue() {
+            // Encode the large event into bytes
+            if let Ok(vec) = postcard::to_allocvec(&event) {
+                let len = vec.len();
+                let mut boxed = vec.into_boxed_slice();
+                let ptr = boxed.as_mut_ptr();
+                std::mem::forget(boxed); // Transfer ownership
+
+                if !out_ptr.is_null() {
+                    unsafe { *out_ptr = ptr };
+                }
+                if !out_len.is_null() {
+                    unsafe { *out_len = len };
+                }
+                return Ok(());
+            }
+            // Serialization failed - shouldn't happen for EngineEvent,
+            // but treat as no-event if it does
+        }
+
+        // Both channels drained
         if !out_ptr.is_null() {
             unsafe { *out_ptr = std::ptr::null_mut() };
         }

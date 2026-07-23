@@ -53,8 +53,7 @@ extern "C" {
     ) -> *mut MIDIPacket;
 }
 
-// Test-only CoreMIDI functions (for creating virtual destinations in tests)
-// These are pub so integration tests can use them; they are only called from tests.
+// Production CoreMIDI functions (client/port lifecycle) + test-only functions
 extern "C" {
     /// CFStringCreateWithCString (CoreFoundation)
     /// Creates a CFString from a C string. NULL allocator = use default.
@@ -289,6 +288,58 @@ fn send_cc_all_notes_off(port: MIDIPortRef, engine: &Engine) -> OSStatus {
         last_status = send_one(port, *endpoint, &bytes);
     }
     last_status
+}
+
+/// Creates a CoreMIDI client and output port for sending MIDI.
+///
+/// Per Rule 7: The engine owns its own send-client and output port.
+/// Swift owns the discovery client and endpoint lifecycle.
+/// Returns `(client, port)` on success; returns `(0, 0)` on failure
+/// (non-fatal — playback will simply not send MIDI).
+///
+/// # Safety
+/// Caller must ensure `out_client` and `out_port` are valid pointers.
+pub unsafe fn create_client_and_port(
+    out_client: *mut MIDIClientRef,
+    out_port: *mut MIDIPortRef,
+) -> OSStatus {
+    let name = cfstring_from_str("StepForge Engine\0");
+    if name.is_null() {
+        return -1;
+    }
+
+    let mut client: MIDIClientRef = 0;
+    let status = MIDIClientCreate(name, std::ptr::null(), std::ptr::null_mut(), &mut client);
+
+    if status != 0 {
+        return status;
+    }
+
+    let port_name = cfstring_from_str("StepForge Output\0");
+    if port_name.is_null() {
+        let _ = MIDIClientDispose(client);
+        return -1;
+    }
+
+    let mut port: MIDIPortRef = 0;
+    let status = MIDIOutputPortCreate(client, port_name, &mut port);
+
+    *out_client = client;
+    *out_port = port;
+
+    status
+}
+
+/// Disposes of the CoreMIDI client and port.
+///
+/// Returns `OSStatus` (0 = success). Per Rule 7, this is called by
+/// `engine_stop` after the CoreMIDI worker thread has joined.
+///
+/// # Safety
+/// `client` must be a valid `MIDIClientRef` created by `create_client_and_port`.
+pub unsafe fn dispose_client_and_port(client: MIDIClientRef, _port: MIDIPortRef) -> OSStatus {
+    // Port is disposed automatically when the client is disposed.
+    MIDIClientDispose(client)
 }
 
 /// Creates a CFStringRef from a UTF-8 string.
