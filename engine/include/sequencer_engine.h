@@ -67,12 +67,27 @@ struct EngineHandle *engine_new(void);
 void engine_free(struct EngineHandle *engine);
 
 /**
- * Start playback. Stub: no-op, returns Ok. The engine plan implements.
+ * Start playback. Spawns the RT, worker, and CoreMIDI worker threads.
+ *
+ * Returns `ErrOther` if CoreMIDI client/port creation fails (non-fatal —
+ * playback runs but MIDI won't send). The handle becomes shared across
+ * the three threads via `Arc<Engine>` (Task 20a).
+ *
+ * # Safety
+ * `engine` is NULL or a handle from [`engine_new`]; caller upholds Hard Rule 5
+ * (no concurrent `engine_*` calls on the same handle). Must not be called on a
+ * handle that is already running or that has been freed.
  */
 enum EngineResult engine_start(struct EngineHandle *engine);
 
 /**
- * Stop playback. Stub: no-op. Must be called and return before `engine_free`.
+ * Stop playback. Signals shutdown, joins all three threads, and disposes
+ * the CoreMIDI client/port. Must return before `engine_free` (Rule 5).
+ *
+ * # Safety
+ * `engine` is NULL or a handle from [`engine_new`] that was previously started
+ * with [`engine_start`]; caller upholds Hard Rule 5 (no concurrent `engine_*`
+ * calls on the same handle). NULL returns `ErrInvalidHandle`.
  */
 enum EngineResult engine_stop(struct EngineHandle *engine);
 
@@ -80,11 +95,10 @@ enum EngineResult engine_stop(struct EngineHandle *engine);
  * Submit a command as postcard bytes. Returns `ErrDecode` on malformed bytes
  * (non-fatal).
  *
- * Apply path (Task 18+): the decoded command is applied SYNCHRONOUSLY on the
- * caller thread until Task 20 wires the real lock-free MPSC queue + state
- * worker (`engine_start`). This lets `LoadSession` / `SetBpm` / etc. round-trip
- * through the C ABI in integration tests today; the queue/worker swap is
- * mechanical and confined to this body + `engine_start`.
+ * The command is enqueued into the lock-free MPSC queue for the state worker
+ * to apply (Task 20a). If the queue is full, the oldest command is dropped
+ * and an `Overflow` event is emitted (E8). Returns `Ok` even on overflow
+ * (the event makes the drop observable).
  *
  * # Safety
  * `cmd_ptr` is valid for `cmd_len` bytes for the duration of the call (or NULL
@@ -96,9 +110,11 @@ enum EngineResult engine_submit_command(struct EngineHandle *engine,
 
 /**
  * Drain at most one event into `*out_ptr`/`*out_len`. An empty/zero-length
- * result means the queue is drained (design decision D5 / amendment A13).
- * Stub: always drained (no events produced yet). Buffers must be freed via
- * [`engine_free_bytes`].
+ * result means both channels are drained. Tries the hot channel first, then
+ * the large channel. Buffers must be freed via [`engine_free_bytes`].
+ *
+ * NULL-tolerant: if `out_ptr`/`out_len` are NULL, the event is dequeued and
+ * discarded (useful for just draining without reading).
  *
  * # Safety
  * `out_ptr`/`out_len` are valid writable pointers (or NULL); `engine` is valid.

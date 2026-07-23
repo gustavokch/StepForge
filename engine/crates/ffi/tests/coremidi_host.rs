@@ -32,6 +32,79 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
+// ============================================================================
+// CoreMIDI FFI declarations (local to this test — symbols from CoreMIDI.framework)
+// ============================================================================
+
+type MIDIClientRef = usize;
+type MIDIEndpointRef = usize;
+type MIDIPortRef = usize;
+type OSStatus = i32;
+type ByteCount = usize;
+type MidiTimeStamp = u64;
+
+// CoreFoundation types - use the actual types from core_foundation_sys for compatibility
+use core_foundation_sys::base::CFAllocatorRef;
+use core_foundation_sys::string::CFStringRef;
+
+#[repr(C)]
+struct MIDIPacketList {
+    numPackets: u32,
+}
+
+type MIDIPacket = ();
+
+// MIDI read callback type
+type MIDIReadProc = extern "C" fn(pktlist: *const MIDIPacketList, srcConnRefCon: *mut (), refCon: *mut ());
+
+extern "C" {
+    #[allow(non_snake_case)]
+    fn MIDISend(port: MIDIPortRef, dest: MIDIEndpointRef, pktlist: *const MIDIPacketList) -> OSStatus;
+
+    #[allow(non_snake_case)]
+    fn MIDIPacketListInit(pktlist: *mut MIDIPacketList) -> *mut MIDIPacket;
+
+    #[allow(non_snake_case)]
+    fn MIDIPacketListAdd(
+        pktlist: *mut MIDIPacketList,
+        listSize: ByteCount,
+        curPacket: *mut MIDIPacket,
+        time: MidiTimeStamp,
+        nData: ByteCount,
+        data: *const u8,
+    ) -> *mut MIDIPacket;
+
+    #[allow(non_snake_case)]
+    fn CFStringCreateWithCString(alloc: CFAllocatorRef, cStr: *const i8, encoding: u32) -> CFStringRef;
+
+    #[allow(non_snake_case)]
+    fn MIDIClientCreate(name: CFStringRef, notify: *const (), refCon: *mut (), outClient: *mut MIDIClientRef) -> OSStatus;
+
+    #[allow(non_snake_case)]
+    fn MIDIOutputPortCreate(client: MIDIClientRef, portName: CFStringRef, outPort: *mut MIDIPortRef) -> OSStatus;
+
+    #[allow(non_snake_case)]
+    fn MIDIDestinationCreate(
+        client: MIDIClientRef,
+        name: CFStringRef,
+        readProc: MIDIReadProc,
+        refCon: *mut (),
+        outDest: *mut MIDIEndpointRef,
+    ) -> OSStatus;
+
+    #[allow(non_snake_case)]
+    fn MIDISourceCreate(client: MIDIClientRef, name: CFStringRef, outSrc: *mut MIDIEndpointRef) -> OSStatus;
+
+    #[allow(non_snake_case)]
+    fn MIDIReceived(src: MIDIEndpointRef, pktlist: *const MIDIPacketList) -> OSStatus;
+
+    #[allow(non_snake_case)]
+    fn MIDIEndpointDispose(endpoint: MIDIEndpointRef) -> OSStatus;
+
+    #[allow(non_snake_case)]
+    fn MIDIClientDispose(client: MIDIClientRef) -> OSStatus;
+}
+
 /// Static buffer for MIDI messages received by the virtual destination.
 /// The read proc appends each packet's data here; the test asserts order.
 static RECV: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
@@ -43,7 +116,7 @@ const TEST_TIMEOUT_MS: u64 = 500;
 ///
 /// Appends each packet's data to RECV. Called by CoreMIDI on the worker thread.
 extern "C" fn read_proc(
-    pktlist: *const sequencer_engine_ffi::coremidi::MIDIPacketList,
+    pktlist: *const MIDIPacketList,
     _src_conn_ref_con: *mut (),
     _ref_con: *mut (),
 ) {
@@ -87,10 +160,7 @@ extern "C" fn read_proc(
 #[test]
 #[ignore = "CoreMIDI does not route same-process MIDISend to virtual destinations (environment-dependent; production uses external endpoints)"]
 fn midisend_to_virtual_destination() {
-    use sequencer_engine_ffi::coremidi::{
-        cfstring_from_str, MIDIClientCreate, MIDIClientDispose, MIDIDestinationCreate,
-        MIDIEndpointDispose, MIDIOutputPortCreate, MIDIPacketListAdd, MIDIPacketListInit,
-    };
+    use sequencer_engine_ffi::coremidi::cfstring_from_str;
 
     let mut client: usize = 0;
     let mut destination: usize = 0;
@@ -124,15 +194,14 @@ fn midisend_to_virtual_destination() {
 
     unsafe {
         let mut buffer: [u8; 256] = [0; 256];
-        let pktlist_ptr =
-            buffer.as_mut_ptr() as *mut sequencer_engine_ffi::coremidi::MIDIPacketList;
+        let pktlist_ptr = buffer.as_mut_ptr() as *mut MIDIPacketList;
         let pkt_ptr = MIDIPacketListInit(pktlist_ptr);
 
         let result = MIDIPacketListAdd(pktlist_ptr, 256, pkt_ptr, 0, 3, note_on.as_ptr());
         assert!(!result.is_null());
 
         // This will not deliver to same-process virtual destination
-        let status = sequencer_engine_ffi::coremidi::MIDISend(port, destination, pktlist_ptr);
+        let status = MIDISend(port, destination, pktlist_ptr);
         assert_eq!(status, 0, "MIDISend should succeed (even if no delivery)");
     }
 
@@ -178,10 +247,7 @@ fn midisend_to_virtual_destination() {
 #[test]
 #[ignore = "CoreMIDI same-process virtual endpoint routing is environment-dependent"]
 fn midi_received_from_virtual_source_to_destination() {
-    use sequencer_engine_ffi::coremidi::{
-        cfstring_from_str, MIDIClientCreate, MIDIClientDispose, MIDIDestinationCreate,
-        MIDIEndpointDispose, MIDIPacketListAdd, MIDIPacketListInit, MIDIReceived, MIDISourceCreate,
-    };
+    use sequencer_engine_ffi::coremidi::cfstring_from_str;
 
     let mut client: usize = 0;
     let mut source: usize = 0;
@@ -214,8 +280,7 @@ fn midi_received_from_virtual_source_to_destination() {
 
     unsafe {
         let mut buffer: [u8; 256] = [0; 256];
-        let pktlist_ptr =
-            buffer.as_mut_ptr() as *mut sequencer_engine_ffi::coremidi::MIDIPacketList;
+        let pktlist_ptr = buffer.as_mut_ptr() as *mut MIDIPacketList;
         let pkt_ptr = MIDIPacketListInit(pktlist_ptr);
 
         let result = MIDIPacketListAdd(pktlist_ptr, 256, pkt_ptr, 0, 3, note_on.as_ptr());
@@ -261,10 +326,7 @@ fn midi_received_from_virtual_source_to_destination() {
 #[test]
 #[ignore = "CoreMIDI same-process virtual endpoint routing is environment-dependent"]
 fn midi_received_multiple_packets_in_order() {
-    use sequencer_engine_ffi::coremidi::{
-        cfstring_from_str, MIDIClientCreate, MIDIClientDispose, MIDIDestinationCreate,
-        MIDIEndpointDispose, MIDIPacketListAdd, MIDIPacketListInit, MIDIReceived, MIDISourceCreate,
-    };
+    use sequencer_engine_ffi::coremidi::cfstring_from_str;
 
     let mut client: usize = 0;
     let mut source: usize = 0;
@@ -298,8 +360,7 @@ fn midi_received_multiple_packets_in_order() {
 
     unsafe {
         let mut buffer: [u8; 256] = [0; 256];
-        let pktlist_ptr =
-            buffer.as_mut_ptr() as *mut sequencer_engine_ffi::coremidi::MIDIPacketList;
+        let pktlist_ptr = buffer.as_mut_ptr() as *mut MIDIPacketList;
         let mut pkt_ptr = MIDIPacketListInit(pktlist_ptr);
 
         pkt_ptr = MIDIPacketListAdd(pktlist_ptr, 256, pkt_ptr, 0, 3, note_on.as_ptr());
@@ -358,7 +419,7 @@ fn midi_received_multiple_packets_in_order() {
 /// - Packet data matches the input bytes
 #[test]
 fn send_one_builds_wellformed_packet_list() {
-    use sequencer_engine_ffi::coremidi;
+    use sequencer_engine_ffi::coremidi::cfstring_from_str;
 
     // Create a dummy client/port for the test
     let mut client: usize = 0;
@@ -366,11 +427,11 @@ fn send_one_builds_wellformed_packet_list() {
     let mut destination: usize = 0;
 
     unsafe {
-        let client_name = coremidi::cfstring_from_str("StepForge-packet-test");
-        let port_name = coremidi::cfstring_from_str("StepForge-out");
-        let dest_name = coremidi::cfstring_from_str("StepForge-dest");
+        let client_name = cfstring_from_str("StepForge-packet-test");
+        let port_name = cfstring_from_str("StepForge-out");
+        let dest_name = cfstring_from_str("StepForge-dest");
 
-        let status = coremidi::MIDIClientCreate(
+        let status = MIDIClientCreate(
             client_name,
             std::ptr::null(),
             std::ptr::null_mut(),
@@ -378,10 +439,10 @@ fn send_one_builds_wellformed_packet_list() {
         );
         assert_eq!(status, 0);
 
-        let status = coremidi::MIDIOutputPortCreate(client, port_name, &mut port);
+        let status = MIDIOutputPortCreate(client, port_name, &mut port);
         assert_eq!(status, 0);
 
-        let status = coremidi::MIDIDestinationCreate(
+        let status = MIDIDestinationCreate(
             client,
             dest_name,
             read_proc,
@@ -398,10 +459,10 @@ fn send_one_builds_wellformed_packet_list() {
     let mut buffer: [u8; 256] = [0; 256];
 
     unsafe {
-        let pktlist_ptr = buffer.as_mut_ptr() as *mut coremidi::MIDIPacketList;
-        let pkt_ptr = coremidi::MIDIPacketListInit(pktlist_ptr);
+        let pktlist_ptr = buffer.as_mut_ptr() as *mut MIDIPacketList;
+        let pkt_ptr = MIDIPacketListInit(pktlist_ptr);
 
-        let result = coremidi::MIDIPacketListAdd(
+        let result = MIDIPacketListAdd(
             pktlist_ptr,
             256,
             pkt_ptr,
@@ -433,7 +494,7 @@ fn send_one_builds_wellformed_packet_list() {
         assert_eq!(data_slice, test_bytes, "Packet data should match input");
 
         // Call MIDISend to ensure it doesn't crash (even if no delivery)
-        let status = coremidi::MIDISend(port, destination, pktlist_ptr);
+        let status = MIDISend(port, destination, pktlist_ptr);
         // MIDISend may succeed even if no delivery happens
         assert!(
             status == 0 || status == -10833, // -10833 = midiNotResponding (destination not connected)
@@ -443,8 +504,8 @@ fn send_one_builds_wellformed_packet_list() {
 
     // Cleanup
     unsafe {
-        let _ = coremidi::MIDIEndpointDispose(destination);
-        let _ = coremidi::MIDIClientDispose(client);
+        let _ = MIDIEndpointDispose(destination);
+        let _ = MIDIClientDispose(client);
     }
 }
 
@@ -454,21 +515,21 @@ fn send_one_builds_wellformed_packet_list() {
 /// that the functions have correct signatures and calling conventions.
 #[test]
 fn coremidi_ffi_bindings_are_callable() {
-    use sequencer_engine_ffi::coremidi;
+    use sequencer_engine_ffi::coremidi::cfstring_from_str;
 
     // CFString creation
-    let cfstr = unsafe { coremidi::cfstring_from_str("test") };
+    let cfstr = unsafe { cfstring_from_str("test") };
     assert!(!cfstr.is_null());
 
     // Client create/dispose
     let mut client: usize = 0;
     let status = unsafe {
-        coremidi::MIDIClientCreate(cfstr, std::ptr::null(), std::ptr::null_mut(), &mut client)
+        MIDIClientCreate(cfstr, std::ptr::null(), std::ptr::null_mut(), &mut client)
     };
     assert_eq!(status, 0, "MIDIClientCreate should succeed");
     assert_ne!(client, 0, "Client should be non-zero");
 
-    let status = unsafe { coremidi::MIDIClientDispose(client) };
+    let status = unsafe { MIDIClientDispose(client) };
     assert_eq!(status, 0, "MIDIClientDispose should succeed");
 }
 

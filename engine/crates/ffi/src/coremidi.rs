@@ -14,27 +14,28 @@ use std::time::{Duration, Instant};
 // Signatures resolved against <CoreMIDI/CoreMIDI.h> and
 // <CoreFoundation/CFBase.h>. All `unsafe` is confined to this module.
 
-// CoreFoundation types (opaque pointers)
-pub use core_foundation_sys::base::CFAllocatorRef;
-pub use core_foundation_sys::string::CFStringRef;
+// CoreFoundation types (opaque pointers) - private to avoid leaking into public header
+use core_foundation_sys::base::CFAllocatorRef;
+use core_foundation_sys::string::CFStringRef;
 
 // CoreMIDI types. Apple's MIDIClientRef/MIDIPortRef/MIDIEndpointRef are
 // pointer-sized on modern macOS/iOS (CoreMIDI "modern types"). A u32 would
 // truncate the ref at the FFI boundary, so these are `usize` (Rust's
 // pointer-sized integer). The Engine stores these as `usize` too.
-pub type MIDIClientRef = usize;
-pub type MIDIEndpointRef = usize;
-pub type MIDIPortRef = usize;
-pub type OSStatus = i32;
+// Private to avoid leaking into the public C header.
+type MIDIClientRef = usize;
+type MIDIEndpointRef = usize;
+type MIDIPortRef = usize;
+type OSStatus = i32;
 
-pub type ByteCount = usize;
-pub type MidiTimeStamp = u64;
+type ByteCount = usize;
+type MidiTimeStamp = u64;
 
 // Production CoreMIDI functions (always available)
 extern "C" {
     /// MIDISend - sends a MIDI packet list to a destination.
     #[allow(non_snake_case)]
-    pub fn MIDISend(
+    fn MIDISend(
         port: MIDIPortRef,
         dest: MIDIEndpointRef,
         pktlist: *const MIDIPacketList,
@@ -42,11 +43,11 @@ extern "C" {
 
     /// MIDIPacketListInit - initializes a MIDIPacketList for adding packets.
     #[allow(non_snake_case)]
-    pub fn MIDIPacketListInit(pktlist: *mut MIDIPacketList) -> *mut MIDIPacket;
+    fn MIDIPacketListInit(pktlist: *mut MIDIPacketList) -> *mut MIDIPacket;
 
     /// MIDIPacketListAdd - adds a packet to a MIDIPacketList.
     #[allow(non_snake_case)]
-    pub fn MIDIPacketListAdd(
+    fn MIDIPacketListAdd(
         pktlist: *mut MIDIPacketList,
         listSize: ByteCount,
         curPacket: *mut MIDIPacket,
@@ -61,7 +62,7 @@ extern "C" {
     /// CFStringCreateWithCString (CoreFoundation)
     /// Creates a CFString from a C string. NULL allocator = use default.
     #[allow(non_snake_case)]
-    pub fn CFStringCreateWithCString(
+    fn CFStringCreateWithCString(
         alloc: CFAllocatorRef,
         cStr: *const i8,
         encoding: u32,
@@ -70,7 +71,7 @@ extern "C" {
     /// MIDIClientCreate - creates a MIDI client.
     /// Returns 0 (noErr) on success.
     #[allow(non_snake_case)]
-    pub fn MIDIClientCreate(
+    fn MIDIClientCreate(
         name: CFStringRef,
         notify: *const (),
         refCon: *mut (),
@@ -79,7 +80,7 @@ extern "C" {
 
     /// MIDIOutputPortCreate - creates an output port.
     #[allow(non_snake_case)]
-    pub fn MIDIOutputPortCreate(
+    fn MIDIOutputPortCreate(
         client: MIDIClientRef,
         portName: CFStringRef,
         outPort: *mut MIDIPortRef,
@@ -87,7 +88,7 @@ extern "C" {
 
     /// MIDIDestinationCreate - creates a virtual destination endpoint.
     #[allow(non_snake_case)]
-    pub fn MIDIDestinationCreate(
+    fn MIDIDestinationCreate(
         client: MIDIClientRef,
         name: CFStringRef,
         readProc: MIDIReadProc,
@@ -98,7 +99,7 @@ extern "C" {
     /// MIDISourceCreate - creates a virtual source endpoint.
     /// A virtual source can receive packets via MIDIReceived for same-process loopback testing.
     #[allow(non_snake_case)]
-    pub fn MIDISourceCreate(
+    fn MIDISourceCreate(
         client: MIDIClientRef,
         name: CFStringRef,
         outSrc: *mut MIDIEndpointRef,
@@ -108,20 +109,21 @@ extern "C" {
     /// Use this for same-process loopback: call on a virtual source, and CoreMIDI
     /// will route to any connected virtual destinations (triggering their read procs).
     #[allow(non_snake_case)]
-    pub fn MIDIReceived(src: MIDIEndpointRef, pktlist: *const MIDIPacketList) -> OSStatus;
+    fn MIDIReceived(src: MIDIEndpointRef, pktlist: *const MIDIPacketList) -> OSStatus;
 
     /// MIDIEndpointDispose - disposes of an endpoint.
     #[allow(non_snake_case)]
-    pub fn MIDIEndpointDispose(endpoint: MIDIEndpointRef) -> OSStatus;
+    fn MIDIEndpointDispose(endpoint: MIDIEndpointRef) -> OSStatus;
 
     /// MIDIClientDispose - disposes of a client.
     #[allow(non_snake_case)]
-    pub fn MIDIClientDispose(client: MIDIClientRef) -> OSStatus;
+    fn MIDIClientDispose(client: MIDIClientRef) -> OSStatus;
 }
 
 /// MIDI read callback type (for virtual destination in tests only).
+/// Private to avoid leaking into public C header.
 #[allow(non_snake_case)]
-pub type MIDIReadProc =
+type MIDIReadProc =
     extern "C" fn(pktlist: *const MIDIPacketList, srcConnRefCon: *mut (), refCon: *mut ());
 
 // ============================================================================
@@ -137,13 +139,13 @@ const PACKET_LIST_BUFFER_SIZE: usize = 256;
 
 #[repr(C)]
 #[allow(non_snake_case)]
-pub struct MIDIPacketList {
-    pub numPackets: u32,
+struct MIDIPacketList {
+    numPackets: u32,
     // Variable-length packet data follows (managed by CoreMIDI)
 }
 
 // Opaque packet pointer - CoreMIDI manages the actual layout
-pub type MIDIPacket = ();
+type MIDIPacket = ();
 
 // ============================================================================
 // CoreMIDI worker
