@@ -142,8 +142,12 @@ All audit-driven fixes applied on `app-plan` (TDD where behavior changed):
   clippy clean on all touched code.
 
 **Outstanding (outside this audit's scope):**
-- Pre-existing clippy debt in the merged sync code (clone-on-`Copy`, redundant
-  casts, `map_or`, etc.) — the `-D warnings` gate was already red before this
-  session. Recommend a separate `clippy --fix` cleanup pass.
+- ~~Pre-existing clippy debt~~ — **resolved 2026-07-25**: the merged sync code's
+  clippy debt is cleared (clone-on-`Copy` ×4, redundant `as usize` cast, `map_or`,
+  `collapsible` match→guard, `needless_range_loop`, `field_reassign_with_default`,
+  `bool_assert_comparison`, `manual_clamp`) and `cargo fmt` applied across the
+  workspace. `cargo clippy --all-targets -- -D warnings` is green; `cargo test`
+  stays green. All fixes are behavior-preserving refactors (the existing suite is
+  the safety net); none touch RT semantics.
 - Rule 7 deviation (engine owns its own send-`MIDIClientRef`) — pre-existing,
   rationalized; revisit only if decoupling the engine from CoreMIDI.

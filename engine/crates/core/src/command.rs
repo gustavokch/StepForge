@@ -131,9 +131,7 @@ mod tests {
                 zone: VelocityZone::Accent,
             },
             Command::LoadSession { bytes: vec![9, 9] },
-            Command::SetLinkEnabled {
-                enabled: true,
-            },
+            Command::SetLinkEnabled { enabled: true },
             Command::MidiClockTick,
         ];
         for c in cmds {

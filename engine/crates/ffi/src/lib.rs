@@ -118,12 +118,14 @@ pub unsafe extern "C" fn engine_start(engine: *mut EngineHandle) -> EngineResult
         let eng = unsafe { Arc::from_raw(engine as *const Engine) };
 
         // Reset shutdown flag to false so worker and RT loops run (crucial if start is called again after stop)
-        eng.shutdown.store(false, std::sync::atomic::Ordering::Release);
+        eng.shutdown
+            .store(false, std::sync::atomic::Ordering::Release);
 
         // Create CoreMIDI client, output port, and virtual source (engine owns these per Rule 7).
         // Non-fatal if CoreMIDI client creation fails (e.g. sandboxed / un-entitled);
         // worker and RT threads must still spawn so playback and UI commands work.
-        let (client, port, source) = unsafe { coremidi::create_client_and_port() }.unwrap_or((0, 0, 0));
+        let (client, port, source) =
+            unsafe { coremidi::create_client_and_port() }.unwrap_or((0, 0, 0));
 
         // Store client/port/source in the engine for disposal in engine_stop
         *eng.coremidi_client.lock().unwrap() = client;

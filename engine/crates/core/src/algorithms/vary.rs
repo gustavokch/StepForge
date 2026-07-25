@@ -24,7 +24,7 @@ pub fn vary(track: &mut Track, strength: f32, rng: &mut Rng) {
             if track.steps[i].active {
                 let off = (rng.range(-50, 50) as f32 / 100.0) * s;
                 track.steps[i].micro_timing_offset = off;
-                
+
                 if rng.range(0, 100) < (s * 40.0) as i32 {
                     let v = rng.range(0, 2);
                     track.steps[i].velocity_zone = match v {
