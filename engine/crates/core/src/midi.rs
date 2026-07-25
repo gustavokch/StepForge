@@ -4,8 +4,8 @@ use crate::clock::Rng;
 use crate::midi_out::MidiMsg;
 use crate::models::{Ratchet, VelocityZone};
 
-pub const VEL_LOW: u8 = 64;
-pub const VEL_MID: u8 = 100;
+pub const VEL_LOW: u8 = 42;
+pub const VEL_MID: u8 = 85;
 pub const VEL_ACCENT: u8 = 127;
 pub const DEFAULT_GATE_MICROS: u32 = 50_000;
 const NOTE_ON: u8 = 0x90;
@@ -79,7 +79,10 @@ mod tests {
         assert_eq!(velocity_for_zone(VelocityZone::Low), VEL_LOW);
         let mut rng = Rng::new(7);
         let h = humanize_velocity(VEL_MID, 1.0, 1.0, &mut rng);
-        assert!((95..=105).contains(&h), "±5 around mid");
+        // ±5 around VEL_MID — relative so velocity retuning doesn't re-break this.
+        let lo = VEL_MID.saturating_sub(5);
+        let hi = VEL_MID.saturating_add(5);
+        assert!((lo..=hi).contains(&h), "±5 around mid (VEL_MID={VEL_MID})");
         let zero = humanize_velocity(VEL_MID, 0.0, 1.0, &mut rng);
         assert_eq!(zero, VEL_MID);
     }
