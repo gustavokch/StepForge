@@ -37,7 +37,7 @@ impl Link {
     pub fn clock(&self) -> DummyClock {
         DummyClock
     }
-    pub fn num_peers(&self) -> u32 {
+    pub fn num_peers(&self) -> usize {
         0
     }
 }
