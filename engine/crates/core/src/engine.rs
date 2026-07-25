@@ -19,7 +19,7 @@ use crate::undo::Undo;
 use ableton_link::link::BasicLink as Link;
 use arc_swap::ArcSwap;
 use std::sync::atomic::Ordering;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "ios")]
@@ -167,9 +167,6 @@ pub struct ExternalClock {
     /// Whether the native Ableton Link session is enabled. The poller idles
     /// (no Link calls) while this is false.
     pub link_enabled: AtomicBool,
-    /// Current Link peer count, written by the poller (off-RT). The poller
-    /// tracks the last-emitted count locally to emit `LinkPeersChanged`.
-    pub link_peers: AtomicUsize,
     /// The Link session. Touched ONLY off the RT thread — by the poller (read:
     /// `capture_app_session_state`/`clock`/`num_peers`) and the worker
     /// (`enable`/`disable` on `SetLinkEnabled`). Never on the RT hot path (B2).
@@ -194,7 +191,6 @@ impl ExternalClock {
             midi_step_pulses: AtomicU32::new(0),
             link_beats_micros: AtomicU64::new(0),
             link_enabled: AtomicBool::new(false),
-            link_peers: AtomicUsize::new(0),
             link: Mutex::new(link),
             #[cfg(not(target_os = "ios"))]
             tokio_rt,
@@ -435,12 +431,19 @@ impl Engine {
     /// (which allocate / may contend with Link's internal thread) happen here —
     /// never on the RT thread (Hard Rule 1).
     pub fn run_link_poller(self: &Arc<Engine>) {
-        let mut last_peers: usize = 0;
+        // `usize::MAX` is a sentinel that can never equal a real peer count, so
+        // the first poll after startup — and the first poll after every
+        // disable→re-enable (see the `else` branch) — always emits a
+        // `LinkPeersChanged` with the current count.
+        let mut last_peers: usize = usize::MAX;
         while !self.shutdown.load(Ordering::Acquire) {
             if self.external_clock.link_enabled.load(Ordering::Acquire) {
-                // try_lock: never block — skip this tick if the worker holds
-                // the mutex during enable/disable.
-                if let Ok(link) = self.external_clock.link.try_lock() {
+                // Capture beat position + any peer-count change under the guard;
+                // emit the event AFTER the guard closes so the Link mutex is
+                // held only for the ableton-link-rs calls (`push_event` is
+                // already non-blocking). try_lock: never block — skip this tick
+                // if the worker holds the mutex during enable/disable.
+                let peers_changed = if let Ok(link) = self.external_clock.link.try_lock() {
                     let state = link.capture_app_session_state();
                     let time = link.clock().micros();
                     let beats = state.beat_at_time(time, 4.0);
@@ -450,17 +453,23 @@ impl Engine {
                     let peers = link.num_peers();
                     if peers != last_peers {
                         last_peers = peers;
-                        self.external_clock
-                            .link_peers
-                            .store(peers, Ordering::Release);
-                        let _ = crate::midi_out::push_event(
-                            &self.hot_events,
-                            &crate::event::EngineEvent::LinkPeersChanged { count: peers },
-                        );
+                        Some(peers)
+                    } else {
+                        None
                     }
+                } else {
+                    None
+                };
+                if let Some(peers) = peers_changed {
+                    let _ = crate::midi_out::push_event(
+                        &self.hot_events,
+                        &crate::event::EngineEvent::LinkPeersChanged { count: peers },
+                    );
                 }
                 std::thread::sleep(std::time::Duration::from_millis(1));
             } else {
+                // Link disabled — reset so re-enable always emits the current count.
+                last_peers = usize::MAX;
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }

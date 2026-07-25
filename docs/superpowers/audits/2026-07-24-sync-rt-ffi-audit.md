@@ -151,3 +151,37 @@ All audit-driven fixes applied on `app-plan` (TDD where behavior changed):
   the safety net); none touch RT semantics.
 - Rule 7 deviation (engine owns its own send-`MIDIClientRef`) — pre-existing,
   rationalized; revisit only if decoupling the engine from CoreMIDI.
+
+---
+
+## Follow-up — PR #5 review (2026-07-25)
+
+Review on PR #5 surfaced six Low/Nit/Note items; five applied, one declined.
+
+- **F1 — `link_peers` atomic removed.** The atomic B2 added (written by the
+  poller) was write-only: peer count reaches Swift exclusively via the
+  `LinkPeersChanged` event, never by reading the atomic (verified
+  `rg link_peers` → zero readers). Dropped the field, its init, the poller
+  store, and the now-unused `AtomicUsize` import. The B2 resolution above is
+  left as-is as the historical record of what the PR shipped.
+- **F3 — `LinkPeersChanged` emit moved outside the Link guard.** `push_event`
+  is alloc- and lock-free, so this is cosmetic (the `Mutex<Link>` has a single
+  off-RT contender), but the guard is now held only for the ableton-link-rs
+  calls.
+- **F5 — peer-change detection resets across disable/re-enable.** `last_peers`
+  initializes to `usize::MAX` and resets to `usize::MAX` while Link is
+  disabled, so the first poll after startup — and after every re-enable —
+  always emits the current count (previously a re-enable to the same count
+  suppressed the event).
+- **F4 — iOS poller cfg-gate: declined.** cfg-gating the poller off on iOS
+  needs four new `#[cfg(target_os = "ios")]` sites in `ffi/src/lib.rs` (the
+  `link_poller_handle` field, its spawn, store, and join). Each is invisible to
+  host `cargo clippy`/`cargo test` — the documented blind spot behind this PR's
+  own `num_peers` fix (cb1af80) — so the change would expand the iOS-only
+  compile-risk surface for a negligible gain: on iOS the poller only sleeps
+  (10 ms while disabled, 1 ms calling no-op dummy `Link` methods). Net-negative
+  for this codebase; left as-is.
+
+Codec/test hygiene from the same review — the Rust-side fixture drift guard
+(events + commands) and deletion of the orphaned `cmd_linkphase_4_05.bin` — is
+committed alongside but is outside this audit's RT/FFI scope.
