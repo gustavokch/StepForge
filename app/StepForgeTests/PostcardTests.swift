@@ -75,6 +75,9 @@ final class PostcardTests: XCTestCase {
     func testEventError() {
         XCTAssertEqual(EngineEvent.decode(load("ev_error_m7_boom")), .error(code: -7, message: "boom"))
     }
+    func testEventLinkEnabledChanged() {
+        XCTAssertEqual(EngineEvent.decode(load("ev_linkenabled_true")), .linkEnabledChanged(enabled: true))
+    }
 
     // MARK: - Model decode
 

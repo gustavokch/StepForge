@@ -137,6 +137,8 @@ struct SessionMirror: Equatable {
             lastOverflow = dropped
         case .linkPeersChanged(let count):
             linkPeers = count
+        case .linkEnabledChanged(let enabled):
+            linkEnabled = enabled
         }
     }
 
@@ -183,6 +185,9 @@ struct SessionMirror: Equatable {
             session.bpm = bpm
         case .setSyncSource(let source):
             session.syncSource = source
+            // Mirror the engine's auto-enable rule (Defect 3): selecting Link
+            // enables the session, otherwise disables it.
+            linkEnabled = (source == .link)
         case .setGlobalMidiChannel(let ch):
             session.globalMidiChannel = ch
         case .setQuantizeGrain:

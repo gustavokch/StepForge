@@ -24,4 +24,16 @@ final class EngineBridgeTests: XCTestCase {
         mirror.applyPlayhead(trackIdx: 0, stepIdx: 4)
         XCTAssertEqual(mirror.playheadStep, 4)
     }
+
+    /// Defect 4 fix: the engine now echoes Link state as `LinkEnabledChanged`,
+    /// and the mirror applies it. Before, `linkEnabled` was never updated by the
+    /// real engine (only by the mock), so the Settings toggle had no feedback.
+    func testSessionMirrorAppliesLinkEnabledChanged() {
+        var mirror = SessionMirror()
+        XCTAssertEqual(mirror.linkEnabled, false)
+        mirror.apply(.linkEnabledChanged(enabled: true))
+        XCTAssertTrue(mirror.linkEnabled)
+        mirror.apply(.linkEnabledChanged(enabled: false))
+        XCTAssertFalse(mirror.linkEnabled)
+    }
 }

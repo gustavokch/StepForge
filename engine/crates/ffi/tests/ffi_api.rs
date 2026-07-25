@@ -117,6 +117,18 @@ fn garbage_event_bytes_do_not_panic_overflow_path() {
     // total: returns Ok or Err, never panics
 }
 
+/// `LinkEnabledChanged` round-trips across the postcard codec (Defect 4 fix).
+/// Pins the new variant's wire encoding at the C-ABI boundary alongside the
+/// existing Overflow round-trip.
+#[test]
+fn link_enabled_event_roundtrips_over_c_abi() {
+    use sequencer_engine::event::EngineEvent;
+    let ev = EngineEvent::LinkEnabledChanged { enabled: true };
+    let bytes = postcard::to_allocvec(&ev).unwrap();
+    let back: EngineEvent = postcard::from_bytes(&bytes).unwrap();
+    assert_eq!(back, ev);
+}
+
 /// Task 18/20a: a valid `LoadSession` (bytes from `engine_serialize`) swaps the
 /// engine's session. Drives the full round-trip through the C ABI: mutate a
 /// donor engine → serialize → load into a fresh engine → re-serialize and

@@ -8,6 +8,7 @@ enum AppMode { case editing, performance }
 
 struct RootView: View {
     @EnvironmentObject private var bridge: EngineBridge
+    @EnvironmentObject private var midiManager: MidiManager
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var mode: AppMode = .editing
@@ -29,11 +30,19 @@ struct RootView: View {
         .tint(Theme.primary)
         .onAppear {
             EngineLifecycle.handle(scenePhase, on: bridge)
+            // Bind the inbound-MIDI owner to the bridge so `handleMidiInput` can
+            // forward clock/start/stop as commands. Without this the weak `bridge`
+            // ref stayed nil and every inbound packet was dropped (Defect 1 fix).
+            midiManager.bind(to: bridge)
         }
         .onChange(of: scenePhase) { _, phase in
             EngineLifecycle.handle(phase, on: bridge)
         }
-        .sheet(isPresented: $showSettings) { SettingsSheet().environmentObject(bridge) }
+        .sheet(isPresented: $showSettings) {
+            SettingsSheet()
+                .environmentObject(bridge)
+                .environmentObject(midiManager)
+        }
     }
 
     private var appBar: some View {
