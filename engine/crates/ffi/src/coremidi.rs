@@ -183,12 +183,7 @@ pub fn run_coremidi_worker(engine: &Arc<Engine>, port: MIDIPortRef, virtual_sour
         while i < pending.len() {
             if pending[i].0 <= now {
                 let (_, dest, bytes) = pending.remove(i);
-                let status = send_one(port, dest, virtual_source, &bytes);
-                if status == 0 {
-                    println!("[CoreMIDI] Successfully sent scheduled MIDI data: {:?}", bytes);
-                } else {
-                    println!("[CoreMIDI] Failed to send scheduled MIDI data: {:?}, status: {}", bytes, status);
-                }
+                let _ = send_one(port, dest, virtual_source, &bytes);
                 // Don't increment i: we removed an element
             } else {
                 i += 1;
@@ -201,39 +196,32 @@ pub fn run_coremidi_worker(engine: &Arc<Engine>, port: MIDIPortRef, virtual_sour
             if m.status & 0xF0 == 0x90 {
                 let fire_at =
                     Instant::now() + Duration::from_micros(m.send_at_offset_micros as u64);
-                if let Err(_) = pending.push((
+                // Drop-oldest is upstream (RT ring); if the local pending window
+                // is full this Note-On is silently dropped.
+                let _ = pending.push((
                     fire_at,
                     m.endpoint as MIDIEndpointRef,
                     [m.status, m.note, m.velocity],
-                )) {
-                    println!("[CoreMIDI] WARNING: pending buffer full, dropped Note-On!");
-                }
+                ));
 
                 if m.gate_micros > 0 {
                     let off_at = fire_at + Duration::from_micros(m.gate_micros as u64);
                     // Note-Off uses the same channel, 0 velocity
-                    if let Err(_) = pending.push((
+                    let _ = pending.push((
                         off_at,
                         m.endpoint as MIDIEndpointRef,
                         [(m.status & 0xF0) | (m.channel & 0x0F), m.note, 0],
-                    )) {
-                        println!("[CoreMIDI] WARNING: pending buffer full, dropped Note-Off!");
-                    }
+                    ));
                 }
             } else {
                 // Non-Note-On (including CC All-Notes-Off): send immediately
                 let bytes = [m.status, m.note, m.velocity];
-                let status = send_one(
+                let _ = send_one(
                     port,
                     m.endpoint as MIDIEndpointRef,
                     virtual_source,
                     &bytes,
                 );
-                if status == 0 {
-                    println!("[CoreMIDI] Successfully sent immediate MIDI data: {:?}", bytes);
-                } else {
-                    println!("[CoreMIDI] Failed to send immediate MIDI data: {:?}, status: {}", bytes, status);
-                }
             }
         }
 
@@ -358,10 +346,9 @@ pub unsafe fn create_client_and_port() -> Result<(usize, usize, usize), OSStatus
     let src_name = cfstring_from_str("StepForge Virtual Out\0");
     let mut source: MIDIEndpointRef = 0;
     if !src_name.is_null() {
-        let status = MIDISourceCreate(client, src_name, &mut source);
-        if status != 0 {
-            println!("[CoreMIDI] ERROR: MIDISourceCreate failed with status {}", status);
-        }
+        // Non-fatal: a failed virtual source leaves `source` at 0; real-endpoint
+        // MIDISend still works.
+        let _ = MIDISourceCreate(client, src_name, &mut source);
         CFRelease(src_name as CFTypeRef);
     }
 

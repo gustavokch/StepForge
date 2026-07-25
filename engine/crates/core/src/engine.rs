@@ -17,7 +17,7 @@ use crate::models::{Session, MAX_TRACKS, MIN_TRACKS, PATTERN_SLOTS, STEP_COUNT};
 use crate::undo::Undo;
 use arc_swap::ArcSwap;
 use std::sync::atomic::Ordering;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize};
 use std::sync::{Arc, Mutex};
 #[cfg(not(target_os = "ios"))]
 use ableton_link::link::BasicLink as Link;
@@ -137,11 +137,11 @@ impl Default for Transport {
     }
 }
 
-/// External-clock shared state (E6). Worker writes via `apply_command`
-/// (`LinkPhase` / `MidiClockTick`); the RT loop reads via atomic loads in
-/// `run_rt_loop`. All fields are lock-free atomics so the RT thread never
-/// blocks (Hard Rule 1). `Arc`-shared so the engine and RT thread see the
-/// same counters.
+/// External-clock shared state (E6). MIDI Clock pulses are worker-written via
+/// `apply_command(MidiClockTick)`; the Ableton Link position is written by the
+/// off-RT Link poller (`run_link_poller`). The RT loop reads ONLY these atomics
+/// in `run_rt_loop` — it never touches `link` or its `Mutex` (B2, Hard Rule 1).
+/// `Arc`-shared so the engine, RT thread, and poller see the same counters.
 pub struct ExternalClock {
     /// Raw 24-PPQN MIDI Clock tick count — worker increments per `MidiClockTick`.
     pub midi_ticks: AtomicU32,
@@ -149,10 +149,18 @@ pub struct ExternalClock {
     /// `swap(0, AcqRel)` each tick; worker `fetch_add`s under it.
     pub midi_step_pulses: AtomicU32,
     /// Absolute Link position as `beats_since_origin * 1_000_000` (integer
-    /// micros-of-a-beat). RT computes target 16th-step from this.
+    /// micros-of-a-beat), written by the off-RT Link poller. RT computes the
+    /// target 16th-step from this via `target_step_from_link_beats`.
     pub link_beats_micros: AtomicU64,
-    /// Whether the native Ableton Link session is enabled (Task 1).
+    /// Whether the native Ableton Link session is enabled. The poller idles
+    /// (no Link calls) while this is false.
     pub link_enabled: AtomicBool,
+    /// Current Link peer count, written by the poller (off-RT). The poller
+    /// tracks the last-emitted count locally to emit `LinkPeersChanged`.
+    pub link_peers: AtomicUsize,
+    /// The Link session. Touched ONLY off the RT thread — by the poller (read:
+    /// `capture_app_session_state`/`clock`/`num_peers`) and the worker
+    /// (`enable`/`disable` on `SetLinkEnabled`). Never on the RT hot path (B2).
     pub link: Mutex<Link>,
     #[cfg(not(target_os = "ios"))]
     pub tokio_rt: tokio::runtime::Runtime,
@@ -174,6 +182,7 @@ impl ExternalClock {
             midi_step_pulses: AtomicU32::new(0),
             link_beats_micros: AtomicU64::new(0),
             link_enabled: AtomicBool::new(false),
+            link_peers: AtomicUsize::new(0),
             link: Mutex::new(link),
             #[cfg(not(target_os = "ios"))]
             tokio_rt,
@@ -205,7 +214,6 @@ pub struct RtState {
     pub global_step: u32,
     pub track_count: usize,
     pub loop_count: u32,
-    pub link_peers: usize,
 }
 impl RtState {
     pub fn new(seed: u64) -> Self {
@@ -219,7 +227,6 @@ impl RtState {
             global_step: 0,
             track_count: 0,
             loop_count: 0,
-            link_peers: 0,
         }
     }
 }
@@ -238,6 +245,8 @@ pub struct Engine {
     pub worker_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// CoreMIDI worker handle. NULL before `engine_start` (Task 20a).
     pub coremidi_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Link poller thread handle (B2). `None` before `engine_start`.
+    pub link_poller_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// CoreMIDI client reference (owned by engine, Rule 7). Stored as `usize`
     /// (pointer-sized) so the ref survives regardless of how Apple defines
     /// `MIDIClientRef`; 0 means uninitialized.
@@ -267,6 +276,15 @@ pub struct Engine {
     pub reload_generation: AtomicU32,
 }
 
+/// Target 16th-step for the RT Link arm, derived purely from the
+/// `link_beats_micros` atomic (`beats_since_origin * 1_000_000`) that the off-RT
+/// Link poller publishes (B2). 4 16ths per beat. Pure + allocation-free — RT-safe
+/// (Hard Rule 1): the RT thread reads one atomic and calls only this.
+pub fn target_step_from_link_beats(link_beats_micros: u64) -> u64 {
+    let beats = link_beats_micros as f64 / 1_000_000.0;
+    (beats * 4.0) as u64
+}
+
 impl Engine {
     pub fn new() -> Self {
         Self {
@@ -280,6 +298,7 @@ impl Engine {
             rt_handle: Mutex::new(None),
             worker_handle: Mutex::new(None),
             coremidi_handle: Mutex::new(None),
+            link_poller_handle: Mutex::new(None),
             coremidi_client: Mutex::new(0usize),
             coremidi_port: Mutex::new(0usize),
             coremidi_source: Mutex::new(0usize),
@@ -377,26 +396,58 @@ impl Engine {
                     clock.sleep_until(now + 500);
                 }
                 crate::models::SyncSource::Link => {
-                    if let Ok(link) = self.external_clock.link.try_lock() {
-                        let state = link.capture_app_session_state();
-                        let time = link.clock().micros();
-                        let beats = state.beat_at_time(time, 4.0);
-                        let target = (beats * 4.0) as u64;
-                        while rt.link_step_count < target {
-                            self.process_one(&mut rt, &snap, playing, now);
-                            rt.link_step_count += 1;
-                        }
-                        let peers = link.num_peers();
-                        if peers as usize != rt.link_peers {
-                            rt.link_peers = peers as usize;
-                            let _ = crate::midi_out::push_event(
-                                &self.hot_events,
-                                &crate::event::EngineEvent::LinkPeersChanged { count: peers as usize },
-                            );
-                        }
+                    // Lock-free (B2): the off-RT Link poller (`run_link_poller`)
+                    // writes `link_beats_micros`; the RT thread only reads the
+                    // atomic and derives the target 16th-step. No Link call, no
+                    // Mutex, no allocation on the hot path (Hard Rule 1).
+                    let beats_micros = self
+                        .external_clock
+                        .link_beats_micros
+                        .load(Ordering::Acquire);
+                    let target = target_step_from_link_beats(beats_micros);
+                    while rt.link_step_count < target {
+                        self.process_one(&mut rt, &snap, playing, now);
+                        rt.link_step_count += 1;
                     }
                     clock.sleep_until(now + 500);
                 }
+            }
+        }
+    }
+
+    /// Off-RT Ableton Link poller (B2). The SOLE thread that touches
+    /// `external_clock.link`: while Link is enabled it captures the session
+    /// state + clock at a bounded rate and publishes the beat position to
+    /// `link_beats_micros` (which the RT loop reads lock-free) and emits
+    /// `LinkPeersChanged` on peer-count changes. All ableton-link-rs calls
+    /// (which allocate / may contend with Link's internal thread) happen here —
+    /// never on the RT thread (Hard Rule 1).
+    pub fn run_link_poller(self: &Arc<Engine>) {
+        let mut last_peers: usize = 0;
+        while !self.shutdown.load(Ordering::Acquire) {
+            if self.external_clock.link_enabled.load(Ordering::Acquire) {
+                // try_lock: never block — skip this tick if the worker holds
+                // the mutex during enable/disable.
+                if let Ok(link) = self.external_clock.link.try_lock() {
+                    let state = link.capture_app_session_state();
+                    let time = link.clock().micros();
+                    let beats = state.beat_at_time(time, 4.0);
+                    self.external_clock
+                        .link_beats_micros
+                        .store((beats * 1_000_000.0) as u64, Ordering::Release);
+                    let peers = link.num_peers() as usize;
+                    if peers != last_peers {
+                        last_peers = peers;
+                        self.external_clock.link_peers.store(peers, Ordering::Release);
+                        let _ = crate::midi_out::push_event(
+                            &self.hot_events,
+                            &crate::event::EngineEvent::LinkPeersChanged { count: peers },
+                        );
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
     }
@@ -707,10 +758,11 @@ impl Engine {
                 let mut needs_full_snapshot = false;
                 match other {
                     SetBpm { bpm } => {
-                        s.bpm = bpm;
+                        let clamped = bpm.clamp(crate::models::MIN_BPM, crate::models::MAX_BPM);
+                        s.bpm = clamped;
                         crate::midi_out::push_event(
                             &self.hot_events,
-                            &EngineEvent::BpmChanged { bpm },
+                            &EngineEvent::BpmChanged { bpm: clamped },
                         );
                     }
                     SetGlobalSwing { pct } => {
@@ -1062,6 +1114,28 @@ mod tests {
         let e = Engine::new();
         e.apply_command(Command::SetBpm { bpm: 174.0 });
         assert_eq!(e.snapshot_arc().bpm, 174.0);
+    }
+    #[test]
+    fn set_bpm_clamps_to_sane_range() {
+        // E9: an unbounded BPM makes the worst-case event rate unbounded, and
+        // a garbage/free-text value could spike it. SetBpm must clamp.
+        let e = Engine::new();
+        e.apply_command(Command::SetBpm { bpm: 1000.0 });
+        assert_eq!(e.snapshot_arc().bpm, 400.0, "clamp high");
+        e.apply_command(Command::SetBpm { bpm: 1.0 });
+        assert_eq!(e.snapshot_arc().bpm, 20.0, "clamp low");
+        e.apply_command(Command::SetBpm { bpm: 140.0 });
+        assert_eq!(e.snapshot_arc().bpm, 140.0, "in-range unchanged");
+    }
+    #[test]
+    fn link_beats_micros_maps_to_16th_step_target() {
+        // B2: the RT Link arm must derive the target 16th-step purely from the
+        // `link_beats_micros` atomic — no Link call on the hot path.
+        use crate::engine::target_step_from_link_beats;
+        assert_eq!(target_step_from_link_beats(0), 0);
+        assert_eq!(target_step_from_link_beats(1_000_000), 4, "1 beat = 4 16ths");
+        assert_eq!(target_step_from_link_beats(500_000), 2, "half beat = 2 16ths");
+        assert_eq!(target_step_from_link_beats(4_000_000), 16, "1 bar (4 beats) = 16");
     }
     #[test]
     fn play_stop_toggle_transport_atomic() {
