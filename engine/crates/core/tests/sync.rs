@@ -27,15 +27,12 @@ fn midi_clock_accumulates_one_step_pulse_per_six_ticks() {
 }
 
 #[test]
-fn link_phase_stores_absolute_position() {
+fn link_enabled_toggles_flag() {
     let e = Engine::new();
-    e.apply_command(Command::LinkPhase {
-        beats_since_origin: 4.5,
-        phase: 0.0,
-    });
+    e.apply_command(Command::SetLinkEnabled { enabled: true });
     assert_eq!(
-        e.external_clock.link_beats_micros.load(Ordering::Acquire),
-        4_500_000
+        e.external_clock.link_enabled.load(Ordering::Acquire),
+        true
     );
 }
 

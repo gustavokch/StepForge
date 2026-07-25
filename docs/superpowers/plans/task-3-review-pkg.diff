@@ -1,0 +1,168 @@
+diff --git a/app/StepForge/Engine/MidiManager.swift b/app/StepForge/Engine/MidiManager.swift
+new file mode 100644
+index 0000000..8de8f9b
+--- /dev/null
++++ b/app/StepForge/Engine/MidiManager.swift
+@@ -0,0 +1,61 @@
++import Foundation
++import CoreMIDI
++import Combine
++
++struct MidiDestination: Identifiable, Hashable {
++    let id: UInt32
++    let name: String
++}
++
++final class MidiManager: ObservableObject {
++    @Published private(set) var destinations: [MidiDestination] = []
++    @Published var selectedIDs: Set<UInt32> = []
++
++    private var client: MIDIClientRef = 0
++
++    init() {
++        setupClient()
++        refreshDestinations()
++    }
++
++    private func setupClient() {
++        var c: MIDIClientRef = 0
++        let status = MIDIClientCreate("StepForgeSwift" as CFString, nil, nil, &c)
++        if status == noErr {
++            client = c
++        }
++    }
++
++    func refreshDestinations() {
++        var list: [MidiDestination] = []
++        let count = MIDIGetNumberOfDestinations()
++        for i in 0..<count {
++            let endpoint = MIDIGetDestination(i)
++            var param: Unmanaged<CFString>?
++            let err = MIDIObjectGetStringProperty(endpoint, kMIDIPropertyDisplayName, &param)
++            let name: String
++            if err == noErr, let cfStr = param?.takeRetainedValue() {
++                name = cfStr as String
++            } else {
++                name = "MIDI Output \(i + 1)"
++            }
++            list.append(MidiDestination(id: UInt32(endpoint), name: name))
++        }
++        destinations = list
++    }
++
++    func toggleDestination(_ id: UInt32, on bridge: EngineBridge) {
++        if selectedIDs.contains(id) {
++            selectedIDs.remove(id)
++        } else {
++            selectedIDs.insert(id)
++        }
++        bridge.submit(.setMidiDestinations(endpoints: Array(selectedIDs)))
++    }
++
++    deinit {
++        if client != 0 {
++            MIDIClientDispose(client)
++        }
++    }
++}
+diff --git a/app/StepForge/Features/Settings/SettingsSheet.swift b/app/StepForge/Features/Settings/SettingsSheet.swift
+index 331db1a..2e46d86 100644
+--- a/app/StepForge/Features/Settings/SettingsSheet.swift
++++ b/app/StepForge/Features/Settings/SettingsSheet.swift
+@@ -1,28 +1,64 @@
+ import SwiftUI
+ 
+-/// Settings sheet (Phase 1 placeholder): MIDI routing, sync source, and global
+-/// MIDI channel live here in Phase 3 (CoreMIDI discovery + Ableton Link + MIDI
+-/// Clock — all Swift-owned, Hard Rule 7). For now it surfaces live mirror state.
++/// Settings sheet: MIDI routing, sync source, and global MIDI channel.
+ struct SettingsSheet: View {
+     @EnvironmentObject private var bridge: EngineBridge
+     @Environment(\.dismiss) private var dismiss
++    @StateObject private var midiManager = MidiManager()
++
++    private var globalChannelBinding: Binding<UInt8> {
++        Binding(
++            get: { bridge.mirror.globalMidiChannel },
++            set: { channel in
++                bridge.submit(.setGlobalMidiChannel(channel: channel))
++            }
++        )
++    }
+ 
+     var body: some View {
+         NavigationStack {
+             List {
+                 Section {
+                     LabeledContent("BPM", value: String(format: "%.1f", bridge.mirror.bpm))
+-                    LabeledContent("MIDI Channel", value: "\(bridge.mirror.globalMidiChannel)")
++                    Picker("Global MIDI Channel", selection: globalChannelBinding) {
++                        ForEach(UInt8(1)...UInt8(16), id: \.self) { ch in
++                            Text("Channel \(ch)\(ch == 10 ? " (GM Drums)" : "")")
++                                .tag(ch)
++                        }
++                    }
+                     LabeledContent("Sync Source", value: bridge.mirror.syncSource.label)
+                     LabeledContent("Swing", value: "\(Int((bridge.mirror.globalSwingPct * 100).rounded()))%")
+                 } header: { Text("Session") }
+ 
+                 Section {
+-                    Text("MIDI device selection — Phase 3").foregroundStyle(.secondary)
++                    if midiManager.destinations.isEmpty {
++                        Text("No MIDI output destinations found").foregroundStyle(Theme.textMuted)
++                    } else {
++                        ForEach(midiManager.destinations) { dest in
++                            Toggle(
++                                dest.name,
++                                isOn: Binding(
++                                    get: { midiManager.selectedIDs.contains(dest.id) },
++                                    set: { _ in midiManager.toggleDestination(dest.id, on: bridge) }
++                                )
++                            )
++                            .tint(Theme.primary)
++                        }
++                    }
++
++                    Button {
++                        midiManager.refreshDestinations()
++                    } label: {
++                        HStack {
++                            Image(systemName: "arrow.clockwise")
++                            Text("Refresh Destinations")
++                        }
++                    }
++                    .tint(Theme.primary)
+                 } header: { Text("MIDI Routing") }
+ 
+                 Section {
+-                    Text("Free / MIDI Clock / Link — Phase 3").foregroundStyle(.secondary)
++                    Text("Free / MIDI Clock / Link — Phase 3").foregroundStyle(Theme.textMuted)
+                 } header: { Text("Sync") }
+             }
+             .navigationTitle("Settings")
+diff --git a/app/StepForgeTests/MidiManagerTests.swift b/app/StepForgeTests/MidiManagerTests.swift
+new file mode 100644
+index 0000000..d3a14f7
+--- /dev/null
++++ b/app/StepForgeTests/MidiManagerTests.swift
+@@ -0,0 +1,20 @@
++import XCTest
++@testable import StepForge
++
++final class MidiManagerTests: XCTestCase {
++    func testMidiManagerInitialization() {
++        let manager = MidiManager()
++        XCTAssertNotNil(manager.destinations)
++    }
++
++    func testMidiManagerToggleSubmitsDestinations() {
++        let bridge = MockEngineBridge()
++        let manager = MidiManager()
++        
++        manager.toggleDestination(1001, on: bridge)
++        XCTAssertTrue(manager.selectedIDs.contains(1001))
++        
++        manager.toggleDestination(1001, on: bridge)
++        XCTAssertFalse(manager.selectedIDs.contains(1001))
++    }
++}

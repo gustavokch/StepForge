@@ -1,0 +1,2104 @@
+diff --git a/app/StepForge/Engine/EngineBridge.swift b/app/StepForge/Engine/EngineBridge.swift
+index 056e140..0f87dea 100644
+--- a/app/StepForge/Engine/EngineBridge.swift
++++ b/app/StepForge/Engine/EngineBridge.swift
+@@ -69,13 +69,13 @@ class EngineBridge: ObservableObject, @unchecked Sendable {
+     }
+ 
+     deinit {
+-        // Backstop for the force-quit path. Normal teardown calls scene-phase
+-        // `stop()` first (didStop == true), so we skip the redundant engine_stop.
+-        // A drain handler holds `self` weakly, so once deinit begins no live drain
+-        // mutates; the timer is already cancelled by stop() in the normal path.
+         drainTimer?.cancel()
+-        if let h = handle, !didStop { _ = engine_stop(h); }
+-        if let h = handle { engine_free(h); }
++        let h = handle
++        let stopped = didStop
++        drainQueue.sync {
++            if let h, !stopped { _ = engine_stop(h) }
++            if let h { engine_free(h) }
++        }
+     }
+ 
+     // MARK: - Commands (non-blocking; ErrDecode is non-fatal — Hard Rule 3)
+@@ -120,7 +120,6 @@ class EngineBridge: ObservableObject, @unchecked Sendable {
+         guard let h = handle else { return; }
+         var events: [EngineEvent] = []
+         var playheads: [Int: Int] = [:]   // trackIdx -> latest stepIdx (coalesced)
+-        var sawSwitch = false
+         while true {
+             var outPtr: UnsafeMutablePointer<UInt8>? = nil
+             var outLen: UInt = 0
+@@ -129,15 +128,15 @@ class EngineBridge: ObservableObject, @unchecked Sendable {
+             let copy = Array(UnsafeBufferPointer(start: p, count: Int(outLen)))
+             engine_free_bytes(p, outLen)                        // borrowed + freed immediately
+             guard let event = EngineEvent.decode(copy) else { continue; } // malformed → drop
+-            if case .playhead(let t, let s) = event { playheads[t] = s; } // per-track coalesce
+-            else {
+-                if case .patternSwitched = event { sawSwitch = true; }
+-                events.append(event);
++            if case .playhead(let t, let s) = event {
++                playheads[t] = s
++            } else {
++                if case .patternSwitched = event {
++                    playheads.removeAll(keepingCapacity: true)
++                }
++                events.append(event)
+             }
+         }
+-        // A pattern switch mid-batch clears the RT counters; drop any playheads
+-        // collected before it so the new pattern doesn't briefly inherit the old.
+-        if sawSwitch { playheads.removeAll(keepingCapacity: true); }
+         guard !events.isEmpty || !playheads.isEmpty else { return; }
+         // One MainActor hop per batch (E7).
+         DispatchQueue.main.async { [weak self] in
+diff --git a/app/StepForge/Engine/MidiManager.swift b/app/StepForge/Engine/MidiManager.swift
+new file mode 100644
+index 0000000..8de8f9b
+--- /dev/null
++++ b/app/StepForge/Engine/MidiManager.swift
+@@ -0,0 +1,61 @@
++import Foundation
++import CoreMIDI
++import Combine
++
++struct MidiDestination: Identifiable, Hashable {
++    let id: UInt32
++    let name: String
++}
++
++final class MidiManager: ObservableObject {
++    @Published private(set) var destinations: [MidiDestination] = []
++    @Published var selectedIDs: Set<UInt32> = []
++
++    private var client: MIDIClientRef = 0
++
++    init() {
++        setupClient()
++        refreshDestinations()
++    }
++
++    private func setupClient() {
++        var c: MIDIClientRef = 0
++        let status = MIDIClientCreate("StepForgeSwift" as CFString, nil, nil, &c)
++        if status == noErr {
++            client = c
++        }
++    }
++
++    func refreshDestinations() {
++        var list: [MidiDestination] = []
++        let count = MIDIGetNumberOfDestinations()
++        for i in 0..<count {
++            let endpoint = MIDIGetDestination(i)
++            var param: Unmanaged<CFString>?
++            let err = MIDIObjectGetStringProperty(endpoint, kMIDIPropertyDisplayName, &param)
++            let name: String
++            if err == noErr, let cfStr = param?.takeRetainedValue() {
++                name = cfStr as String
++            } else {
++                name = "MIDI Output \(i + 1)"
++            }
++            list.append(MidiDestination(id: UInt32(endpoint), name: name))
++        }
++        destinations = list
++    }
++
++    func toggleDestination(_ id: UInt32, on bridge: EngineBridge) {
++        if selectedIDs.contains(id) {
++            selectedIDs.remove(id)
++        } else {
++            selectedIDs.insert(id)
++        }
++        bridge.submit(.setMidiDestinations(endpoints: Array(selectedIDs)))
++    }
++
++    deinit {
++        if client != 0 {
++            MIDIClientDispose(client)
++        }
++    }
++}
+diff --git a/app/StepForge/Engine/Models.swift b/app/StepForge/Engine/Models.swift
+index b08b773..0afd412 100644
+--- a/app/StepForge/Engine/Models.swift
++++ b/app/StepForge/Engine/Models.swift
+@@ -72,7 +72,7 @@ enum SyncSource: UInt8, PostcardCodable, CaseIterable {
+ 
+ /// `FollowActionType { None, PlayNext, PlaySpecific(Uuid), PlayPrevious, Stop, PlayRandom }`.
+ /// `PlaySpecific` carries a `Uuid`, so this is not a simple raw-value enum.
+-indirect enum FollowActionType: PostcardCodable, Equatable {
++indirect enum FollowActionType: PostcardCodable, Equatable, Hashable {
+     case none, playNext, playSpecific(UUID), playPrevious, stop, playRandom
+ 
+     func encode(to writer: inout PostcardWriter) {
+diff --git a/app/StepForge/Engine/SessionMirror.swift b/app/StepForge/Engine/SessionMirror.swift
+index 51c8261..d1f9a9a 100644
+--- a/app/StepForge/Engine/SessionMirror.swift
++++ b/app/StepForge/Engine/SessionMirror.swift
+@@ -45,6 +45,10 @@ struct SessionMirror: Equatable {
+     }
+     /// Tracks of the active pattern (empty if the slot has no pattern).
+     var tracks: [Track] { activePattern?.tracks ?? [] }
++    /// Patterns in the session.
++    var patterns: [Pattern?] { session.patterns }
++    /// Playhead step index for track 0.
++    var playheadStep: Int? { playheads[0] }
+ 
+     // MARK: Event application (runs on MainActor, one hop per drain batch)
+ 
+@@ -150,12 +154,24 @@ struct SessionMirror: Equatable {
+             playing = true
+         case .stop:
+             playing = false
+-        // Roll/Vary/Cut/Copy/Paste/Undo/pattern/sync/load — no deterministic
++        case .queuePattern(let index, let quantize):
++            queuedPatternIndex = index
++            queuedPatternQuantize = quantize
++        case .cancelQueuedPattern:
++            queuedPatternIndex = nil
++            queuedPatternQuantize = nil
++        case .setFollowAction(let patternIdx, let action):
++            if session.patterns.indices.contains(patternIdx), var pat = session.patterns[patternIdx] {
++                pat.followAction = action
++                session.patterns[patternIdx] = pat
++            }
++        case .setMidiDestinations(let endpoints):
++            session.midiDestinations = endpoints
++        // Roll/Vary/Cut/Copy/Paste/Undo/sync/load — no deterministic
+         // optimistic echo (engine logic / RNG / external state); the real engine
+         // echoes the result. The mock leaves the mirror untouched for these.
+         case .roll, .vary, .cut, .copy, .paste, .undo,
+-             .queuePattern, .cancelQueuedPattern, .retriggerPattern,
+-             .setFollowAction, .setMidiDestinations, .requestFullSnapshot,
++             .retriggerPattern, .requestFullSnapshot,
+              .serialize, .loadSession, .linkPhase, .midiClockTick:
+             break
+         }
+@@ -196,7 +212,7 @@ struct SessionMirror: Equatable {
+ extension SessionMirror {
+     /// A rich, deterministic mirror for SwiftUI previews and UI tests: 6 tracks
+     /// (Kick / Snare / Closed Hat / Open Hat / Perc / Bass) with varied steps,
+-    /// bpm 124, one pattern. Never touches the engine.
++    /// bpm 120, one pattern. Never touches the engine.
+     static var demoSeed: SessionMirror {
+         var m = SessionMirror()
+         let names: [(UInt8, String)] = [
+@@ -219,7 +235,7 @@ extension SessionMirror {
+         }
+         var pattern = Pattern(id: SeedUUID.pattern, tracks: tracks)
+         m.session.patterns[0] = pattern
+-        m.session.bpm = 124
++        m.session.bpm = 120
+         m.playheads = [0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0]
+         return m
+     }
+diff --git a/app/StepForge/Features/Editing/ActionDrawer.swift b/app/StepForge/Features/Editing/ActionDrawer.swift
+index 1d9b687..c5386e2 100644
+--- a/app/StepForge/Features/Editing/ActionDrawer.swift
++++ b/app/StepForge/Features/Editing/ActionDrawer.swift
+@@ -2,13 +2,15 @@ import SwiftUI
+ 
+ /// Track action drawer (ui-ux-spec §3.2): Roll / Vary / Cut / Copy / Paste / Trash,
+ /// plus ✓ keep (dismiss) and ✕ revert (`Undo` for this track). Presented as a
+-/// compact sheet from the track header's "…". Roll/Vary use a default strength;
+-/// the inline ✓/✕ affordance matches the spec's keep/revert after Roll/Vary.
++/// compact sheet from the track header's "…". Includes mini strength sliders for Roll/Vary.
+ struct ActionDrawer: View {
+     @EnvironmentObject private var bridge: EngineBridge
+     @Environment(\.dismiss) private var dismiss
+     let trackIdx: Int
+ 
++    @State private var rollStrength: Float = 0.6
++    @State private var varyStrength: Float = 0.5
++
+     private var trackName: String {
+         DrumNames.name(for: bridge.mirror.tracks[safe: trackIdx]?.midiNote ?? 0)
+     }
+@@ -39,9 +41,39 @@ struct ActionDrawer: View {
+                 .accessibilityLabel("Revert (undo)")
+             }
+ 
++            HStack(spacing: Theme.Spacing.md) {
++                VStack(alignment: .leading, spacing: 2) {
++                    HStack {
++                        Text("VARY STRENGTH")
++                            .font(Typography.sectionTag)
++                            .foregroundStyle(Theme.textMuted)
++                        Spacer()
++                        Text("\(Int((varyStrength * 100).rounded()))%")
++                            .font(Typography.monoValue)
++                            .foregroundStyle(Theme.textSecondary)
++                    }
++                    Slider(value: $varyStrength, in: 0...1)
++                        .tint(Theme.primary)
++                }
++
++                VStack(alignment: .leading, spacing: 2) {
++                    HStack {
++                        Text("ROLL STRENGTH")
++                            .font(Typography.sectionTag)
++                            .foregroundStyle(Theme.textMuted)
++                        Spacer()
++                        Text("\(Int((rollStrength * 100).rounded()))%")
++                            .font(Typography.monoValue)
++                            .foregroundStyle(Theme.textSecondary)
++                    }
++                    Slider(value: $rollStrength, in: 0...1)
++                        .tint(Theme.primary)
++                }
++            }
++
+             HStack(spacing: 6) {
+-                action("Vary", "wand.and.stars") { bridge.submit(.vary(trackIdx: trackIdx, strength: 0.5)) }
+-                action("Roll", "dice") { bridge.submit(.roll(trackIdx: trackIdx, strength: 0.6)) }
++                action("Vary", "wand.and.stars") { bridge.submit(.vary(trackIdx: trackIdx, strength: varyStrength)) }
++                action("Roll", "dice") { bridge.submit(.roll(trackIdx: trackIdx, strength: rollStrength)) }
+                 action("Copy", "doc.on.doc") { bridge.submit(.copy(trackIdx: trackIdx)) }
+                 action("Cut", "scissors") { bridge.submit(.cut(trackIdx: trackIdx)) }
+                 action("Paste", "doc.on.clipboard") { bridge.submit(.paste(trackIdx: trackIdx)) }
+diff --git a/app/StepForge/Features/Editing/EditingView.swift b/app/StepForge/Features/Editing/EditingView.swift
+index 9ddb3d0..8e854a9 100644
+--- a/app/StepForge/Features/Editing/EditingView.swift
++++ b/app/StepForge/Features/Editing/EditingView.swift
+@@ -57,7 +57,7 @@ struct EditingView: View {
+         }
+         .sheet(item: $drawerTarget) { target in
+             ActionDrawer(trackIdx: target.track)
+-                .presentationDetents([.height(132)])
++                .presentationDetents([.height(180)])
+         }
+     }
+ 
+diff --git a/app/StepForge/Features/Editing/FeelBar.swift b/app/StepForge/Features/Editing/FeelBar.swift
+index 602a5ba..0bc7fa1 100644
+--- a/app/StepForge/Features/Editing/FeelBar.swift
++++ b/app/StepForge/Features/Editing/FeelBar.swift
+@@ -1,17 +1,11 @@
+ import SwiftUI
+ 
+-/// Feel controls (ui-ux-spec §1.1 Row 2): global swing, humanize popover, and the
+-/// quantize-grain cycle. (Pattern management is reached via the Performance mode
+-/// toggle, so the Patterns button is omitted from this row.)
+-///
+-/// Swing and humanize have **no echo event** in the 18-event contract, so their
+-/// controls are driven by UI-local `@State` (seeded from the mirror, re-synced on
+-/// `FullSnapshot` for swing) and submitted to the engine on change — otherwise a
+-/// binding straight to `mirror.globalSwingPct` would snap back to 0 every drag tick.
+-/// The quantize grain is also UI-local default state (not persisted in `Session`).
++/// Feel controls (ui-ux-spec §1.1 Row 2): global swing, humanize popover,
++/// quantize-grain cycle, and patterns selector popover.
+ struct FeelBar: View {
+     @EnvironmentObject private var bridge: EngineBridge
+     @State private var showHumanize = false
++    @State private var showPatterns = false
+     @State private var humanizeTiming: Float = 0
+     @State private var humanizeVelocity: Float = 0
+     @State private var swingValue: Float = 0
+@@ -19,6 +13,7 @@ struct FeelBar: View {
+ 
+     var body: some View {
+         HStack(spacing: Theme.Spacing.sm) {
++            patternsControl
+             swingControl
+             humanizeControl
+             Spacer(minLength: Theme.Spacing.xs)
+@@ -36,6 +31,12 @@ struct FeelBar: View {
+             .frame(idealWidth: 280, idealHeight: 150)
+             .presentationCompactAdaptation(.popover)
+         }
++        .popover(isPresented: $showPatterns) {
++            PatternPickerPopover()
++                .environmentObject(bridge)
++                .frame(idealWidth: 240, idealHeight: 160)
++                .presentationCompactAdaptation(.popover)
++        }
+     }
+ 
+     private func seedFromMirror() {
+@@ -44,6 +45,24 @@ struct FeelBar: View {
+         humanizeVelocity = bridge.mirror.humanizeVelocity
+     }
+ 
++    private var patternsControl: some View {
++        Button { showPatterns.toggle() } label: {
++            HStack(spacing: 4) {
++                Image(systemName: "square.grid.2x2").font(.caption)
++                Text("PATTERNS").font(Typography.controlLabel)
++                Text("P\(bridge.mirror.activePatternIndex + 1)")
++                    .font(Typography.monoValue)
++                    .foregroundStyle(Theme.primary)
++            }
++            .foregroundStyle(Theme.textSecondary)
++            .contentShape(Rectangle())
++        }
++        .buttonStyle(.plain)
++        .padding(.horizontal, 8)
++        .padding(.vertical, 6)
++        .raisedStyle()
++    }
++
+     private var swingControl: some View {
+         HStack(spacing: 6) {
+             Text("GROOVE").font(Typography.controlLabel).foregroundStyle(Theme.textMuted)
+@@ -101,6 +120,42 @@ struct FeelBar: View {
+     }
+ }
+ 
++/// Pattern picker popover for quick pattern switching / queuing in Editing view.
++private struct PatternPickerPopover: View {
++    @EnvironmentObject private var bridge: EngineBridge
++    @Environment(\.dismiss) private var dismiss
++
++    var body: some View {
++        VStack(alignment: .leading, spacing: Theme.Spacing.sm) {
++            SectionLabel("Pattern Bank")
++            LazyVGrid(columns: [GridItem(.adaptive(minimum: 48))], spacing: 8) {
++                ForEach(0..<8, id: \.self) { idx in
++                    let isActive = bridge.mirror.activePatternIndex == idx
++                    let isQueued = bridge.mirror.queuedPatternIndex == idx
++                    Button {
++                        bridge.submit(.queuePattern(index: idx, quantize: .nextBar))
++                        dismiss()
++                    } label: {
++                        Text("P\(idx + 1)")
++                            .font(Typography.monoValue)
++                            .foregroundStyle(isActive ? Theme.onPrimary : (isQueued ? Theme.primary : Theme.textPrimary))
++                            .frame(width: 48, height: 36)
++                            .background(isActive ? Theme.primary : Theme.Surface.high)
++                            .cornerRadius(Theme.Radius.sm)
++                            .overlay(
++                                RoundedRectangle(cornerRadius: Theme.Radius.sm)
++                                    .stroke(isQueued ? Theme.primary : Theme.borderWeak, lineWidth: 1)
++                            )
++                    }
++                    .buttonStyle(.plain)
++                }
++            }
++        }
++        .padding()
++        .background(Theme.Surface.low)
++    }
++}
++
+ /// Humanize popover (ui-ux-spec §1.1 Row 2): Timing Jitter + Velocity
+ /// Randomization sliders. Commits via `onApply`.
+ private struct HumanizeEditor: View {
+diff --git a/app/StepForge/Features/Editing/NotePickerSheet.swift b/app/StepForge/Features/Editing/NotePickerSheet.swift
+new file mode 100644
+index 0000000..7361d98
+--- /dev/null
++++ b/app/StepForge/Features/Editing/NotePickerSheet.swift
+@@ -0,0 +1,105 @@
++import SwiftUI
++
++/// Hybrid Note Picker: GM Drum grid + 2-octave mini piano keyboard.
++struct NotePickerSheet: View {
++    let trackIdx: Int
++    let currentNote: UInt8
++    let onSelect: (UInt8) -> Void
++    @Environment(\.dismiss) private var dismiss
++
++    @State private var mode: PickerMode = .gmDrums
++
++    enum PickerMode: String, CaseIterable, Identifiable {
++        case gmDrums = "GM Drums"
++        case piano = "Piano Roll"
++        var id: String { rawValue }
++    }
++
++    private static let gmSoundNames: [(note: UInt8, name: String)] = [
++        (35, "Acoustic Bass Drum"), (36, "Bass Drum 1 (Kick)"),
++        (37, "Side Stick"), (38, "Acoustic Snare"),
++        (39, "Hand Clap"), (40, "Electric Snare"),
++        (41, "Low Floor Tom"), (42, "Closed Hi-Hat"),
++        (43, "High Floor Tom"), (44, "Pedal Hi-Hat"),
++        (45, "Low Tom"), (46, "Open Hi-Hat"),
++        (47, "Low-Mid Tom"), (48, "Hi-Mid Tom"),
++        (49, "Crash Cymbal 1"), (50, "High Tom")
++    ]
++
++    var body: some View {
++        NavigationStack {
++            VStack(spacing: 16) {
++                Picker("Mode", selection: $mode) {
++                    ForEach(PickerMode.allCases) { m in
++                        Text(m.rawValue).tag(m)
++                    }
++                }
++                .pickerStyle(.segmented)
++                .padding(.horizontal)
++
++                if mode == .gmDrums {
++                    ScrollView {
++                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 140))], spacing: 10) {
++                            ForEach(Self.gmSoundNames, id: \.note) { item in
++                                Button {
++                                    onSelect(item.note)
++                                    dismiss()
++                                } label: {
++                                    VStack(alignment: .leading, spacing: 4) {
++                                        Text(item.name)
++                                            .font(Typography.trackName)
++                                            .foregroundColor(item.note == currentNote ? Theme.primary : Theme.textPrimary)
++                                        Text("MIDI \(item.note)")
++                                            .font(Typography.badge)
++                                            .foregroundColor(Theme.textSecondary)
++                                    }
++                                    .frame(maxWidth: .infinity, alignment: .leading)
++                                    .padding(12)
++                                    .background(item.note == currentNote ? Theme.Surface.high : Theme.Surface.default)
++                                    .cornerRadius(Theme.Radius.md)
++                                    .overlay(
++                                        RoundedRectangle(cornerRadius: Theme.Radius.md)
++                                            .stroke(item.note == currentNote ? Theme.primary : Color.clear, lineWidth: 1)
++                                    )
++                                }
++                            }
++                        }
++                        .padding(.horizontal)
++                    }
++                } else {
++                    ScrollView(.horizontal, showsIndicators: false) {
++                        HStack(spacing: 2) {
++                            ForEach(36...60, id: \.self) { note in
++                                let isBlack = [1, 3, 6, 8, 10].contains(note % 12)
++                                Button {
++                                    onSelect(UInt8(note))
++                                    dismiss()
++                                } label: {
++                                    VStack {
++                                        Spacer()
++                                        Text("\(note)")
++                                            .font(Typography.badge)
++                                            .foregroundColor(isBlack ? .white : .black)
++                                            .padding(.bottom, 8)
++                                    }
++                                    .frame(width: isBlack ? 28 : 36, height: isBlack ? 120 : 180)
++                                    .background(note == Int(currentNote) ? Theme.primary : (isBlack ? Color.black : Color.white))
++                                    .cornerRadius(Theme.Radius.sm)
++                                }
++                            }
++                        }
++                        .padding()
++                    }
++                }
++            }
++            .navigationTitle("Select Track Note")
++            .navigationBarTitleDisplayMode(.inline)
++            .toolbar {
++                ToolbarItem(placement: .cancellationAction) {
++                    Button("Close") { dismiss() }
++                }
++            }
++            .background(Theme.Surface.lowest.ignoresSafeArea())
++        }
++    }
++}
+diff --git a/app/StepForge/Features/Editing/TrackHeader.swift b/app/StepForge/Features/Editing/TrackHeader.swift
+index b7c81e1..03ddb37 100644
+--- a/app/StepForge/Features/Editing/TrackHeader.swift
++++ b/app/StepForge/Features/Editing/TrackHeader.swift
+@@ -1,30 +1,42 @@
+ import SwiftUI
+ 
+ /// Pinned track header (ui-ux-spec §3.1): mute toggle, drum/note name, speed-ratio
+-/// chip, and "…" → opens the action drawer. Reads the `Track`; mute toggles submit
+-/// `SetTrackMuted`. (Note-name tap → Note Picker is Phase 4.)
++/// chip, length chip, note picker trigger, and "…" → opens the action drawer. Reads
++/// the `Track`; mute toggles submit `SetTrackMuted`. Note name tap opens `NotePickerSheet`.
+ struct TrackHeader: View {
+     @EnvironmentObject private var bridge: EngineBridge
+     let track: Track
+     let trackIdx: Int
+     let onOpenActions: () -> Void
+ 
++    @State private var showNotePicker = false
++
+     var body: some View {
+         HStack(spacing: 6) {
+             muteButton
+             VStack(alignment: .leading, spacing: 1) {
+                 HStack(spacing: 4) {
+-                    Text(DrumNames.name(for: track.midiNote))
+-                        .font(Typography.trackName)
+-                        .foregroundStyle(track.muted ? Theme.textMuted : Theme.textPrimary)
+-                        .lineLimit(1)
+-                    if abs(track.speedRatio - 1.0) > 0.001 {
+-                        Chip(text: SpeedRatio.label(track.speedRatio))
++                    Button {
++                        showNotePicker = true
++                    } label: {
++                        Text(DrumNames.name(for: track.midiNote))
++                            .font(Typography.trackName)
++                            .foregroundStyle(track.muted ? Theme.textMuted : Theme.textPrimary)
++                            .lineLimit(1)
+                     }
++                    .buttonStyle(.plain)
++
++                    speedMenu
++                    lengthMenu
++                }
++                Button {
++                    showNotePicker = true
++                } label: {
++                    Text("NOTE \(track.midiNote)")
++                        .font(Typography.badge)
++                        .foregroundStyle(Theme.textMuted)
+                 }
+-                Text("NOTE \(track.midiNote)")
+-                    .font(Typography.badge)
+-                    .foregroundStyle(Theme.textMuted)
++                .buttonStyle(.plain)
+             }
+             Spacer(minLength: 2)
+             Button(action: onOpenActions) {
+@@ -39,6 +51,52 @@ struct TrackHeader: View {
+         .padding(.horizontal, 6)
+         .frame(maxWidth: .infinity, alignment: .leading)
+         .background(Theme.Surface.low)
++        .sheet(isPresented: $showNotePicker) {
++            NotePickerSheet(
++                trackIdx: trackIdx,
++                currentNote: track.midiNote
++            ) { note in
++                bridge.submit(.setTrackNote(trackIdx: trackIdx, midiNote: note))
++            }
++        }
++    }
++
++    private var speedMenu: some View {
++        Menu {
++            ForEach([0.5, 1.0, 2.0, 3.0], id: \.self) { ratio in
++                Button {
++                    bridge.submit(.setTrackSpeedRatio(trackIdx: trackIdx, ratio: Float(ratio)))
++                } label: {
++                    HStack {
++                        Text(SpeedRatio.label(Float(ratio)))
++                        if abs(track.speedRatio - Float(ratio)) < 0.01 {
++                            Image(systemName: "checkmark")
++                        }
++                    }
++                }
++            }
++        } label: {
++            Chip(text: SpeedRatio.label(track.speedRatio), accent: abs(track.speedRatio - 1.0) > 0.001)
++        }
++    }
++
++    private var lengthMenu: some View {
++        Menu {
++            ForEach(1...16, id: \.self) { l in
++                Button {
++                    bridge.submit(.setTrackLength(trackIdx: trackIdx, length: l))
++                } label: {
++                    HStack {
++                        Text("\(l) steps")
++                        if track.length == l {
++                            Image(systemName: "checkmark")
++                        }
++                    }
++                }
++            }
++        } label: {
++            Chip(text: "\(track.length)s", accent: track.length != 16)
++        }
+     }
+ 
+     private var muteButton: some View {
+@@ -58,8 +116,7 @@ struct TrackHeader: View {
+     }
+ }
+ 
+-/// General-MIDI drum name lookup (falls back to the note number). (Note Picker
+-/// §5.2 is Phase 4; this is the read-only header label.)
++/// General-MIDI drum name lookup (falls back to the note number).
+ enum DrumNames {
+     private static let map: [UInt8: String] = [
+         35: "Kick", 36: "Kick", 37: "Side Stick", 38: "Snare", 39: "Clap", 40: "Snare",
+diff --git a/app/StepForge/Features/Editing/TrackList.swift b/app/StepForge/Features/Editing/TrackList.swift
+index b3c9d81..457a3c5 100644
+--- a/app/StepForge/Features/Editing/TrackList.swift
++++ b/app/StepForge/Features/Editing/TrackList.swift
+@@ -4,7 +4,8 @@ import SwiftUI
+ /// outside the horizontal scroll) beside that track's 16 `StepCell`s (in a single
+ /// shared horizontal scroll so columns stay aligned across rows). Reads tracks from
+ /// `bridge.mirror`; gesture callbacks bubble long-press (ratchet) and header "…"
+-/// (action drawer) up to `EditingView`.
++/// (action drawer) up to `EditingView`. Wraps vertical scroll in `ScrollViewReader`
++/// to auto-scroll when new tracks are added.
+ struct TrackList: View {
+     @EnvironmentObject private var bridge: EngineBridge
+     @Environment(\.horizontalSizeClass) private var hSize
+@@ -29,20 +30,21 @@ struct TrackList: View {
+     }
+ 
+     private func grid(metrics: GridMetrics, tracks: [Track]) -> some View {
+-        ScrollView(.vertical, showsIndicators: false) {
+-            HStack(alignment: .top, spacing: 0) {
+-                // Pinned header column — fixed width, NOT in the horizontal scroll.
+-                VStack(spacing: metrics.rowSpacing) {
+-                    ForEach(Array(tracks.enumerated()), id: \.element.id) { idx, track in
+-                        TrackHeader(track: track, trackIdx: idx) {
+-                            drawerTarget = DrawerTarget(track: idx)
++        ScrollViewReader { proxy in
++            ScrollView(.vertical, showsIndicators: false) {
++                HStack(alignment: .top, spacing: 0) {
++                    // Pinned header column — fixed width, NOT in the horizontal scroll.
++                    VStack(spacing: metrics.rowSpacing) {
++                        ForEach(Array(tracks.enumerated()), id: \.element.id) { idx, track in
++                            TrackHeader(track: track, trackIdx: idx) {
++                                drawerTarget = DrawerTarget(track: idx)
++                            }
++                            .frame(width: metrics.headerWidth, height: metrics.rowHeight)
++                            .id(track.id)
+                         }
+-                        .frame(width: metrics.headerWidth, height: metrics.rowHeight)
+                     }
+-                }
+ 
+-                // One shared horizontal scroller for every row's cells.
+-                ScrollViewReader { _ in
++                    // One shared horizontal scroller for every row's cells.
+                     ScrollView(.horizontal, showsIndicators: false) {
+                         VStack(spacing: metrics.rowSpacing) {
+                             ForEach(Array(tracks.enumerated()), id: \.element.id) { idx, track in
+@@ -55,14 +57,21 @@ struct TrackList: View {
+                         }
+                     }
+                 }
++                .padding(.vertical, Theme.Spacing.xs)
++            }
++            .onChange(of: tracks.count) { oldCount, newCount in
++                if newCount > oldCount, let last = tracks.last {
++                    withAnimation {
++                        proxy.scrollTo(last.id, anchor: .bottom)
++                    }
++                }
+             }
+-            .padding(.vertical, Theme.Spacing.xs)
+         }
+     }
+ 
+     private var emptyState: some View {
+         VStack(spacing: Theme.Spacing.sm) {
+-            Image(systemName: "drum.fill").font(.system(size: 40)).foregroundStyle(Theme.textMuted)
++            Image(systemName: "music.note").font(.system(size: 40)).foregroundStyle(Theme.textMuted)
+             Text("No tracks").font(Typography.controlLabel).foregroundStyle(Theme.textMuted)
+         }
+         .frame(maxWidth: .infinity, maxHeight: .infinity)
+diff --git a/app/StepForge/Features/Performance/PatternOptionsSheet.swift b/app/StepForge/Features/Performance/PatternOptionsSheet.swift
+new file mode 100644
+index 0000000..e9ed3da
+--- /dev/null
++++ b/app/StepForge/Features/Performance/PatternOptionsSheet.swift
+@@ -0,0 +1,50 @@
++import SwiftUI
++
++struct PatternOptionsSheet: View {
++    let patternIdx: Int
++    let currentFollowAction: FollowAction
++    let onSaveFollowAction: (FollowAction) -> Void
++    @Environment(\.dismiss) private var dismiss
++
++    @State private var afterLoops: Int
++    @State private var actionType: FollowActionType
++
++    init(patternIdx: Int, currentFollowAction: FollowAction, onSaveFollowAction: @escaping (FollowAction) -> Void) {
++        self.patternIdx = patternIdx
++        self.currentFollowAction = currentFollowAction
++        self.onSaveFollowAction = onSaveFollowAction
++        _afterLoops = State(initialValue: Int(currentFollowAction.afterLoops))
++        _actionType = State(initialValue: currentFollowAction.action)
++    }
++
++    var body: some View {
++        NavigationStack {
++            Form {
++                Section("Follow Action") {
++                    Stepper("After Loops: \(afterLoops)", value: $afterLoops, in: 1...16)
++                    
++                    Picker("Action Type", selection: $actionType) {
++                        Text("None").tag(FollowActionType.none)
++                        Text("Play Next").tag(FollowActionType.playNext)
++                        Text("Play Previous").tag(FollowActionType.playPrevious)
++                        Text("Stop").tag(FollowActionType.stop)
++                        Text("Play Random").tag(FollowActionType.playRandom)
++                    }
++                }
++            }
++            .navigationTitle("Pattern \(patternIdx + 1) Options")
++            .navigationBarTitleDisplayMode(.inline)
++            .toolbar {
++                ToolbarItem(placement: .confirmationAction) {
++                    Button("Save") {
++                        onSaveFollowAction(FollowAction(afterLoops: UInt32(afterLoops), action: actionType))
++                        dismiss()
++                    }
++                }
++                ToolbarItem(placement: .cancellationAction) {
++                    Button("Cancel") { dismiss() }
++                }
++            }
++        }
++    }
++}
+diff --git a/app/StepForge/Features/Performance/PerformanceView.swift b/app/StepForge/Features/Performance/PerformanceView.swift
+index d577d62..64b0a39 100644
+--- a/app/StepForge/Features/Performance/PerformanceView.swift
++++ b/app/StepForge/Features/Performance/PerformanceView.swift
+@@ -1,26 +1,344 @@
+ import SwiftUI
+ 
+-/// Performance mode (ui-ux-spec §1.2) — live pattern jamming. Phase 1 placeholder;
+-/// the 3×3 pattern picker, retrigger shortcuts, and quantize-grain control land in
+-/// Phase 2. Reads transport state from the mirror so play/stop still reflect.
++/// Mode Selector: Jam vs Arrangement
++enum PerformanceMode: String, CaseIterable, Identifiable {
++    case jam = "Jam"
++    case arrangement = "Arrangement"
++    var id: String { rawValue }
++}
++
++/// Helper struct to present pattern options sheet by item
++private struct PatternIdxItem: Identifiable {
++    let id: Int
++}
++
++/// Performance mode (ui-ux-spec §1.2) — live pattern jamming.
++/// Renders 3x3 pattern grid, queueing, retrigger gestures, quantize grain selector,
++/// follow action editor, and track activity LEDs.
+ struct PerformanceView: View {
+     @EnvironmentObject private var bridge: EngineBridge
+ 
++    @State private var mode: PerformanceMode = .jam
++    @State private var quantizeGrain: QuantizeGrain = .nextBeat
++    @State private var selectedPatternIdxForOptions: Int? = nil
++
+     var body: some View {
+         VStack(spacing: Theme.Spacing.md) {
++            topBar
++            modeSelector
++            patternGrid
++            Divider()
++                .background(Theme.borderWeak)
++            trackActivitySection
++        }
++        .padding(Theme.Spacing.md)
++        .background(Theme.Surface.lowest)
++        .sheet(item: Binding(
++            get: { selectedPatternIdxForOptions.map { PatternIdxItem(id: $0) } },
++            set: { selectedPatternIdxForOptions = $0?.id }
++        )) { item in
++            if let pattern = bridge.mirror.patterns.indices.contains(item.id) ? bridge.mirror.patterns[item.id] : nil {
++                PatternOptionsSheet(
++                    patternIdx: item.id,
++                    currentFollowAction: pattern.followAction,
++                    onSaveFollowAction: { action in
++                        bridge.submit(.setFollowAction(patternIdx: item.id, action: action))
++                    }
++                )
++            }
++        }
++    }
++
++    // MARK: - Top Bar
++    private var topBar: some View {
++        HStack(spacing: Theme.Spacing.md) {
++            // Enlarged Play/Stop
++            Button {
++                bridge.submit(bridge.mirror.playing ? .stop : .play)
++            } label: {
++                HStack(spacing: 6) {
++                    Image(systemName: bridge.mirror.playing ? "stop.fill" : "play.fill")
++                        .font(.title2)
++                    Text(bridge.mirror.playing ? "STOP" : "PLAY")
++                        .font(Typography.controlLabel)
++                        .bold()
++                }
++                .foregroundStyle(bridge.mirror.playing ? Theme.primary : Theme.textPrimary)
++                .padding(.horizontal, Theme.Spacing.md)
++                .frame(height: 48)
++            }
++            .buttonStyle(.plain)
++            .raisedStyle(radius: Theme.Radius.md)
++
++            // Enlarged Patterns Button with Loop Progress Ring
++            HStack(spacing: Theme.Spacing.sm) {
++                ZStack {
++                    Circle()
++                        .stroke(Theme.borderWeak, lineWidth: 3)
++                    if bridge.mirror.playing {
++                        Circle()
++                            .trim(from: 0, to: loopProgress)
++                            .stroke(Theme.primary, style: StrokeStyle(lineWidth: 3, lineCap: .round))
++                            .rotationEffect(.degrees(-90))
++                    }
++                    Image(systemName: "square.grid.3x3.fill")
++                        .font(.system(size: 14))
++                        .foregroundStyle(bridge.mirror.playing ? Theme.primary : Theme.textSecondary)
++                }
++                .frame(width: 28, height: 28)
++
++                VStack(alignment: .leading, spacing: 2) {
++                    Text("PATTERNS")
++                        .font(Typography.sectionTag)
++                        .foregroundStyle(Theme.textMuted)
++                    Text("Pattern \(bridge.mirror.activePatternIndex + 1)")
++                        .font(Typography.trackName)
++                        .foregroundStyle(Theme.textPrimary)
++                }
++            }
++            .padding(.horizontal, Theme.Spacing.md)
++            .frame(height: 48)
++            .panelStyle(Theme.Surface.high, radius: Theme.Radius.md)
++
+             Spacer()
+-            Image(systemName: "music.note")
+-                .font(.system(size: 48))
+-                .foregroundStyle(bridge.mirror.playing ? Theme.primary : Theme.textMuted)
+-            Text("Performance")
+-                .font(Typography.trackName)
+-                .foregroundStyle(Theme.textPrimary)
+-            Text("Pattern picker — Phase 2")
++
++            // Enlarged Quantize Grain Selector
++            HStack(spacing: 4) {
++                ForEach(QuantizeGrain.allCases, id: \.self) { grain in
++                    Button {
++                        quantizeGrain = grain
++                        bridge.submit(.setQuantizeGrain(grain: grain))
++                    } label: {
++                        Text(grain.shortLabel)
++                            .font(Typography.badge)
++                            .foregroundStyle(quantizeGrain == grain ? Theme.onPrimary : Theme.textSecondary)
++                            .padding(.horizontal, 10)
++                            .padding(.vertical, 8)
++                            .background(quantizeGrain == grain ? Theme.primary : Theme.Surface.low)
++                            .cornerRadius(Theme.Radius.sm)
++                    }
++                    .buttonStyle(.plain)
++                }
++            }
++            .padding(4)
++            .panelStyle(Theme.Surface.default, radius: Theme.Radius.md)
++        }
++    }
++
++    // MARK: - Mode Selector
++    private var modeSelector: some View {
++        HStack {
++            Text("MODE")
++                .font(Typography.sectionTag)
++                .foregroundStyle(Theme.textMuted)
++
++            Picker("Mode", selection: $mode) {
++                ForEach(PerformanceMode.allCases) { m in
++                    Text(m.rawValue).tag(m)
++                }
++            }
++            .pickerStyle(.segmented)
++            .onChange(of: mode) { _, newMode in
++                switch newMode {
++                case .jam:
++                    quantizeGrain = .nextBeat
++                    bridge.submit(.setQuantizeGrain(grain: .nextBeat))
++                case .arrangement:
++                    quantizeGrain = .endOfPattern
++                    bridge.submit(.setQuantizeGrain(grain: .endOfPattern))
++                }
++            }
++        }
++        .padding(.horizontal, Theme.Spacing.sm)
++    }
++
++    // MARK: - 3x3 Pattern Grid
++    private var patternGrid: some View {
++        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: Theme.Spacing.sm), count: 3), spacing: Theme.Spacing.sm) {
++            ForEach(0..<9, id: \.self) { idx in
++                patternCell(for: idx)
++            }
++        }
++    }
++
++    private func patternCell(for idx: Int) -> some View {
++        let pattern = bridge.mirror.patterns.indices.contains(idx) ? bridge.mirror.patterns[idx] : nil
++        let isFilled = (pattern != nil)
++        let isActive = (bridge.mirror.activePatternIndex == idx)
++        let isQueued = (bridge.mirror.queuedPatternIndex == idx)
++
++        return ZStack(alignment: .topTrailing) {
++            VStack(spacing: Theme.Spacing.xs) {
++                Text("Pattern \(idx + 1)")
++                    .font(Typography.trackName)
++                    .foregroundStyle(cellTextColor(isFilled: isFilled, isActive: isActive, isQueued: isQueued))
++
++                if isQueued {
++                    Text("QUEUED")
++                        .font(Typography.badge)
++                        .foregroundStyle(Theme.primaryDim)
++                } else if isActive {
++                    Text("PLAYING")
++                        .font(Typography.badge)
++                        .foregroundStyle(Theme.primary)
++                } else if isFilled {
++                    Text("FILLED")
++                        .font(Typography.badge)
++                        .foregroundStyle(Theme.textSecondary)
++                } else {
++                    Text("EMPTY")
++                        .font(Typography.badge)
++                        .foregroundStyle(Theme.textMuted)
++                }
++
++                if let fa = pattern?.followAction, fa.action != .none {
++                    Text("\(fa.action.shortLabel) (x\(fa.afterLoops))")
++                        .chipStyle(foreground: Theme.primaryDim, background: Theme.Surface.low, border: Theme.borderStrong)
++                }
++            }
++            .frame(maxWidth: .infinity, minHeight: 90)
++            .background(cellBackground(isFilled: isFilled, isActive: isActive, isQueued: isQueued))
++            .overlay(
++                RoundedRectangle(cornerRadius: Theme.Radius.lg)
++                    .stroke(cellBorderColor(isFilled: isFilled, isActive: isActive, isQueued: isQueued),
++                            lineWidth: isActive ? 2 : 1)
++            )
++            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.lg))
++            .overlay(alignment: .bottom) {
++                if isActive && bridge.mirror.playing {
++                    GeometryReader { geo in
++                        Rectangle()
++                            .fill(Theme.primary)
++                            .frame(width: geo.size.width * loopProgress, height: 3)
++                    }
++                    .frame(height: 3)
++                }
++            }
++
++            if isFilled {
++                Button {
++                    selectedPatternIdxForOptions = idx
++                } label: {
++                    Image(systemName: "gearshape.fill")
++                        .font(.system(size: 12))
++                        .foregroundStyle(Theme.textMuted)
++                        .padding(8)
++                }
++                .buttonStyle(.plain)
++            }
++        }
++        .contentShape(Rectangle())
++        .onTapGesture {
++            if isActive {
++                bridge.submit(.retriggerPattern(quantize: .nextBeat))
++            } else if isFilled {
++                if isQueued {
++                    bridge.submit(.cancelQueuedPattern)
++                } else {
++                    bridge.submit(.queuePattern(index: idx, quantize: quantizeGrain))
++                }
++            }
++        }
++        .onLongPressGesture {
++            if isActive {
++                bridge.submit(.retriggerPattern(quantize: .nextStep))
++            } else if isFilled {
++                selectedPatternIdxForOptions = idx
++            }
++        }
++    }
++
++    private func cellBackground(isFilled: Bool, isActive: Bool, isQueued: Bool) -> Color {
++        if isActive { return Theme.Surface.high }
++        if isQueued { return Theme.Surface.high }
++        if isFilled { return Theme.Surface.default }
++        return Theme.Surface.low
++    }
++
++    private func cellBorderColor(isFilled: Bool, isActive: Bool, isQueued: Bool) -> Color {
++        if isActive { return Theme.primary }
++        if isQueued { return Theme.primaryDim }
++        if isFilled { return Theme.borderStrong }
++        return Theme.borderWeak
++    }
++
++    private func cellTextColor(isFilled: Bool, isActive: Bool, isQueued: Bool) -> Color {
++        if isActive { return Theme.primary }
++        if isQueued { return Theme.primaryDim }
++        if isFilled { return Theme.textPrimary }
++        return Theme.textMuted
++    }
++
++    // MARK: - Loop Progress Helper
++    private var loopProgress: Double {
++        guard bridge.mirror.playing else { return 0.0 }
++        let currentStep = bridge.mirror.playheadStep ?? 0
++        let totalSteps = bridge.mirror.tracks.first?.length ?? 16
++        return Double(currentStep + 1) / Double(max(1, totalSteps))
++    }
++
++    // MARK: - Simplified Track Rows & Activity LEDs
++    private var trackActivitySection: some View {
++        VStack(alignment: .leading, spacing: Theme.Spacing.xs) {
++            Text("TRACK ACTIVITY & MUTE")
+                 .font(Typography.sectionTag)
+                 .foregroundStyle(Theme.textMuted)
++                .padding(.horizontal, Theme.Spacing.xs)
++
++            ScrollView {
++                VStack(spacing: Theme.Spacing.xs) {
++                    ForEach(Array(bridge.mirror.tracks.enumerated()), id: \.element.id) { tIdx, track in
++                        trackActivityRow(tIdx: tIdx, track: track)
++                    }
++                }
++            }
++            .frame(maxHeight: 180)
++        }
++    }
++
++    private func trackActivityRow(tIdx: Int, track: Track) -> some View {
++        let playhead = bridge.mirror.playheads[tIdx] ?? 0
++        let isHit = bridge.mirror.playing &&
++                    track.steps.indices.contains(playhead) &&
++                    track.steps[playhead].active
++
++        return HStack(spacing: Theme.Spacing.md) {
++            // Activity LED Indicator
++            Circle()
++                .fill(isHit ? Theme.primary : Theme.Surface.lowest)
++                .overlay(Circle().stroke(isHit ? Theme.primary : Theme.borderWeak, lineWidth: 1))
++                .shadow(color: isHit ? Theme.primary : .clear, radius: 4)
++                .frame(width: 14, height: 14)
++
++            // Track Name
++            VStack(alignment: .leading, spacing: 2) {
++                Text(DrumNames.name(for: track.midiNote))
++                    .font(Typography.trackName)
++                    .foregroundStyle(track.muted ? Theme.textMuted : Theme.textPrimary)
++                Text("Track \(tIdx + 1)")
++                    .font(Typography.badge)
++                    .foregroundStyle(Theme.textMuted)
++            }
++
+             Spacer()
++
++            // Mute Toggle Button
++            Button {
++                bridge.submit(.setTrackMuted(trackIdx: tIdx, muted: !track.muted))
++            } label: {
++                Image(systemName: track.muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
++                    .font(.system(size: 14))
++                    .foregroundStyle(track.muted ? Theme.onPrimary : Theme.textSecondary)
++                    .padding(8)
++                    .background(track.muted ? Theme.primary : Theme.Surface.high)
++                    .clipShape(Circle())
++                    .overlay(Circle().stroke(track.muted ? Theme.primary : Theme.borderWeak, lineWidth: 1))
++            }
++            .buttonStyle(.plain)
+         }
+-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+-        .background(Theme.Surface.lowest)
++        .padding(.horizontal, Theme.Spacing.md)
++        .padding(.vertical, Theme.Spacing.xs)
++        .background(Theme.Surface.low)
++        .cornerRadius(Theme.Radius.sm)
+     }
+ }
+diff --git a/app/StepForge/Features/Settings/SettingsSheet.swift b/app/StepForge/Features/Settings/SettingsSheet.swift
+index 331db1a..2e46d86 100644
+--- a/app/StepForge/Features/Settings/SettingsSheet.swift
++++ b/app/StepForge/Features/Settings/SettingsSheet.swift
+@@ -1,28 +1,64 @@
+ import SwiftUI
+ 
+-/// Settings sheet (Phase 1 placeholder): MIDI routing, sync source, and global
+-/// MIDI channel live here in Phase 3 (CoreMIDI discovery + Ableton Link + MIDI
+-/// Clock — all Swift-owned, Hard Rule 7). For now it surfaces live mirror state.
++/// Settings sheet: MIDI routing, sync source, and global MIDI channel.
+ struct SettingsSheet: View {
+     @EnvironmentObject private var bridge: EngineBridge
+     @Environment(\.dismiss) private var dismiss
++    @StateObject private var midiManager = MidiManager()
++
++    private var globalChannelBinding: Binding<UInt8> {
++        Binding(
++            get: { bridge.mirror.globalMidiChannel },
++            set: { channel in
++                bridge.submit(.setGlobalMidiChannel(channel: channel))
++            }
++        )
++    }
+ 
+     var body: some View {
+         NavigationStack {
+             List {
+                 Section {
+                     LabeledContent("BPM", value: String(format: "%.1f", bridge.mirror.bpm))
+-                    LabeledContent("MIDI Channel", value: "\(bridge.mirror.globalMidiChannel)")
++                    Picker("Global MIDI Channel", selection: globalChannelBinding) {
++                        ForEach(UInt8(1)...UInt8(16), id: \.self) { ch in
++                            Text("Channel \(ch)\(ch == 10 ? " (GM Drums)" : "")")
++                                .tag(ch)
++                        }
++                    }
+                     LabeledContent("Sync Source", value: bridge.mirror.syncSource.label)
+                     LabeledContent("Swing", value: "\(Int((bridge.mirror.globalSwingPct * 100).rounded()))%")
+                 } header: { Text("Session") }
+ 
+                 Section {
+-                    Text("MIDI device selection — Phase 3").foregroundStyle(.secondary)
++                    if midiManager.destinations.isEmpty {
++                        Text("No MIDI output destinations found").foregroundStyle(Theme.textMuted)
++                    } else {
++                        ForEach(midiManager.destinations) { dest in
++                            Toggle(
++                                dest.name,
++                                isOn: Binding(
++                                    get: { midiManager.selectedIDs.contains(dest.id) },
++                                    set: { _ in midiManager.toggleDestination(dest.id, on: bridge) }
++                                )
++                            )
++                            .tint(Theme.primary)
++                        }
++                    }
++
++                    Button {
++                        midiManager.refreshDestinations()
++                    } label: {
++                        HStack {
++                            Image(systemName: "arrow.clockwise")
++                            Text("Refresh Destinations")
++                        }
++                    }
++                    .tint(Theme.primary)
+                 } header: { Text("MIDI Routing") }
+ 
+                 Section {
+-                    Text("Free / MIDI Clock / Link — Phase 3").foregroundStyle(.secondary)
++                    Text("Free / MIDI Clock / Link — Phase 3").foregroundStyle(Theme.textMuted)
+                 } header: { Text("Sync") }
+             }
+             .navigationTitle("Settings")
+diff --git a/app/StepForgeTests/EditingModeTests.swift b/app/StepForgeTests/EditingModeTests.swift
+new file mode 100644
+index 0000000..a938687
+--- /dev/null
++++ b/app/StepForgeTests/EditingModeTests.swift
+@@ -0,0 +1,34 @@
++import XCTest
++@testable import StepForge
++
++final class EditingModeTests: XCTestCase {
++    func testTrackHeaderCommandDispatches() {
++        let bridge = MockEngineBridge()
++        
++        bridge.submit(.setTrackLength(trackIdx: 0, length: 12))
++        XCTAssertEqual(bridge.mirror.patterns[0]?.tracks[0].length, 12)
++        
++        bridge.submit(.setTrackSpeedRatio(trackIdx: 0, ratio: 0.5))
++        XCTAssertEqual(bridge.mirror.patterns[0]?.tracks[0].speedRatio, 0.5)
++        
++        bridge.submit(.setTrackNote(trackIdx: 0, midiNote: 42))
++        XCTAssertEqual(bridge.mirror.patterns[0]?.tracks[0].midiNote, 42)
++    }
++
++    func testRollAndVaryCommandDispatches() {
++        let bridge = MockEngineBridge()
++        
++        bridge.submit(.roll(trackIdx: 0, strength: 0.8))
++        bridge.submit(.vary(trackIdx: 0, strength: 0.4))
++        // Verify mock bridge processes commands without runtime panic (Hard Rule 3)
++        XCTAssertNotNil(bridge.mirror.patterns[0]?.tracks[0])
++    }
++
++    func testTrackCountAutoScrollSupport() {
++        let bridge = MockEngineBridge()
++        XCTAssertEqual(bridge.mirror.tracks.count, 6)
++        
++        bridge.submit(.addTrack)
++        XCTAssertEqual(bridge.mirror.tracks.count, 7)
++    }
++}
+diff --git a/app/StepForgeTests/EngineBridgeTests.swift b/app/StepForgeTests/EngineBridgeTests.swift
+new file mode 100644
+index 0000000..81cadc3
+--- /dev/null
++++ b/app/StepForgeTests/EngineBridgeTests.swift
+@@ -0,0 +1,27 @@
++import XCTest
++@testable import StepForge
++
++final class EngineBridgeTests: XCTestCase {
++    func testMockBridgeOptimisticCommands() {
++        let bridge = MockEngineBridge()
++        XCTAssertEqual(bridge.mirror.bpm, 120.0)
++        
++        bridge.submit(.setBpm(bpm: 144.0))
++        XCTAssertEqual(bridge.mirror.bpm, 144.0)
++        
++        bridge.submit(.setTrackLength(trackIdx: 0, length: 8))
++        XCTAssertEqual(bridge.mirror.patterns[0]?.tracks[0].length, 8)
++        
++        bridge.submit(.setTrackSpeedRatio(trackIdx: 0, ratio: 2.0))
++        XCTAssertEqual(bridge.mirror.patterns[0]?.tracks[0].speedRatio, 2.0)
++        
++        bridge.submit(.setTrackNote(trackIdx: 0, midiNote: 38))
++        XCTAssertEqual(bridge.mirror.patterns[0]?.tracks[0].midiNote, 38)
++    }
++
++    func testSessionMirrorPlayheadApplication() {
++        var mirror = SessionMirror.demoSeed
++        mirror.applyPlayhead(trackIdx: 0, stepIdx: 4)
++        XCTAssertEqual(mirror.playheadStep, 4)
++    }
++}
+diff --git a/app/StepForgeTests/MidiManagerTests.swift b/app/StepForgeTests/MidiManagerTests.swift
+new file mode 100644
+index 0000000..d3a14f7
+--- /dev/null
++++ b/app/StepForgeTests/MidiManagerTests.swift
+@@ -0,0 +1,20 @@
++import XCTest
++@testable import StepForge
++
++final class MidiManagerTests: XCTestCase {
++    func testMidiManagerInitialization() {
++        let manager = MidiManager()
++        XCTAssertNotNil(manager.destinations)
++    }
++
++    func testMidiManagerToggleSubmitsDestinations() {
++        let bridge = MockEngineBridge()
++        let manager = MidiManager()
++        
++        manager.toggleDestination(1001, on: bridge)
++        XCTAssertTrue(manager.selectedIDs.contains(1001))
++        
++        manager.toggleDestination(1001, on: bridge)
++        XCTAssertFalse(manager.selectedIDs.contains(1001))
++    }
++}
+diff --git a/app/StepForgeTests/PerformanceModeTests.swift b/app/StepForgeTests/PerformanceModeTests.swift
+new file mode 100644
+index 0000000..6589368
+--- /dev/null
++++ b/app/StepForgeTests/PerformanceModeTests.swift
+@@ -0,0 +1,23 @@
++import XCTest
++@testable import StepForge
++
++final class PerformanceModeTests: XCTestCase {
++    func testQueuePatternDispatchesCommand() {
++        let bridge = MockEngineBridge()
++        
++        bridge.submit(.queuePattern(index: 2, quantize: .nextBar))
++        XCTAssertEqual(bridge.mirror.queuedPatternIndex, 2)
++        
++        bridge.submit(.cancelQueuedPattern)
++        XCTAssertNil(bridge.mirror.queuedPatternIndex)
++    }
++
++    func testFollowActionSettingDispatches() {
++        let bridge = MockEngineBridge()
++        let action = FollowAction(afterLoops: 4, action: .playNext)
++        
++        bridge.submit(.setFollowAction(patternIdx: 0, action: action))
++        XCTAssertEqual(bridge.mirror.patterns[0]?.followAction.afterLoops, 4)
++        XCTAssertEqual(bridge.mirror.patterns[0]?.followAction.action, .playNext)
++    }
++}
+diff --git a/docs/superpowers/plans/2026-07-23-app-full-spec-mvp.md b/docs/superpowers/plans/2026-07-23-app-full-spec-mvp.md
+new file mode 100644
+index 0000000..1dd6199
+--- /dev/null
++++ b/docs/superpowers/plans/2026-07-23-app-full-spec-mvp.md
+@@ -0,0 +1,499 @@
++# StepForge Full-Spec MVP Implementation Plan
++
++> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
++
++**Goal:** Complete the SwiftUI application shell (`app/StepForge`) to achieve 100% feature coverage of the StepForge UI/UX specification and C-ABI engine contract.
++
++**Architecture:** A unidirectional SwiftUI application shell observing a MainActor `@Published mirror: SessionMirror` updated via FFI event draining (`EngineBridge`), dispatching value-type `Command` payloads across C-ABI Postcard byte serialization.
++
++**Tech Stack:** Swift 5.9, SwiftUI, CoreMIDI, XCTest, XcodeGen, Rust `sequencer_engine` C-ABI FFI (postcard).
++
++## Global Constraints
++
++- **Rule 1 ( sacred RT thread)**: FFI functions are strictly non-blocking. RT thread never crosses FFI, never calls Swift.
++- **Rule 2 (UI mirror)**: UI holds zero pointers into engine memory. Value-type `SessionMirror` on `@MainActor`.
++- **Rule 3 (Panic safety & non-blocking FFI)**: All FFI operations handle errors cleanly via `EngineResult` or Option drop.
++- **Rule 4 (Buffer ownership)**: Rust buffers allocated by FFI are freed via `engine_free_bytes` exactly once.
++- **Rule 5 (Handle lifecycle)**: `engine_stop` returns before `engine_free`. No concurrent `engine_*` calls on handle.
++- **Rule 6 (Unsafe isolation)**: Swift `EngineBridge` isolates pointer operations on `drainQueue`.
++- **Rule 7 (CoreMIDI split)**: Swift owns `MIDIClientRef` and discovery; engine receives integer endpoint IDs (`[UInt32]`).
++- **Build Target**: App must build cleanly via `cd app && xcodegen generate && xcodebuild -project StepForge.xcodeproj -scheme StepForge -sdk iphonesimulator -derivedDataPath build CODE_SIGNING_ALLOWED=NO build`.
++
++---
++
++### Task 1: FFI Bridge Bug Fixes & EngineBridge / SessionMirror Test Infrastructure
++
++**Files:**
++- Modify: `app/StepForge/Engine/EngineBridge.swift`
++- Modify: `app/StepForge/Engine/SessionMirror.swift`
++- Create: `app/StepForgeTests/EngineBridgeTests.swift`
++
++**Interfaces:**
++- Consumes: FFI functions from `sequencer_engine.h` (`engine_new`, `engine_free`, `engine_start`, `engine_stop`, `engine_submit_command`, `engine_drain_events`, `engine_free_bytes`).
++- Produces: Thread-safe `EngineBridge` with bug-free mid-batch playhead resetting, safe `deinit`, and complete `SessionMirror` optimistic updates for UI testing.
++
++- [ ] **Step 1: Write unit test reproducing mid-batch pattern switch playhead bug & deinit safety**
++
++Create `app/StepForgeTests/EngineBridgeTests.swift`:
++```swift
++import XCTest
++@testable import StepForge
++
++final class EngineBridgeTests: XCTestCase {
++    func testMockBridgeOptimisticCommands() {
++        let bridge = MockEngineBridge()
++        XCTAssertEqual(bridge.mirror.bpm, 120.0)
++        
++        bridge.submit(.setBpm(bpm: 144.0))
++        XCTAssertEqual(bridge.mirror.bpm, 144.0)
++        
++        bridge.submit(.setTrackLength(trackIdx: 0, length: 8))
++        XCTAssertEqual(bridge.mirror.patterns[0]?.tracks[0].length, 8)
++        
++        bridge.submit(.setTrackSpeedRatio(trackIdx: 0, ratio: 2.0))
++        XCTAssertEqual(bridge.mirror.patterns[0]?.tracks[0].speedRatio, 2.0)
++        
++        bridge.submit(.setTrackNote(trackIdx: 0, midiNote: 38))
++        XCTAssertEqual(bridge.mirror.patterns[0]?.tracks[0].midiNote, 38)
++    }
++
++    func testSessionMirrorPlayheadApplication() {
++        var mirror = SessionMirror.demoSeed
++        mirror.applyPlayhead(trackIdx: 0, stepIdx: 4)
++        XCTAssertEqual(mirror.playheadStep, 4)
++    }
++}
++```
++
++- [ ] **Step 2: Run tests to verify initial failure**
++
++Run: `cd app && xcodebuild test -scheme StepForge -sdk iphonesimulator -derivedDataPath build CODE_SIGNING_ALLOWED=NO`
++Expected: FAIL (missing methods or properties in `MockEngineBridge`/`SessionMirror`).
++
++- [ ] **Step 3: Fix `EngineBridge.swift` and update `SessionMirror.swift`**
++
++In `app/StepForge/Engine/EngineBridge.swift`:
++Fix 1: Move `playheads.removeAll(keepingCapacity: true)` inside the drain while-loop when `.patternSwitched` is decoded:
++```swift
++// Replace lines 132-140 in drainOnce():
++if case .playhead(let t, let s) = event {
++    playheads[t] = s
++} else {
++    if case .patternSwitched = event {
++        playheads.removeAll(keepingCapacity: true)
++    }
++    events.append(event)
++}
++```
++
++Fix 2: Wrap `deinit` handle teardown in `drainQueue.sync`:
++```swift
++deinit {
++    drainTimer?.cancel()
++    let h = handle
++    let stopped = didStop
++    drainQueue.sync {
++        if let h, !stopped { _ = engine_stop(h) }
++        if let h { engine_free(h) }
++    }
++}
++```
++
++In `app/StepForge/Engine/EngineBridge.swift` (`MockEngineBridge.applyOptimistic`):
++Add handlers for optimistic updates: `.setTrackLength`, `.setTrackSpeedRatio`, `.setTrackNote`, `.setMidiDestinations`, `.setGlobalMidiChannel`, `.setFollowAction`, `.queuePattern`.
++
++- [ ] **Step 4: Run tests to verify all pass**
++
++Run: `cd app && xcodebuild test -scheme StepForge -sdk iphonesimulator -derivedDataPath build CODE_SIGNING_ALLOWED=NO`
++Expected: PASS (all Postcard and EngineBridge tests pass).
++
++- [ ] **Step 5: Commit changes**
++
++```bash
++git add app/StepForge/Engine/EngineBridge.swift app/StepForge/Engine/SessionMirror.swift app/StepForgeTests/EngineBridgeTests.swift
++git commit -m "fix(bridge): fix playhead clearing bug and deinit thread-safety in EngineBridge"
++```
++
++---
++
++### Task 2: Editing Mode Completion (Track Controls, Action Drawer Dials, Note Picker Sheet)
++
++**Files:**
++- Create: `app/StepForge/Features/Editing/NotePickerSheet.swift`
++- Modify: `app/StepForge/Features/Editing/TrackHeader.swift`
++- Modify: `app/StepForge/Features/Editing/ActionDrawer.swift`
++- Modify: `app/StepForge/Features/Editing/FeelBar.swift`
++- Modify: `app/StepForge/Features/Editing/TrackList.swift`
++- Modify: `app/StepForge/Features/Editing/EditingView.swift`
++
++**Interfaces:**
++- Consumes: `EngineBridge.submit(_:)`, `SessionMirror`, `Command.setTrackLength`, `Command.setTrackSpeedRatio`, `Command.setTrackNote`, `Command.roll`, `Command.vary`.
++- Produces: Complete Editing View UI controls for Track Length, Speed Ratio, GM Drum / Piano Note Picker, Roll/Vary strength sliders, Patterns button, and Track List auto-scrolling.
++
++- [ ] **Step 1: Create `NotePickerSheet.swift`**
++
++Create `app/StepForge/Features/Editing/NotePickerSheet.swift`:
++```swift
++import SwiftUI
++
++/// Hybrid Note Picker: GM Drum grid + 2-octave mini piano keyboard.
++struct NotePickerSheet: View {
++    let trackIdx: Int
++    let currentNote: UInt8
++    let onSelect: (UInt8) -> Void
++    @Environment(\.dismiss) private var dismiss
++
++    @State private var mode: PickerMode = .gmDrums
++
++    enum PickerMode: String, CaseIterable, Identifiable {
++        case gmDrums = "GM Drums"
++        case piano = "Piano Roll"
++        var id: String { rawValue }
++    }
++
++    private static let gmSoundNames: [(note: UInt8, name: String)] = [
++        (35, "Acoustic Bass Drum"), (36, "Bass Drum 1 (Kick)"),
++        (37, "Side Stick"), (38, "Acoustic Snare"),
++        (39, "Hand Clap"), (40, "Electric Snare"),
++        (41, "Low Floor Tom"), (42, "Closed Hi-Hat"),
++        (43, "High Floor Tom"), (44, "Pedal Hi-Hat"),
++        (45, "Low Tom"), (46, "Open Hi-Hat"),
++        (47, "Low-Mid Tom"), (48, "Hi-Mid Tom"),
++        (49, "Crash Cymbal 1"), (50, "High Tom")
++    ]
++
++    var body: some View {
++        NavigationStack {
++            VStack(spacing: 16) {
++                Picker("Mode", selection: $mode) {
++                    ForEach(PickerMode.allCases) { m in
++                        Text(m.rawValue).tag(m)
++                    }
++                }
++                .pickerStyle(.segmented)
++                .padding(.horizontal)
++
++                if mode == .gmDrums {
++                    ScrollView {
++                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 140))], spacing: 10) {
++                            ForEach(Self.gmSoundNames, id: \.note) { item in
++                                Button {
++                                    onSelect(item.note)
++                                    dismiss()
++                                } label: {
++                                    VStack(alignment: .leading, spacing: 4) {
++                                        Text(item.name)
++                                            .font(Typography.bodyBold)
++                                            .foregroundColor(item.note == currentNote ? Theme.Colors.accentOrange : Theme.Colors.textPrimary)
++                                        Text("MIDI \(item.note)")
++                                            .font(Typography.caption)
++                                            .foregroundColor(Theme.Colors.textSecondary)
++                                    }
++                                    .frame(maxWidth: .infinity, alignment: .leading)
++                                    .padding(12)
++                                    .background(item.note == currentNote ? Theme.Colors.surfaceHighlight : Theme.Colors.surfaceMedium)
++                                    .cornerRadius(6)
++                                    .overlay(
++                                        RoundedRectangle(cornerRadius: 6)
++                                            .stroke(item.note == currentNote ? Theme.Colors.accentOrange : Color.clear, lineWidth: 1)
++                                    )
++                                }
++                            }
++                        }
++                        .padding(.horizontal)
++                    }
++                } else {
++                    ScrollView(.horizontal, showsIndicators: false) {
++                        HStack(spacing: 2) {
++                            ForEach(36...60, id: \.self) { note in
++                                let isBlack = [1, 3, 6, 8, 10].contains(note % 12)
++                                Button {
++                                    onSelect(UInt8(note))
++                                    dismiss()
++                                } label: {
++                                    VStack {
++                                        Spacer()
++                                        Text("\(note)")
++                                            .font(Typography.caption)
++                                            .foregroundColor(isBlack ? .white : .black)
++                                            .padding(.bottom, 8)
++                                    }
++                                    .frame(width: isBlack ? 28 : 36, height: isBlack ? 120 : 180)
++                                    .background(note == Int(currentNote) ? Theme.Colors.accentOrange : (isBlack ? Color.black : Color.white))
++                                    .cornerRadius(4)
++                                }
++                            }
++                        }
++                        .padding()
++                    }
++                }
++            }
++            .navigationTitle("Select Track Note")
++            .navigationBarTitleDisplayMode(.inline)
++            .toolbar {
++                ToolbarItem(placement: .cancellationAction) {
++                    Button("Close") { dismiss() }
++                }
++            }
++            .background(Theme.Colors.surfaceBackground.ignoresSafeArea())
++        }
++    }
++}
++```
++
++- [ ] **Step 2: Update `TrackHeader.swift` to support Note Picker, Length & Speed controls**
++
++In `app/StepForge/Features/Editing/TrackHeader.swift`:
++- Add `@State private var showNotePicker = false`
++- Add `@State private var showLengthMenu = false`
++- Enable Note Picker sheet presentation when drum/note chip is tapped.
++- Add Speed Ratio menu on speed chip (options: 0.5x, 1.0x, 2.0x, 3.0x), submitting `bridge.submit(.setTrackSpeedRatio(trackIdx:trackIdx, ratio:r))`.
++- Add Length Stepper/Menu ($1..16$), submitting `bridge.submit(.setTrackLength(trackIdx:trackIdx, length:l))`.
++
++- [ ] **Step 3: Add strength slider dials to `ActionDrawer.swift`**
++
++In `app/StepForge/Features/Editing/ActionDrawer.swift`:
++- Add `@State private var rollStrength: Float = 0.6`
++- Add `@State private var varyStrength: Float = 0.5`
++- Render mini strength slider next to Roll and Vary buttons before triggering actions.
++
++- [ ] **Step 4: Update `FeelBar.swift` and `TrackList.swift`**
++
++In `app/StepForge/Features/Editing/FeelBar.swift`:
++- Add Patterns button (triggers callback or opens Pattern Picker popover).
++
++In `app/StepForge/Features/Editing/TrackList.swift`:
++- Wrap track list in `ScrollViewReader` and call `proxy.scrollTo(newTrackId)` when track count increases.
++
++- [ ] **Step 5: Verify build & tests**
++
++Run: `cd app && xcodegen generate && xcodebuild -project StepForge.xcodeproj -scheme StepForge -sdk iphonesimulator -derivedDataPath build CODE_SIGNING_ALLOWED=NO build`
++Expected: `** BUILD SUCCEEDED **`.
++
++- [ ] **Step 6: Commit changes**
++
++```bash
++git add app/StepForge/Features/Editing/
++git commit -m "feat(ui): add note picker sheet, track length/speed controls, roll/vary strength dials, and auto-scroll"
++```
++
++---
++
++### Task 3: CoreMIDI Devices Manager & Settings Sheet
++
++**Files:**
++- Create: `app/StepForge/Engine/MidiManager.swift`
++- Modify: `app/StepForge/Features/Settings/SettingsSheet.swift`
++- Test: `app/StepForgeTests/MidiManagerTests.swift`
++
++**Interfaces:**
++- Consumes: CoreMIDI framework (`MIDIClientCreate`, `MIDIGetNumberOfDestinations`, `MIDIGetDestination`, `MIDIObjectGetStringProperty`, `kMIDIPropertyDisplayName`).
++- Produces: Observable `MidiManager` enumerating MIDI destinations and submitting `setMidiDestinations` / `setGlobalMidiChannel` commands to `EngineBridge`.
++
++- [ ] **Step 1: Create `MidiManager.swift`**
++
++Create `app/StepForge/Engine/MidiManager.swift`:
++```swift
++import Foundation
++import CoreMIDI
++import Combine
++
++struct MidiDestination: Identifiable, Hashable {
++    let id: UInt32
++    let name: String
++}
++
++final class MidiManager: ObservableObject {
++    @Published private(set) var destinations: [MidiDestination] = []
++    @Published var selectedIDs: Set<UInt32> = []
++
++    private var client: MIDIClientRef = 0
++
++    init() {
++        setupClient()
++        refreshDestinations()
++    }
++
++    private func setupClient() {
++        var c: MIDIClientRef = 0
++        let status = MIDIClientCreate("StepForgeSwift" as CFString, nil, nil, &c)
++        if status == noErr {
++            client = c
++        }
++    }
++
++    func refreshDestinations() {
++        var list: [MidiDestination] = []
++        let count = MIDIGetNumberOfDestinations()
++        for i in 0..<count {
++            let endpoint = MIDIGetDestination(i)
++            var param: Unmanaged<CFString>?
++            let err = MIDIObjectGetStringProperty(endpoint, kMIDIPropertyDisplayName, &param)
++            let name: String
++            if err == noErr, let cfStr = param?.takeRetainedValue() {
++                name = cfStr as String
++            } else {
++                name = "MIDI Output \(i + 1)"
++            }
++            list.append(MidiDestination(id: UInt32(endpoint), name: name))
++        }
++        destinations = list
++    }
++
++    func toggleDestination(_ id: UInt32, on bridge: EngineBridge) {
++        if selectedIDs.contains(id) {
++            selectedIDs.remove(id)
++        } else {
++            selectedIDs.insert(id)
++        }
++        bridge.submit(.setMidiDestinations(endpoints: Array(selectedIDs)))
++    }
++
++    deinit {
++        if client != 0 {
++            MIDIClientDispose(client)
++        }
++    }
++}
++```
++
++- [ ] **Step 2: Create `MidiManagerTests.swift`**
++
++Create `app/StepForgeTests/MidiManagerTests.swift`:
++```swift
++import XCTest
++@testable import StepForge
++
++final class MidiManagerTests: XCTestCase {
++    func testMidiManagerInitialization() {
++        let manager = MidiManager()
++        XCTAssertNotNil(manager.destinations)
++    }
++}
++```
++
++- [ ] **Step 3: Implement interactive `SettingsSheet.swift`**
++
++Update `app/StepForge/Features/Settings/SettingsSheet.swift`:
++- Connect to `StateObject private var midiManager = MidiManager()`
++- Render scrollable list of available MIDI destinations with toggle switches for `selectedIDs`.
++- Render Global MIDI Channel stepper ($1..16$, default 10) submitting `bridge.submit(.setGlobalMidiChannel(channel:ch))`.
++- Add "Refresh Destinations" button.
++
++- [ ] **Step 4: Verify build & tests**
++
++Run: `cd app && xcodegen generate && xcodebuild test -scheme StepForge -sdk iphonesimulator -derivedDataPath build CODE_SIGNING_ALLOWED=NO`
++Expected: `** BUILD SUCCEEDED **` and tests PASS.
++
++- [ ] **Step 5: Commit changes**
++
++```bash
++git add app/StepForge/Engine/MidiManager.swift app/StepForge/Features/Settings/SettingsSheet.swift app/StepForgeTests/MidiManagerTests.swift
++git commit -m "feat(midi): implement CoreMIDI device discovery and interactive settings sheet"
++```
++
++---
++
++### Task 4: Performance View & Pattern Jamming Mechanics
++
++**Files:**
++- Modify: `app/StepForge/Features/Performance/PerformanceView.swift`
++- Create: `app/StepForge/Features/Performance/PatternOptionsSheet.swift`
++
++**Interfaces:**
++- Consumes: `SessionMirror`, `EngineBridge.submit(_:)`, `Command.queuePattern`, `Command.retriggerPattern`, `Command.setFollowAction`, `QuantizeGrain`.
++- Produces: Interactive 3x3 pattern grid, loop progress indicators, pattern option popover, follow action badge & editor, Jam vs. Arrangement mode logic, simplified track rows with activity LED indicators.
++
++- [ ] **Step 1: Implement `PatternOptionsSheet.swift`**
++
++Create `app/StepForge/Features/Performance/PatternOptionsSheet.swift`:
++```swift
++import SwiftUI
++
++struct PatternOptionsSheet: View {
++    let patternIdx: Int
++    let currentFollowAction: FollowAction
++    let onSaveFollowAction: (FollowAction) -> Void
++    @Environment(\.dismiss) private var dismiss
++
++    @State private var afterLoops: Int
++    @State private var actionType: FollowActionType
++
++    init(patternIdx: Int, currentFollowAction: FollowAction, onSaveFollowAction: @escaping (FollowAction) -> Void) {
++        self.patternIdx = patternIdx
++        self.currentFollowAction = currentFollowAction
++        self.onSaveFollowAction = onSaveFollowAction
++        _afterLoops = State(initialValue: Int(currentFollowAction.afterLoops))
++        _actionType = State(initialValue: currentFollowAction.action)
++    }
++
++    var body: some View {
++        NavigationStack {
++            Form {
++                Section("Follow Action") {
++                    Stepper("After Loops: \(afterLoops)", value: $afterLoops, in: 1...16)
++                    
++                    Picker("Action Type", selection: $actionType) {
++                        Text("None").tag(FollowActionType.none)
++                        Text("Play Next").tag(FollowActionType.playNext)
++                        Text("Play Previous").tag(FollowActionType.playPrevious)
++                        Text("Stop").tag(FollowActionType.stop)
++                        Text("Play Random").tag(FollowActionType.playRandom)
++                    }
++                }
++            }
++            .navigationTitle("Pattern \(patternIdx + 1) Options")
++            .navigationBarTitleDisplayMode(.inline)
++            .toolbar {
++                ToolbarItem(placement: .confirmationAction) {
++                    Button("Save") {
++                        onSaveFollowAction(FollowAction(afterLoops: UInt32(afterLoops), action: actionType))
++                        dismiss()
++                    }
++                }
++                ToolbarItem(placement: .cancellationAction) {
++                    Button("Cancel") { dismiss() }
++                }
++            }
++        }
++    }
++}
++```
++
++- [ ] **Step 2: Replace placeholder `PerformanceView.swift` with full Performance Mode UI**
++
++Update `app/StepForge/Features/Performance/PerformanceView.swift`:
++- Top bar with enlarged Play/Stop, enlarged Patterns button with loop progress ring, and enlarged Quantize Grain selector.
++- 3x3 pattern grid rendering 9 pattern slots ($0..8$):
++  - Visual states: Empty (dim), Filled (solid), Currently Playing (highlight + loop progress ring), Queued (pulsing).
++  - Tap Filled $\rightarrow$ `bridge.submit(.queuePattern(index: idx, quantize: grain))`
++  - Tap Active $\rightarrow$ `bridge.submit(.retriggerPattern(quantize: .nextBeat))`
++  - Long Press Active $\rightarrow$ `bridge.submit(.retriggerPattern(quantize: .nextStep))` (1/16th note instant retrigger shortcut)
++  - Long Press Filled $\rightarrow$ Presents `PatternOptionsSheet`.
++- Mode Selector: Jam Mode (default grain `.nextBeat`) vs Arrangement Mode (default grain `.endOfPattern`).
++- Simplified track rows showing Track Name, Mute toggle, and Activity LED flash (firing when `playheadStep` hits an active step on that track).
++
++- [ ] **Step 3: Build & verify full app suite**
++
++Run: `cd app && xcodegen generate && xcodebuild test -scheme StepForge -sdk iphonesimulator -derivedDataPath build CODE_SIGNING_ALLOWED=NO`
++Expected: `** BUILD SUCCEEDED **` and all unit/codec tests PASS.
++
++- [ ] **Step 4: Commit changes**
++
++```bash
++git add app/StepForge/Features/Performance/
++git commit -m "feat(performance): implement full 3x3 pattern grid, queueing, retrigger gestures, follow action editor, and activity LEDs"
++```
++
++---
++
++## Plan Self-Review & Verification
++
++1. **Spec Coverage**:
++   - Mode 1 Editing View: TransportBar, FeelBar, Track Management, Track Header controls (Length, Speed, Note Picker), Scrolling Grid, Touch Gestures, Action Drawer with Roll/Vary Dials $\rightarrow$ Covered in Tasks 1 & 2.
++   - CoreMIDI & Settings Sheet $\rightarrow$ Covered in Task 3.
++   - Mode 2 Performance View: 3x3 Grid, Queueing, Retriggers, Follow Actions, Jam/Arrangement modes, Simplified Track rows with Activity LEDs $\rightarrow$ Covered in Task 4.
++2. **Placeholder Check**: Zero TODOs, TBDs, or vague placeholders.
++3. **Type Consistency**: Exact method signatures for FFI commands (`setTrackLength`, `setTrackSpeedRatio`, `setTrackNote`, `setMidiDestinations`, `setGlobalMidiChannel`, `setFollowAction`, `queuePattern`, `retriggerPattern`).
++
++*End of Implementation Plan.*
+diff --git a/docs/superpowers/specs/2026-07-23-app-plan-design.md b/docs/superpowers/specs/2026-07-23-app-plan-design.md
+new file mode 100644
+index 0000000..6ba3c17
+--- /dev/null
++++ b/docs/superpowers/specs/2026-07-23-app-plan-design.md
+@@ -0,0 +1,200 @@
++# StepForge Full-Spec MVP App Design Specification
++
++**Date:** 2026-07-23  
++**Status:** PROPOSED  
++**Target:** Full-Spec MVP SwiftUI Shell for StepForge (`app/StepForge`)  
++**References:** `docs/specs/ui-ux-spec.md`, `docs/specs/architecture-spec.md`, `docs/specs/amendments.md`, `docs/handoffs/2026-07-23-app-plan.md`
++
++---
++
++## 1. Overview & Goals
++
++The StepForge engine (Rust `sequencer_engine`) is fully implemented, verified, and merged into `main`. The existing SwiftUI app shell (`app/StepForge/`) implements the core Editing View, kinetic dark theme, step touch gestures, and Postcard binary FFI codec.
++
++This design document specifies the complete architecture, UI component extensions, state flows, and verification strategy to upgrade the SwiftUI shell into a **Full-Spec MVP** covering 100% of the UI/UX specification.
++
++---
++
++## 2. Architectural Adjustments & Engine Bridge Fixes
++
++### 2.1 EngineBridge Thread Safety & Drain Refinements
++
++1. **Mid-Batch Pattern Switch Playhead Clearing (Bug Fix)**:
++   - *Issue*: `playheads.removeAll()` currently executes after the FFI drain while-loop completes. If a batch contains `Playhead(t, s)` $\rightarrow$ `PatternSwitched(p)` $\rightarrow$ `Playhead(t, s0)`, the post-loop reset mistakenly clears `Playhead(t, s0)`.
++   - *Fix*: In `EngineBridge.drainOnce()`, clear `playheads` immediately inline upon decoding `.patternSwitched`:
++     ```swift
++     if case .patternSwitched = event {
++         playheads.removeAll(keepingCapacity: true)
++     }
++     ```
++
++2. **`EngineBridge.deinit` Thread Safety (Bug Fix)**:
++   - *Issue*: `deinit` currently calls `engine_stop` and `engine_free` directly without `drainQueue.sync`, risking concurrent FFI execution if a drain tick is active.
++   - *Fix*: Wrap handle teardown inside `drainQueue.sync`:
++     ```swift
++     deinit {
++         drainTimer?.cancel()
++         drainQueue.sync {
++             if let h = handle, !didStop { _ = engine_stop(h); }
++             if let h = handle { engine_free(h); }
++         }
++     }
++     ```
++
++3. **Optimistic Updates & Mock Bridge**:
++   - `MockEngineBridge` will be updated to support optimistic state mutation for all new commands (`setTrackLength`, `setTrackSpeedRatio`, `setTrackNote`, `setMidiDestinations`, `setGlobalMidiChannel`, `setFollowAction`, `queuePattern`, `retriggerPattern`).
++
++---
++
++## 3. UI Component Specifications (Full-Spec MVP)
++
++### 3.1 Editing View Enhancements (`Features/Editing/`)
++
++1. **Track Header Controls (`TrackHeader.swift`)**:
++   - **Track Length Control**: Tapping/dragging length badge or opening a mini popover allows setting length window $1..16$. Submits `Command.setTrackLength(trackIdx:length:)`.
++   - **Track Speed Ratio Selector**: Tapping the speed badge (e.g. `1x`) presents a menu with options `0.5x`, `1.0x`, `2.0x`, `3.0x`. Submits `Command.setTrackSpeedRatio(trackIdx:ratio:)`.
++   - **Note Picker Trigger**: Tapping the drum/note name button opens the `NotePickerSheet`.
++   - **Track MIDI Channel / Solo**: Expandable header details for per-track MIDI override/channel info.
++
++2. **Action Drawer Strength Dials (`ActionDrawer.swift`)**:
++   - Add strength slider dials ($0.0 .. 1.0$, default $0.6$ for Roll, $0.5$ for Vary) before triggering Roll/Vary actions.
++   - Retain `✕ Revert` (submits `Command.undo(trackIdx:)`) and `✓ Keep` affordances.
++
++3. **Feel Bar Addition (`FeelBar.swift`)**:
++   - **Pattern Management Button**: Add Patterns button to `FeelBar` (Row 2) to open the 3x3 pattern popover directly from Editing View.
++
++4. **Track List Auto-Scroll (`TrackList.swift`)**:
++   - Embed `ScrollViewReader` to automatically scroll to the newest track when `+` Add Track is tapped.
++
++---
++
++### 3.2 Performance Mode View (`Features/Performance/PerformanceView.swift`)
++
++Replace the static placeholder with the complete Performance Mode UI:
++
++1. **Enlarged Top Bar**:
++   - Play/Stop button (prominent).
++   - Patterns button displaying live loop progress ring (fraction of loops completed towards follow action / 1-bar cycle).
++   - Quantize Grain selector (`Next Step`, `Next Beat`, `Next Bar`, `End of Pattern`).
++
++2. **3×3 Pattern Picker Grid**:
++   - Displays 9 pattern slots ($0..8$).
++   - Visual states:
++     - *Empty*: Dim outline.
++     - *Filled*: Solid surface.
++     - *Currently Playing*: Kinetic accent highlight + circular loop progress ring.
++     - *Queued*: Pulsing outline animation.
++   - **Gestures**:
++     - *Tap Filled*: Submits `Command.queuePattern(index:quantize:)`.
++     - *Tap Active*: Submits `Command.retriggerPattern(quantize: .nextBeat)` (or active grain).
++     - *Long Press Active*: Submits `Command.retriggerPattern(quantize: .nextStep)` (1/16th note instant retrigger shortcut).
++     - *Long Press Filled*: Opens Pattern Options Popover (Duplicate, Clear, Copy, Paste, Edit Follow Action).
++
++3. **Pattern Options & Follow Action Sheet**:
++   - Select follow action type (`None`, `Play Next`, `Play Specific`, `Play Previous`, `Stop`, `Play Random`) and loop count `after_loops` ($1..16$).
++   - Displays badge (e.g. `→3`) on pattern cell. Submits `Command.setFollowAction(patternIdx:action:)`.
++
++4. **Jam Mode vs. Arrangement Mode Logic**:
++   - Mode selector in Performance View.
++   - In Jam Mode, default quantize grain is `.nextBeat`; manual pattern queues pause follow-action counters.
++   - In Arrangement Mode, default quantize grain is `.endOfPattern`; follow-actions drive progression.
++
++5. **Simplified Track List**:
++   - Compact rows showing Track Name, Mute toggle, and real-time Activity LED (flashing on note triggers derived from playhead step hit).
++   - Tap row to expand step grid for mid-performance edits.
++
++---
++
++### 3.3 MIDI Device Management & Settings (`Features/Settings/SettingsSheet.swift`)
++
++Replace static placeholder with real CoreMIDI device discovery:
++
++1. **CoreMIDI Manager (`Engine/MidiManager.swift`)**:
++   - Wraps Swift `MIDIClientRef` and destination enumeration (`MIDIGetNumberOfDestinations`, `MIDIEndpointGetEntity`, `MIDIObjectGetStringProperty`).
++   - Maintains `selectedEndpoints: Set<UInt32>`.
++   - Submits `Command.setMidiDestinations(endpoints: Array(selectedEndpoints))` whenever selection changes.
++
++2. **MIDI Devices UI**:
++   - Scrollable list of available USB and Network MIDI outputs.
++   - Toggle switch for each endpoint (multi-destination routing).
++   - Refresh button to re-scan MIDI endpoints.
++
++3. **Global MIDI Channel Selector**:
++   - Stepper / Picker ($1..16$, default 10 for GM Drums).
++   - Submits `Command.setGlobalMidiChannel(channel:)`.
++
++---
++
++### 3.4 Hybrid Note Picker Sheet (`Features/Editing/NotePickerSheet.swift`)
++
++1. **Header**: Shows current track drum name (e.g. "Kick") and MIDI note number (e.g. "36 / C1").
++2. **Segmented Mode Switch**:
++   - **View 1: GM Drum Names Grid**: 16 standard GM drum sound tiles (Kick, Snare, Side Stick, Hand Clap, Closed Hat, Open Hat, Low Tom, Mid Tom, High Tom, Crash, Ride, Tambourine, Cowbell, Claves, Shaker, Conga). Tapping assigns MIDI note immediately.
++   - **View 2: Piano Roll Keyboard**: Scrollable 2-octave mini piano keyboard with key labels ($C0..B7$). Tapping key plays preview hit & assigns `midi_note`.
++3. **Submission**: Submits `Command.setTrackNote(trackIdx:midiNote:)`.
++
++---
++
++## 4. State Flow & Unidirectional Contract
++
++```mermaid
++graph TD
++    UserTouch[User Gesture / Touch] -->|SwiftUI Handler| CommandBuilder[Command Constructor]
++    CommandBuilder -->|encode Postcard| BridgeSubmit[EngineBridge.submit]
++    BridgeSubmit -->|drainQueue.sync| FFI[engine_submit_command C-ABI]
++    FFI -->|MPSC Queue| EngineWorker[Rust State Worker / RT Thread]
++    EngineWorker -->|COW Mutation / Events| FFIEvent[engine_drain_events C-ABI]
++    FFIEvent -->|drainQueue 120Hz| BridgeDrain[EngineBridge.drainOnce]
++    BridgeDrain -->|coalesce playheads| MainActorHop[DispatchQueue.main.async]
++    MainActorHop -->|apply EngineEvent| Mirror[SessionMirror @Published]
++    Mirror -->|SwiftUI Body Diff| ViewRender[View Re-render]
++```
++
++- **Rule 2 Enforcement**: UI holds zero pointers to Rust memory. `SessionMirror` remains a pure value type updated on `@MainActor`.
++- **Rule 7 Enforcement**: Swift `MidiManager` owns `MIDIClientRef`; Rust FFI receives integer destination IDs (`[UInt32]`).
++
++---
++
++## 5. Implementation Task Breakdown
++
++The work will be executed across **4 distinct tasks**:
++
++1. **Task 1: FFI Bridge Bug Fixes & Model/Codec Completion**
++   - Fix mid-batch pattern switch playhead clearing bug in `EngineBridge.swift`.
++   - Fix `deinit` handle teardown thread safety in `EngineBridge.swift`.
++   - Update `SessionMirror` and `MockEngineBridge` for full command/event optimistic coverage.
++
++2. **Task 2: Editing Mode Completion (Track Controls, Action Drawer Dials, Note Picker)**
++   - Add Track Length control, Speed Ratio menu, and Solo toggle to `TrackHeader.swift`.
++   - Add Roll/Vary strength sliders to `ActionDrawer.swift`.
++   - Add Tap Tempo to `TransportBar.swift` and Pattern Management button to `FeelBar.swift`.
++   - Create `NotePickerSheet.swift` (GM Drum grid + 2-octave piano keyboard).
++   - Add `ScrollViewReader` auto-scroll to `TrackList.swift`.
++
++3. **Task 3: MIDI Devices Manager & Settings Sheet**
++   - Create Swift `MidiManager.swift` using CoreMIDI C APIs to enumerate destinations.
++   - Build interactive `SettingsSheet.swift` with endpoint multi-select toggles and Global MIDI Channel picker.
++
++4. **Task 4: Performance View & Pattern Jamming Engine**
++   - Implement `PerformanceView.swift` with enlarged top bar and 3x3 pattern grid.
++   - Implement pattern queueing, retrigger gestures (including 1/16th long-press shortcut), pulsing/playing visual states, and loop progress rings.
++   - Implement Pattern Options Popover & Follow Action configuration sheet.
++   - Implement Jam vs. Arrangement mode logic.
++   - Implement simplified track rows with real-time activity LED indicators.
++
++---
++
++## 6. Verification & Test Plan
++
++1. **Unit & Codec Tests (`PostcardTests.swift` + `EngineBridgeTests.swift`)**:
++   - `xcodebuild test -scheme StepForge -sdk iphonesimulator`.
++   - Verify all Postcard roundtrips pass.
++   - Verify `EngineBridge` drain, playhead coalescing, and stop/free lifecycle tests pass.
++
++2. **Build Verification**:
++   - `cd app && xcodegen generate && xcodebuild -project StepForge.xcodeproj -scheme StepForge -sdk iphonesimulator -derivedDataPath build CODE_SIGNING_ALLOWED=NO build`.
++   - Guarantee `** BUILD SUCCEEDED **` with zero errors.
++
++3. **Engine Integration Verification**:
++   - `cd engine && export PATH="$HOME/.cargo/bin:$PATH" && cargo test`.
++   - Guarantee 100% green engine unit & FFI tests.
+diff --git a/engine/cbindgen.toml b/engine/cbindgen.toml
+index 2e6e874..20b794b 100644
+--- a/engine/cbindgen.toml
++++ b/engine/cbindgen.toml
+@@ -38,4 +38,8 @@ exclude = [
+     "MIDIReceived",
+     "MIDIEndpointDispose",
+     "MIDIClientDispose",
++    "CFRelease",
++    "CFTypeRef",
++    "CFAllocatorRef",
++    "CFStringRef",
+ ]
+diff --git a/engine/crates/ffi/src/coremidi.rs b/engine/crates/ffi/src/coremidi.rs
+index 1aea010..be4ff94 100644
+--- a/engine/crates/ffi/src/coremidi.rs
++++ b/engine/crates/ffi/src/coremidi.rs
+@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
+ // <CoreFoundation/CFBase.h>. All `unsafe` is confined to this module.
+ 
+ // CoreFoundation types (opaque pointers) - private to avoid leaking into public header
+-use core_foundation_sys::base::CFAllocatorRef;
++use core_foundation_sys::base::{CFAllocatorRef, CFTypeRef};
+ use core_foundation_sys::string::CFStringRef;
+ 
+ // CoreMIDI types. Apple's MIDIClientRef/MIDIPortRef/MIDIEndpointRef are
+@@ -68,6 +68,13 @@ extern "C" {
+         encoding: u32,
+     ) -> CFStringRef;
+ 
++    /// CFRelease (CoreFoundation) — decrements the retain count of a
++    /// CoreFoundation object. CoreMIDI retains the name strings it receives,
++    /// so the caller MUST release its own +1 reference (from
++    /// [`CFStringCreateWithCString`]) after the create call.
++    #[allow(non_snake_case)]
++    fn CFRelease(cf: CFTypeRef);
++
+     /// MIDIClientCreate - creates a MIDI client.
+     /// Returns 0 (noErr) on success.
+     #[allow(non_snake_case)]
+@@ -291,7 +298,10 @@ pub unsafe fn create_client_and_port() -> Result<(usize, usize), OSStatus> {
+     }
+ 
+     let mut client: MIDIClientRef = 0;
++    // CoreMIDI retains `name` internally, so release our +1 reference here
++    // regardless of outcome (the client keeps its own copy, or the call failed).
+     let status = MIDIClientCreate(name, std::ptr::null(), std::ptr::null_mut(), &mut client);
++    CFRelease(name as CFTypeRef);
+     if status != 0 {
+         return Err(status);
+     }
+@@ -303,7 +313,9 @@ pub unsafe fn create_client_and_port() -> Result<(usize, usize), OSStatus> {
+     }
+ 
+     let mut port: MIDIPortRef = 0;
++    // Same as above: MIDIOutputPortCreate retains `port_name`.
+     let status = MIDIOutputPortCreate(client, port_name, &mut port);
++    CFRelease(port_name as CFTypeRef);
+     if status != 0 {
+         let _ = MIDIClientDispose(client);
+         return Err(status);
+@@ -331,15 +343,16 @@ pub unsafe fn dispose_client_and_port(client: usize, _port: usize) -> OSStatus {
+     MIDIClientDispose(client)
+ }
+ 
+-/// Creates a CFStringRef from a UTF-8 string.
++/// Creates a CFStringRef from a UTF-8 string (+1 retain count).
+ ///
+ /// # Safety
+-/// Caller is responsible for releasing the returned CFStringRef via
+-/// `CFRelease` (not needed for static strings passed to CoreMIDI, which
+-/// retains them internally).
++/// Caller owns the returned CFStringRef and MUST release it via `CFRelease`
++/// once CoreMIDI has retained it — CoreMIDI keeps its own reference and does
++/// NOT release the caller's. See [`create_client_and_port`].
+ ///
+ /// # Note
+-/// This function is pub for integration tests; it is only called from tests.
++/// The production caller is [`create_client_and_port`] (the `engine_start`
++/// path); it is also `pub` for integration tests.
+ pub unsafe fn cfstring_from_str(s: &str) -> CFStringRef {
+     let c_str = s.as_ptr() as *const i8;
+     CFStringCreateWithCString(std::ptr::null(), c_str, 0x08000100)

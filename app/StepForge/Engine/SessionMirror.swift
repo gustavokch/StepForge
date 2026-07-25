@@ -30,6 +30,8 @@ struct SessionMirror: Equatable {
     var undoAvailable: Set<Int> = []
     var lastError: EngineErrorMirror? = nil
     var lastOverflow: UInt32? = nil
+    var linkPeers: Int = 0
+    var linkEnabled: Bool = false
 
     // MARK: Convenience accessors (views read these)
 
@@ -133,6 +135,8 @@ struct SessionMirror: Equatable {
             lastError = EngineErrorMirror(code: code, message: message)
         case .overflow(let dropped):
             lastOverflow = dropped
+        case .linkPeersChanged(let count):
+            linkPeers = count
         }
     }
 
@@ -200,12 +204,14 @@ struct SessionMirror: Equatable {
             }
         case .setMidiDestinations(let endpoints):
             session.midiDestinations = endpoints
+        case .setLinkEnabled(let enabled):
+            linkEnabled = enabled
         // Roll/Vary/Cut/Copy/Paste/Undo/sync/load — no deterministic
         // optimistic echo (engine logic / RNG / external state); the real engine
         // echoes the result. The mock leaves the mirror untouched for these.
         case .roll, .vary, .cut, .copy, .paste, .undo,
              .retriggerPattern, .requestFullSnapshot,
-             .serialize, .loadSession, .linkPhase, .midiClockTick:
+             .serialize, .loadSession, .midiClockTick:
             break
         }
     }

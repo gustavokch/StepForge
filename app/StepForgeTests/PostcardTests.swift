@@ -51,8 +51,8 @@ final class PostcardTests: XCTestCase {
         XCTAssertEqual(Command.loadSession(bytes: [9, 9]).encode(), load("cmd_loadsession_9_9"))
     }
 
-    func testCommandLinkPhase() {
-        XCTAssertEqual(Command.linkPhase(beatsSinceOrigin: 4.0, phase: 0.5).encode(), load("cmd_linkphase_4_05"))
+    func testCommandSetLinkEnabled() {
+        XCTAssertEqual(Command.setLinkEnabled(enabled: true).tag, 33)
     }
 
     // MARK: - Engine bytes → Event decode

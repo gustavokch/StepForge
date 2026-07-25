@@ -19,6 +19,32 @@ use arc_swap::ArcSwap;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
+#[cfg(not(target_os = "ios"))]
+use ableton_link::link::BasicLink as Link;
+
+#[cfg(target_os = "ios")]
+pub struct Link;
+#[cfg(target_os = "ios")]
+impl Link {
+    pub fn new(_bpm: f64) -> Self { Self }
+    pub async fn enable(&mut self) {}
+    pub async fn disable(&mut self) {}
+    pub fn capture_app_session_state(&self) -> DummySessionState { DummySessionState }
+    pub fn clock(&self) -> DummyClock { DummyClock }
+    pub fn num_peers(&self) -> u32 { 0 }
+}
+#[cfg(target_os = "ios")]
+pub struct DummySessionState;
+#[cfg(target_os = "ios")]
+impl DummySessionState {
+    pub fn beat_at_time(&self, _time: u64, _quantum: f64) -> f64 { 0.0 }
+}
+#[cfg(target_os = "ios")]
+pub struct DummyClock;
+#[cfg(target_os = "ios")]
+impl DummyClock {
+    pub fn micros(&self) -> u64 { 0 }
+}
 
 fn active_pattern_mut(s: &mut Session) -> Option<&mut crate::models::Pattern> {
     s.patterns[s.active_pattern_index].as_mut()
@@ -125,13 +151,32 @@ pub struct ExternalClock {
     /// Absolute Link position as `beats_since_origin * 1_000_000` (integer
     /// micros-of-a-beat). RT computes target 16th-step from this.
     pub link_beats_micros: AtomicU64,
+    /// Whether the native Ableton Link session is enabled (Task 1).
+    pub link_enabled: AtomicBool,
+    pub link: Mutex<Link>,
+    #[cfg(not(target_os = "ios"))]
+    pub tokio_rt: tokio::runtime::Runtime,
 }
 impl ExternalClock {
     pub fn new() -> Self {
+        #[cfg(not(target_os = "ios"))]
+        let tokio_rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        #[cfg(not(target_os = "ios"))]
+        let link = tokio_rt.block_on(Link::new(120.0));
+        #[cfg(target_os = "ios")]
+        let link = Link::new(120.0);
+
         Self {
             midi_ticks: AtomicU32::new(0),
             midi_step_pulses: AtomicU32::new(0),
             link_beats_micros: AtomicU64::new(0),
+            link_enabled: AtomicBool::new(false),
+            link: Mutex::new(link),
+            #[cfg(not(target_os = "ios"))]
+            tokio_rt,
         }
     }
 }
@@ -160,6 +205,7 @@ pub struct RtState {
     pub global_step: u32,
     pub track_count: usize,
     pub loop_count: u32,
+    pub link_peers: usize,
 }
 impl RtState {
     pub fn new(seed: u64) -> Self {
@@ -173,6 +219,7 @@ impl RtState {
             global_step: 0,
             track_count: 0,
             loop_count: 0,
+            link_peers: 0,
         }
     }
 }
@@ -198,6 +245,8 @@ pub struct Engine {
     /// CoreMIDI output port reference (owned by engine). Pointer-sized for the
     /// same reason; 0 means uninitialized.
     pub coremidi_port: Mutex<usize>,
+    /// CoreMIDI virtual source reference (owned by engine).
+    pub coremidi_source: Mutex<usize>,
     /// Per-track, one-deep undo (Task 12). Mutex-guarded because the worker
     /// applies commands sequentially but the engine is `Send+Sync`; the lock is
     /// never held across an FFI call or on the RT path.
@@ -233,6 +282,7 @@ impl Engine {
             coremidi_handle: Mutex::new(None),
             coremidi_client: Mutex::new(0usize),
             coremidi_port: Mutex::new(0usize),
+            coremidi_source: Mutex::new(0usize),
             undo: Mutex::new(Undo::default()),
             clipboard: Mutex::new(Clipboard::default()),
             external_clock: Arc::new(ExternalClock::new()),
@@ -327,17 +377,23 @@ impl Engine {
                     clock.sleep_until(now + 500);
                 }
                 crate::models::SyncSource::Link => {
-                    let link_micros = self
-                        .external_clock
-                        .link_beats_micros
-                        .load(Ordering::Acquire);
-                    // `link_beats_micros` is `beats_since_origin * 1_000_000`;
-                    // convert back to beats, then to 16th-steps (×4).
-                    let beats = link_micros as f64 / 1_000_000.0;
-                    let target = (beats * 4.0) as u64;
-                    while rt.link_step_count < target {
-                        self.process_one(&mut rt, &snap, playing, now);
-                        rt.link_step_count += 1;
+                    if let Ok(link) = self.external_clock.link.try_lock() {
+                        let state = link.capture_app_session_state();
+                        let time = link.clock().micros();
+                        let beats = state.beat_at_time(time, 4.0);
+                        let target = (beats * 4.0) as u64;
+                        while rt.link_step_count < target {
+                            self.process_one(&mut rt, &snap, playing, now);
+                            rt.link_step_count += 1;
+                        }
+                        let peers = link.num_peers();
+                        if peers as usize != rt.link_peers {
+                            rt.link_peers = peers as usize;
+                            let _ = crate::midi_out::push_event(
+                                &self.hot_events,
+                                &crate::event::EngineEvent::LinkPeersChanged { count: peers as usize },
+                            );
+                        }
                     }
                     clock.sleep_until(now + 500);
                 }
@@ -474,16 +530,22 @@ impl Engine {
                     &EngineEvent::SyncSourceChanged { source },
                 );
             }
-            LinkPhase {
-                beats_since_origin,
-                phase: _,
-            } => {
-                // Absolute Link position → micros-of-a-beat (integer). RT
-                // converts back to beats + 16th-steps. Release pairs with the
-                // RT loop's Acquire load.
+            SetLinkEnabled { enabled } => {
+                if let Ok(mut link) = self.external_clock.link.lock() {
+                    #[cfg(not(target_os = "ios"))]
+                    {
+                        if enabled {
+                            self.external_clock.tokio_rt.block_on(link.enable());
+                        } else {
+                            self.external_clock.tokio_rt.block_on(link.disable());
+                        }
+                    }
+                    #[cfg(target_os = "ios")]
+                    let _ = &mut link;
+                }
                 self.external_clock
-                    .link_beats_micros
-                    .store((beats_since_origin * 1_000_000.0) as u64, Ordering::Release);
+                    .link_enabled
+                    .store(enabled, Ordering::Release);
             }
             MidiClockTick => {
                 // 24 PPQN → 6 ticks per 16th step. Worker accumulates raw

@@ -109,10 +109,8 @@ pub enum Command {
     LoadSession {
         bytes: Vec<u8>,
     },
-    /// Ableton Link phase alignment (architecture-spec §9.2; amendment E6).
-    LinkPhase {
-        beats_since_origin: f64,
-        phase: f64,
+    SetLinkEnabled {
+        enabled: bool,
     },
     /// Inbound MIDI Clock tick — drives step advance when sync = MidiClock (§9.3; E6).
     MidiClockTick,
@@ -133,9 +131,8 @@ mod tests {
                 zone: VelocityZone::Accent,
             },
             Command::LoadSession { bytes: vec![9, 9] },
-            Command::LinkPhase {
-                beats_since_origin: 4.0,
-                phase: 0.5,
+            Command::SetLinkEnabled {
+                enabled: true,
             },
             Command::MidiClockTick,
         ];

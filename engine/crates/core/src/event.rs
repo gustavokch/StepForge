@@ -80,6 +80,9 @@ pub enum EngineEvent {
     Overflow {
         dropped: u32,
     },
+    LinkPeersChanged {
+        count: usize,
+    },
 }
 
 #[cfg(test)]
@@ -96,6 +99,7 @@ mod tests {
                 step_idx: 7,
             },
             EngineEvent::Overflow { dropped: 7 },
+            EngineEvent::LinkPeersChanged { count: 3 },
         ];
         for e in events {
             let bytes = postcard::to_allocvec(&e).expect("serialize");
