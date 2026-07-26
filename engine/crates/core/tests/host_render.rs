@@ -241,3 +241,18 @@ proptest! {
         );
     }
 }
+
+#[test]
+fn incoming_command_octave_note_queues_pattern_select() {
+    let eng = Engine::new_host_driven();
+    let s = session_with_step0_hit();
+    eng.publish(s);
+    let mut rs = HostRenderState::new();
+    // Note 61 in the command octave (60..) → pattern index 1.
+    let midi_in = [sequencer_engine::host::MidiEvent { sample_offset: 0, status: 0x90, data1: 61, data2: 100 }];
+    let mut out = [sequencer_engine::host::MidiEvent::zero(); 64];
+    eng.render_host(&mut rs, &transport(120.0, 48_000.0, 256, 0.0, 0.0, true), &midi_in, &mut out);
+    // The render pushed a QueuePattern{1} command; apply it directly (no worker thread here).
+    let cmd = eng.commands.dequeue().expect("a queued command");
+    assert!(matches!(cmd, sequencer_engine::command::Command::QueuePattern { index: 1, .. }));
+}
