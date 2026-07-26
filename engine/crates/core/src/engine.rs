@@ -282,6 +282,10 @@ pub struct Engine {
     /// (e.g. drop stale per-track state). Read via `Acquire`; the worker bumps
     /// via `AcqRel` after `publish`.
     pub reload_generation: AtomicU32,
+    /// Host-driven mode: when true, `engine_start` spawns only the state worker
+    /// and the host drives dispatch via `Engine::render_host` (plugin port,
+    /// Phase 0). Standalone (`Engine::new`) keeps this false.
+    pub host_driven: bool,
 }
 
 /// Target 16th-step for the RT Link arm, derived purely from the
@@ -315,7 +319,16 @@ impl Engine {
             external_clock: Arc::new(ExternalClock::new()),
             scheduler: Arc::new(crate::scheduler::SchedulerClock::default()),
             reload_generation: AtomicU32::new(0),
+            host_driven: false,
         }
+    }
+    /// Construct an engine in host-driven mode (plugin host drives rendering via
+    /// `Engine::render_host`). Identical to `Engine::new` except `host_driven`,
+    /// which makes `engine_start` spawn only the state worker.
+    pub fn new_host_driven() -> Self {
+        let mut e = Self::new();
+        e.host_driven = true;
+        e
     }
     /// Worker: publish a new authoritative session (COW).
     pub fn publish(&self, session: Session) {
@@ -1637,5 +1650,10 @@ mod tests {
             Some(1),
             "Should switch to pattern 1 on loop 2"
         );
+    }
+    #[test]
+    fn host_driven_flag_reflects_constructor() {
+        assert!(!Engine::new().host_driven, "standalone default is self-scheduled");
+        assert!(Engine::new_host_driven().host_driven, "host-driven constructor sets the flag");
     }
 }
