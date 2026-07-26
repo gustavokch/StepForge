@@ -395,3 +395,46 @@ fn incoming_command_octave_note_queues_pattern_select() {
         sequencer_engine::command::Command::QueuePattern { index: 1, .. }
     ));
 }
+
+#[test]
+fn stop_transition_does_not_emit_deferred_note_on_after_all_notes_off() {
+    // Regression (Medium, PR #8 review): on the play→stop transition block, a
+    // deferred note-on due this block must NOT fire. It would land at
+    // sample_offset > 0, after the offset-0 CC 123 all-notes-off, re-arming a
+    // note nothing later turns off → stuck note. Pre-fix, `render_host` drained
+    // `pending` BEFORE the stop branch, so the deferred note-on leaked out.
+    //
+    // The seed mimics state a prior swung block leaves behind: a deferred note-on
+    // scheduled mid-block + `was_playing == true` (so this block is a play→stop
+    // transition that emits CC 123).
+    let eng = Engine::new_host_driven();
+    eng.publish(session_with_step0_hit());
+    let mut rs = HostRenderState::new();
+    rs.pending.schedule(100, 0x9A, 36, 100); // deferred note-on, due mid-block
+    rs.was_playing = true; // makes this a play→stop transition (CC 123 path)
+    rs.sample_time = 0; // block_start_abs = 0 → abs 100 ∈ [0, 256)
+    let mut out = [sequencer_engine::host::MidiEvent::zero(); 64];
+    let n = eng.render_host(
+        &mut rs,
+        &transport(120.0, 48_000.0, 256, 0.0, 0.0, false),
+        &[],
+        &mut out,
+    );
+    // CC 123 all-notes-off must be emitted at offset 0.
+    assert!(
+        out[..n]
+            .iter()
+            .any(|e| (e.status & 0xF0) == 0xB0 && e.data1 == 123 && e.sample_offset == 0),
+        "all-notes-off at offset 0 (got {:?})",
+        &out[..n]
+    );
+    // No deferred note-on may fire on the stop block.
+    assert!(
+        out[..n]
+            .iter()
+            .all(|e| !((e.status & 0xF0) == 0x90 && e.data2 > 0)),
+        "no note-on on the stop block (pre-fix the deferred note-on fired here, sticking the note): {:?}",
+        &out[..n]
+    );
+    assert!(!rs.was_playing);
+}

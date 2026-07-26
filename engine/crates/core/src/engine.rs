@@ -527,7 +527,34 @@ impl Engine {
         let snap = self.snapshot.load(); // zero-alloc Guard; immutable for the block
         let channel = snap.global_midi_channel;
 
-        // (1) Emit pending note-offs from prior blocks due within this block.
+        // (1) Stop transition FIRST. On the play→stop block, emit CC 123
+        // all-notes-off at offset 0 and clear `pending` BEFORE draining —
+        // otherwise a deferred note-on due this block (e.g. a swung note-on
+        // pushed past its boundary block) would drain at sample_offset > 0,
+        // AFTER the offset-0 CC 123, re-arming a note nothing later turns off
+        // (stuck note). Clearing first means the stop block emits only CC 123;
+        // CC 123 already kills every sustaining note, so any pending note-offs
+        // due this block are redundant.
+        if !transport.is_playing {
+            if rs.was_playing {
+                if written < midi_out.len() {
+                    midi_out[written] = MidiEvent {
+                        sample_offset: 0,
+                        status: 0xB0 | (channel & 0x0F),
+                        data1: 123,
+                        data2: 0,
+                    };
+                    written += 1;
+                }
+                rs.was_playing = false;
+                rs.pending.clear();
+            }
+            rs.sample_time = block_end_abs;
+            rs.last_block_start_beat = transport.block_start_beat;
+            return written;
+        }
+
+        // (2) Emit pending note-offs from prior blocks due within this block.
         rs.pending.drain_due(block_start_abs, block_end_abs, |ev| {
             if written < midi_out.len() {
                 midi_out[written] = ev;
@@ -535,7 +562,7 @@ impl Engine {
             }
         });
 
-        // (2) Incoming note-ons in the command octave → pattern-select commands.
+        // (3) Incoming note-ons in the command octave → pattern-select commands.
         //     Reuses the worker's `QueuePattern` path; latency ≤ one worker drain.
         for ev in midi_in {
             if (ev.status & 0xF0) == 0x90 && ev.data2 > 0 {
@@ -554,29 +581,6 @@ impl Engine {
         let samples_per_beat = transport.sample_rate / bps;
         let block_end_beat =
             transport.block_start_beat + (block as f64) / samples_per_beat.max(1e-6);
-
-        // (3) Stop transition: freeze advancement + all-notes-off at offset 0.
-        if !transport.is_playing {
-            if rs.was_playing {
-                if written < midi_out.len() {
-                    midi_out[written] = MidiEvent {
-                        sample_offset: 0,
-                        status: 0xB0 | (channel & 0x0F),
-                        data1: 123,
-                        data2: 0,
-                    };
-                    written += 1;
-                }
-                rs.was_playing = false;
-                // CC 123 killed every sustaining note; drop any events still
-                // queued (note-offs AND deferred note-ons) so they can't fire as
-                // stale events in later stopped blocks.
-                rs.pending.clear();
-            }
-            rs.sample_time = block_end_abs;
-            rs.last_block_start_beat = transport.block_start_beat;
-            return written;
-        }
 
         // (4) Play-start or seek: reseed RNG + align global_step/next_step_beat
         //     to the host bar so step 0 lands on the downbeat.
