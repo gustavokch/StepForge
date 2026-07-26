@@ -9,6 +9,10 @@ pub const MAX_TRACKS: usize = 8;
 pub const MIN_TRACKS: usize = 4;
 pub const STEP_COUNT: usize = 16;
 pub const PATTERN_SLOTS: usize = 9;
+/// Bounded BPM range (E9): clamping bounds the worst-case RT event rate and
+/// defends against garbage / free-text values. Applied in `engine::apply_command(SetBpm)`.
+pub const MIN_BPM: f64 = 20.0;
+pub const MAX_BPM: f64 = 400.0;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Session {
@@ -28,8 +32,8 @@ impl Default for Session {
         // Initialize all patterns with the default track layout (Kick, Snare, Hat, Clap)
         // so that switching patterns via follow actions doesn't result in silent/empty patterns.
         let mut patterns: [Option<Pattern>; PATTERN_SLOTS] = Default::default();
-        for i in 0..PATTERN_SLOTS {
-            patterns[i] = Some(Pattern::default());
+        for p in patterns.iter_mut() {
+            *p = Some(Pattern::default());
         }
         Self {
             bpm: 120.0,

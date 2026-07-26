@@ -55,25 +55,29 @@ final class MidiManager: ObservableObject {
 
     private func handleMidiInput(_ packetList: UnsafePointer<MIDIPacketList>) {
         guard let bridge = bridge else { return }
-        
+        // Read the sync-critical field ONCE via the lock-protected snapshot
+        // (Issue #1): `mirror` is mutated MainActor-only, so touching it from this
+        // CoreMIDI callback thread is a data race. One read serves the whole packet.
+        let syncIsClock = (bridge.currentSyncSource == .midiClock)
+
         let packets = packetList.pointee
         var packet = packets.packet
-        
+
         for _ in 0..<packets.numPackets {
             let data = withUnsafeBytes(of: packet.data) { Array($0) }
             for i in 0..<Int(packet.length) {
                 let byte = data[i]
                 if byte == 0xF8 { // Timing Clock
-                    if bridge.mirror.syncSource == .midiClock {
+                    if syncIsClock {
                         bridge.submit(.midiClockTick)
                         estimateBPM(hostTime: mach_absolute_time())
                     }
                 } else if byte == 0xFA { // Start
-                    if bridge.mirror.syncSource == .midiClock {
+                    if syncIsClock {
                         bridge.submit(.play)
                     }
                 } else if byte == 0xFC { // Stop
-                    if bridge.mirror.syncSource == .midiClock {
+                    if syncIsClock {
                         bridge.submit(.stop)
                     }
                 }
@@ -100,7 +104,7 @@ final class MidiManager: ObservableObject {
                 let quarterNoteNanos = avgNanos * 24.0
                 let bpm = 60.0 / (quarterNoteNanos / 1_000_000_000.0)
                 
-                if abs((bridge?.mirror.bpm ?? 120.0) - bpm) > 0.5 {
+                if abs((bridge?.currentBpm ?? 120.0) - bpm) > 0.5 {
                     bridge?.submit(.setBpm(bpm: bpm))
                 }
             }

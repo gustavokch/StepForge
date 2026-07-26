@@ -15,35 +15,47 @@ use crate::midi_out::{
 };
 use crate::models::{Session, MAX_TRACKS, MIN_TRACKS, PATTERN_SLOTS, STEP_COUNT};
 use crate::undo::Undo;
+#[cfg(not(target_os = "ios"))]
+use ableton_link::link::BasicLink as Link;
 use arc_swap::ArcSwap;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
-#[cfg(not(target_os = "ios"))]
-use ableton_link::link::BasicLink as Link;
 
 #[cfg(target_os = "ios")]
 pub struct Link;
 #[cfg(target_os = "ios")]
 impl Link {
-    pub fn new(_bpm: f64) -> Self { Self }
+    pub fn new(_bpm: f64) -> Self {
+        Self
+    }
     pub async fn enable(&mut self) {}
     pub async fn disable(&mut self) {}
-    pub fn capture_app_session_state(&self) -> DummySessionState { DummySessionState }
-    pub fn clock(&self) -> DummyClock { DummyClock }
-    pub fn num_peers(&self) -> u32 { 0 }
+    pub fn capture_app_session_state(&self) -> DummySessionState {
+        DummySessionState
+    }
+    pub fn clock(&self) -> DummyClock {
+        DummyClock
+    }
+    pub fn num_peers(&self) -> usize {
+        0
+    }
 }
 #[cfg(target_os = "ios")]
 pub struct DummySessionState;
 #[cfg(target_os = "ios")]
 impl DummySessionState {
-    pub fn beat_at_time(&self, _time: u64, _quantum: f64) -> f64 { 0.0 }
+    pub fn beat_at_time(&self, _time: u64, _quantum: f64) -> f64 {
+        0.0
+    }
 }
 #[cfg(target_os = "ios")]
 pub struct DummyClock;
 #[cfg(target_os = "ios")]
 impl DummyClock {
-    pub fn micros(&self) -> u64 { 0 }
+    pub fn micros(&self) -> u64 {
+        0
+    }
 }
 
 fn active_pattern_mut(s: &mut Session) -> Option<&mut crate::models::Pattern> {
@@ -137,11 +149,11 @@ impl Default for Transport {
     }
 }
 
-/// External-clock shared state (E6). Worker writes via `apply_command`
-/// (`LinkPhase` / `MidiClockTick`); the RT loop reads via atomic loads in
-/// `run_rt_loop`. All fields are lock-free atomics so the RT thread never
-/// blocks (Hard Rule 1). `Arc`-shared so the engine and RT thread see the
-/// same counters.
+/// External-clock shared state (E6). MIDI Clock pulses are worker-written via
+/// `apply_command(MidiClockTick)`; the Ableton Link position is written by the
+/// off-RT Link poller (`run_link_poller`). The RT loop reads ONLY these atomics
+/// in `run_rt_loop` — it never touches `link` or its `Mutex` (B2, Hard Rule 1).
+/// `Arc`-shared so the engine, RT thread, and poller see the same counters.
 pub struct ExternalClock {
     /// Raw 24-PPQN MIDI Clock tick count — worker increments per `MidiClockTick`.
     pub midi_ticks: AtomicU32,
@@ -149,10 +161,15 @@ pub struct ExternalClock {
     /// `swap(0, AcqRel)` each tick; worker `fetch_add`s under it.
     pub midi_step_pulses: AtomicU32,
     /// Absolute Link position as `beats_since_origin * 1_000_000` (integer
-    /// micros-of-a-beat). RT computes target 16th-step from this.
+    /// micros-of-a-beat), written by the off-RT Link poller. RT computes the
+    /// target 16th-step from this via `target_step_from_link_beats`.
     pub link_beats_micros: AtomicU64,
-    /// Whether the native Ableton Link session is enabled (Task 1).
+    /// Whether the native Ableton Link session is enabled. The poller idles
+    /// (no Link calls) while this is false.
     pub link_enabled: AtomicBool,
+    /// The Link session. Touched ONLY off the RT thread — by the poller (read:
+    /// `capture_app_session_state`/`clock`/`num_peers`) and the worker
+    /// (`enable`/`disable` on `SetLinkEnabled`). Never on the RT hot path (B2).
     pub link: Mutex<Link>,
     #[cfg(not(target_os = "ios"))]
     pub tokio_rt: tokio::runtime::Runtime,
@@ -205,7 +222,6 @@ pub struct RtState {
     pub global_step: u32,
     pub track_count: usize,
     pub loop_count: u32,
-    pub link_peers: usize,
 }
 impl RtState {
     pub fn new(seed: u64) -> Self {
@@ -219,7 +235,6 @@ impl RtState {
             global_step: 0,
             track_count: 0,
             loop_count: 0,
-            link_peers: 0,
         }
     }
 }
@@ -238,6 +253,8 @@ pub struct Engine {
     pub worker_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// CoreMIDI worker handle. NULL before `engine_start` (Task 20a).
     pub coremidi_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Link poller thread handle (B2). `None` before `engine_start`.
+    pub link_poller_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// CoreMIDI client reference (owned by engine, Rule 7). Stored as `usize`
     /// (pointer-sized) so the ref survives regardless of how Apple defines
     /// `MIDIClientRef`; 0 means uninitialized.
@@ -267,6 +284,15 @@ pub struct Engine {
     pub reload_generation: AtomicU32,
 }
 
+/// Target 16th-step for the RT Link arm, derived purely from the
+/// `link_beats_micros` atomic (`beats_since_origin * 1_000_000`) that the off-RT
+/// Link poller publishes (B2). 4 16ths per beat. Pure + allocation-free — RT-safe
+/// (Hard Rule 1): the RT thread reads one atomic and calls only this.
+pub fn target_step_from_link_beats(link_beats_micros: u64) -> u64 {
+    let beats = link_beats_micros as f64 / 1_000_000.0;
+    (beats * 4.0) as u64
+}
+
 impl Engine {
     pub fn new() -> Self {
         Self {
@@ -280,6 +306,7 @@ impl Engine {
             rt_handle: Mutex::new(None),
             worker_handle: Mutex::new(None),
             coremidi_handle: Mutex::new(None),
+            link_poller_handle: Mutex::new(None),
             coremidi_client: Mutex::new(0usize),
             coremidi_port: Mutex::new(0usize),
             coremidi_source: Mutex::new(0usize),
@@ -377,26 +404,76 @@ impl Engine {
                     clock.sleep_until(now + 500);
                 }
                 crate::models::SyncSource::Link => {
-                    if let Ok(link) = self.external_clock.link.try_lock() {
-                        let state = link.capture_app_session_state();
-                        let time = link.clock().micros();
-                        let beats = state.beat_at_time(time, 4.0);
-                        let target = (beats * 4.0) as u64;
-                        while rt.link_step_count < target {
-                            self.process_one(&mut rt, &snap, playing, now);
-                            rt.link_step_count += 1;
-                        }
-                        let peers = link.num_peers();
-                        if peers as usize != rt.link_peers {
-                            rt.link_peers = peers as usize;
-                            let _ = crate::midi_out::push_event(
-                                &self.hot_events,
-                                &crate::event::EngineEvent::LinkPeersChanged { count: peers as usize },
-                            );
-                        }
+                    // Lock-free (B2): the off-RT Link poller (`run_link_poller`)
+                    // writes `link_beats_micros`; the RT thread only reads the
+                    // atomic and derives the target 16th-step. No Link call, no
+                    // Mutex, no allocation on the hot path (Hard Rule 1).
+                    let beats_micros = self
+                        .external_clock
+                        .link_beats_micros
+                        .load(Ordering::Acquire);
+                    let target = target_step_from_link_beats(beats_micros);
+                    while rt.link_step_count < target {
+                        self.process_one(&mut rt, &snap, playing, now);
+                        rt.link_step_count += 1;
                     }
                     clock.sleep_until(now + 500);
                 }
+            }
+        }
+    }
+
+    /// Off-RT Ableton Link poller (B2). The sole *polling reader* of
+    /// `external_clock.link` — the state worker is the sole *mutating writer*,
+    /// via `set_link_session` (Issue #2). While Link is enabled it captures the
+    /// session state + clock at a bounded rate and publishes the beat position to
+    /// `link_beats_micros` (which the RT loop reads lock-free) and emits
+    /// `LinkPeersChanged` on peer-count changes. All ableton-link-rs calls
+    /// (which allocate / may contend with Link's internal thread) happen here —
+    /// never on the RT thread (Hard Rule 1). The poller takes the `link` mutex
+    /// with `try_lock` (below) so it never blocks on — and never deadlocks with —
+    /// a worker mid-`enable`/`disable`; contention just skips that 1 ms tick.
+    pub fn run_link_poller(self: &Arc<Engine>) {
+        // `usize::MAX` is a sentinel that can never equal a real peer count, so
+        // the first poll after startup — and the first poll after every
+        // disable→re-enable (see the `else` branch) — always emits a
+        // `LinkPeersChanged` with the current count.
+        let mut last_peers: usize = usize::MAX;
+        while !self.shutdown.load(Ordering::Acquire) {
+            if self.external_clock.link_enabled.load(Ordering::Acquire) {
+                // Capture beat position + any peer-count change under the guard;
+                // emit the event AFTER the guard closes so the Link mutex is
+                // held only for the ableton-link-rs calls (`push_event` is
+                // already non-blocking). try_lock: never block — skip this tick
+                // if the worker holds the mutex during enable/disable.
+                let peers_changed = if let Ok(link) = self.external_clock.link.try_lock() {
+                    let state = link.capture_app_session_state();
+                    let time = link.clock().micros();
+                    let beats = state.beat_at_time(time, 4.0);
+                    self.external_clock
+                        .link_beats_micros
+                        .store((beats * 1_000_000.0) as u64, Ordering::Release);
+                    let peers = link.num_peers();
+                    if peers != last_peers {
+                        last_peers = peers;
+                        Some(peers)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some(peers) = peers_changed {
+                    let _ = crate::midi_out::push_event(
+                        &self.hot_events,
+                        &crate::event::EngineEvent::LinkPeersChanged { count: peers },
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            } else {
+                // Link disabled — reset so re-enable always emits the current count.
+                last_peers = usize::MAX;
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
     }
@@ -442,11 +519,19 @@ impl Engine {
             rt.loop_count += 1;
             let _ = crate::midi_out::push_event(
                 &self.hot_events,
-                &crate::event::EngineEvent::PatternLoopCountChanged { count: rt.loop_count },
+                &crate::event::EngineEvent::PatternLoopCountChanged {
+                    count: rt.loop_count,
+                },
             );
-            if let Some(pattern) = snap.patterns.get(snap.active_pattern_index).and_then(|p| p.as_ref()) {
+            if let Some(pattern) = snap
+                .patterns
+                .get(snap.active_pattern_index)
+                .and_then(|p| p.as_ref())
+            {
                 let fa = &pattern.follow_action;
-                if fa.action != crate::models::FollowActionType::None && rt.loop_count >= fa.after_loops {
+                if fa.action != crate::models::FollowActionType::None
+                    && rt.loop_count >= fa.after_loops
+                {
                     let mut next_idx = snap.active_pattern_index;
                     let mut do_stop = false;
 
@@ -455,10 +540,15 @@ impl Engine {
                             next_idx = (snap.active_pattern_index + 1) % snap.patterns.len();
                         }
                         crate::models::FollowActionType::PlayPrevious => {
-                            next_idx = (snap.active_pattern_index + snap.patterns.len() - 1) % snap.patterns.len();
+                            next_idx = (snap.active_pattern_index + snap.patterns.len() - 1)
+                                % snap.patterns.len();
                         }
                         crate::models::FollowActionType::PlaySpecific(id) => {
-                            next_idx = snap.patterns.iter().position(|p| p.as_ref().map_or(false, |pat| pat.id == id)).unwrap_or(snap.active_pattern_index);
+                            next_idx = snap
+                                .patterns
+                                .iter()
+                                .position(|p| p.as_ref().is_some_and(|pat| pat.id == id))
+                                .unwrap_or(snap.active_pattern_index);
                         }
                         crate::models::FollowActionType::PlayRandom => {
                             next_idx = rt.rng.range(0, snap.patterns.len() as i32 - 1) as usize;
@@ -470,8 +560,12 @@ impl Engine {
                     }
 
                     if do_stop {
-                        self.transport.is_playing.store(false, std::sync::atomic::Ordering::Release);
-                        self.transport.stop_generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                        self.transport
+                            .is_playing
+                            .store(false, std::sync::atomic::Ordering::Release);
+                        self.transport
+                            .stop_generation
+                            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                         let _ = crate::midi_out::push_event(
                             &self.hot_events,
                             &crate::event::EngineEvent::PlayStateChanged { playing: false },
@@ -491,6 +585,49 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Worker-only: enable/disable the native Ableton Link session, publish the
+    /// `link_enabled` flag, and emit `LinkEnabledChanged`. Runs OFF the RT thread
+    /// (`SetSyncSource` / `SetLinkEnabled` arms) — the only Link mutation path.
+    /// The RT thread reads only the `link_enabled` + `link_beats_micros` atomics
+    /// (Hard Rule 1); the `link` Mutex is never held on RT, and the poller takes
+    /// it with `try_lock` so this never blocks.
+    ///
+    /// Why the `MutexGuard` spans `block_on` (Issue #2): `ableton-link-rs`'s
+    /// `BasicLink` is **not** `Clone` (its `Controller` owns a non-cloneable tokio
+    /// `Receiver`), and `enable()` / `disable()` are `async fn(&mut self)`. So the
+    /// `&mut Link` needed to enable/disable is reachable only through the guard —
+    /// the guard *must* remain held across `block_on`. This is safe because the
+    /// only contender is the poller, which uses `try_lock` (see `run_link_poller`);
+    /// skip-on-contention never blocks, and `block_on` runs on a dedicated worker
+    /// thread (never a tokio runtime thread) — the documented `Runtime::block_on`
+    /// usage — so there is no deadlock.
+    ///
+    /// Without this, selecting Link as the sync source left `link_enabled=false`
+    /// → the off-RT poller idled → `link_beats_micros` stayed 0 → the RT Link arm
+    /// never advanced (BPM/transport sync stuck). Auto-enabling on source select
+    /// makes "Sync Source = Link" actually engage the session.
+    fn set_link_session(&self, enabled: bool) {
+        if let Ok(mut link) = self.external_clock.link.lock() {
+            #[cfg(not(target_os = "ios"))]
+            {
+                if enabled {
+                    self.external_clock.tokio_rt.block_on(link.enable());
+                } else {
+                    self.external_clock.tokio_rt.block_on(link.disable());
+                }
+            }
+            #[cfg(target_os = "ios")]
+            let _ = &mut link;
+        }
+        self.external_clock
+            .link_enabled
+            .store(enabled, Ordering::Release);
+        let _ = crate::midi_out::push_event(
+            &self.hot_events,
+            &EngineEvent::LinkEnabledChanged { enabled },
+        );
     }
 
     /// Apply one command by clone-mutate-publish (the worker's per-command body).
@@ -523,29 +660,19 @@ impl Engine {
             // atomics for the RT loop to read.
             SetSyncSource { source } => {
                 let mut s = (*self.snapshot.load_full()).clone();
-                s.sync_source = source.clone();
+                s.sync_source = source;
                 self.publish(s);
                 crate::midi_out::push_event(
                     &self.hot_events,
                     &EngineEvent::SyncSourceChanged { source },
                 );
+                // Selecting Link engages the Ableton Link session; Free/MidiClock
+                // releases it (Defect 3 fix). Drives `link_enabled` + emits
+                // `LinkEnabledChanged` via the shared worker helper.
+                self.set_link_session(matches!(source, crate::models::SyncSource::Link));
             }
             SetLinkEnabled { enabled } => {
-                if let Ok(mut link) = self.external_clock.link.lock() {
-                    #[cfg(not(target_os = "ios"))]
-                    {
-                        if enabled {
-                            self.external_clock.tokio_rt.block_on(link.enable());
-                        } else {
-                            self.external_clock.tokio_rt.block_on(link.disable());
-                        }
-                    }
-                    #[cfg(target_os = "ios")]
-                    let _ = &mut link;
-                }
-                self.external_clock
-                    .link_enabled
-                    .store(enabled, Ordering::Release);
+                self.set_link_session(enabled);
             }
             MidiClockTick => {
                 // 24 PPQN → 6 ticks per 16th step. Worker accumulates raw
@@ -678,7 +805,9 @@ impl Engine {
                 let snap = self.snapshot.load_full();
                 crate::midi_out::push_large_event(
                     &self.large_events,
-                    EngineEvent::FullSnapshot { session: (*snap).clone() }
+                    EngineEvent::FullSnapshot {
+                        session: (*snap).clone(),
+                    },
                 );
                 crate::midi_out::push_event(
                     &self.hot_events,
@@ -707,10 +836,11 @@ impl Engine {
                 let mut needs_full_snapshot = false;
                 match other {
                     SetBpm { bpm } => {
-                        s.bpm = bpm;
+                        let clamped = bpm.clamp(crate::models::MIN_BPM, crate::models::MAX_BPM);
+                        s.bpm = clamped;
                         crate::midi_out::push_event(
                             &self.hot_events,
-                            &EngineEvent::BpmChanged { bpm },
+                            &EngineEvent::BpmChanged { bpm: clamped },
                         );
                     }
                     SetGlobalSwing { pct } => {
@@ -738,7 +868,10 @@ impl Engine {
                             t.length = length.clamp(1, crate::models::STEP_COUNT);
                             crate::midi_out::push_event(
                                 &self.hot_events,
-                                &EngineEvent::TrackLengthChanged { track_idx, length: t.length },
+                                &EngineEvent::TrackLengthChanged {
+                                    track_idx,
+                                    length: t.length,
+                                },
                             );
                         });
                     }
@@ -790,7 +923,9 @@ impl Engine {
                             if p.tracks.len() < old_len {
                                 crate::midi_out::push_event(
                                     &self.hot_events,
-                                    &EngineEvent::TrackRemoved { track_idx: p.tracks.len() },
+                                    &EngineEvent::TrackRemoved {
+                                        track_idx: p.tracks.len(),
+                                    },
                                 );
                             }
                         }
@@ -809,7 +944,7 @@ impl Engine {
                                     &EngineEvent::StepChanged {
                                         track_idx,
                                         step_idx,
-                                        step: t.steps[step_idx].clone(),
+                                        step: t.steps[step_idx],
                                     },
                                 );
                             }
@@ -827,7 +962,7 @@ impl Engine {
                                     &EngineEvent::StepChanged {
                                         track_idx,
                                         step_idx,
-                                        step: t.steps[step_idx].clone(),
+                                        step: t.steps[step_idx],
                                     },
                                 );
                             }
@@ -846,25 +981,26 @@ impl Engine {
                                     &EngineEvent::StepChanged {
                                         track_idx,
                                         step_idx,
-                                        step: t.steps[step_idx].clone(),
+                                        step: t.steps[step_idx],
                                     },
                                 );
                             }
                         });
                     }
-                    SetFollowAction { pattern_idx, action } => {
-                        if pattern_idx < s.patterns.len() {
-                            if let Some(p) = s.patterns[pattern_idx].as_mut() {
-                                p.follow_action = action.clone();
-                            }
-                            let _ = crate::midi_out::push_event(
-                                &self.hot_events,
-                                &EngineEvent::FollowActionChanged {
-                                    pattern_idx,
-                                    action,
-                                },
-                            );
+                    SetFollowAction {
+                        pattern_idx,
+                        action,
+                    } if pattern_idx < s.patterns.len() => {
+                        if let Some(p) = s.patterns[pattern_idx].as_mut() {
+                            p.follow_action = action.clone();
                         }
+                        let _ = crate::midi_out::push_event(
+                            &self.hot_events,
+                            &EngineEvent::FollowActionChanged {
+                                pattern_idx,
+                                action,
+                            },
+                        );
                     }
                     // unreachable: the match arms above are exhaustive with the outer match
                     _ => {}
@@ -874,7 +1010,9 @@ impl Engine {
                     let snap = self.snapshot.load_full();
                     crate::midi_out::push_large_event(
                         &self.large_events,
-                        EngineEvent::FullSnapshot { session: (*snap).clone() },
+                        EngineEvent::FullSnapshot {
+                            session: (*snap).clone(),
+                        },
                     );
                 }
             }
@@ -1062,6 +1200,151 @@ mod tests {
         let e = Engine::new();
         e.apply_command(Command::SetBpm { bpm: 174.0 });
         assert_eq!(e.snapshot_arc().bpm, 174.0);
+    }
+    #[test]
+    fn set_bpm_clamps_to_sane_range() {
+        // E9: an unbounded BPM makes the worst-case event rate unbounded, and
+        // a garbage/free-text value could spike it. SetBpm must clamp.
+        let e = Engine::new();
+        e.apply_command(Command::SetBpm { bpm: 1000.0 });
+        assert_eq!(e.snapshot_arc().bpm, 400.0, "clamp high");
+        e.apply_command(Command::SetBpm { bpm: 1.0 });
+        assert_eq!(e.snapshot_arc().bpm, 20.0, "clamp low");
+        e.apply_command(Command::SetBpm { bpm: 140.0 });
+        assert_eq!(e.snapshot_arc().bpm, 140.0, "in-range unchanged");
+    }
+    #[test]
+    fn link_beats_micros_maps_to_16th_step_target() {
+        // B2: the RT Link arm must derive the target 16th-step purely from the
+        // `link_beats_micros` atomic — no Link call on the hot path.
+        use crate::engine::target_step_from_link_beats;
+        assert_eq!(target_step_from_link_beats(0), 0);
+        assert_eq!(
+            target_step_from_link_beats(1_000_000),
+            4,
+            "1 beat = 4 16ths"
+        );
+        assert_eq!(
+            target_step_from_link_beats(500_000),
+            2,
+            "half beat = 2 16ths"
+        );
+        assert_eq!(
+            target_step_from_link_beats(4_000_000),
+            16,
+            "1 bar (4 beats) = 16"
+        );
+    }
+
+    /// Defect 3 fix: selecting Link as the sync source must enable the Link
+    /// session (so the off-RT poller stops idling and publishes beats); selecting
+    /// Free/MidiClock must disable it. Before the fix `SetSyncSource` left
+    /// `link_enabled=false` and Link sync never engaged.
+    #[test]
+    fn set_sync_source_link_enables_and_disables_session() {
+        let e = Engine::new();
+        e.apply_command(Command::SetSyncSource {
+            source: crate::models::SyncSource::Link,
+        });
+        assert!(
+            e.external_clock.link_enabled.load(Ordering::Acquire),
+            "selecting Link must enable the session"
+        );
+        e.apply_command(Command::SetSyncSource {
+            source: crate::models::SyncSource::Free,
+        });
+        assert!(
+            !e.external_clock.link_enabled.load(Ordering::Acquire),
+            "selecting Free must disable the session"
+        );
+        e.apply_command(Command::SetSyncSource {
+            source: crate::models::SyncSource::MidiClock,
+        });
+        assert!(
+            !e.external_clock.link_enabled.load(Ordering::Acquire),
+            "selecting MidiClock must disable the session"
+        );
+    }
+
+    /// Defect 4 fix: the engine must echo Link state as a `LinkEnabledChanged`
+    /// event so the mirror (and UI) reflects reality. `SetSyncSource{Link}`
+    /// emits both `SyncSourceChanged` and `LinkEnabledChanged{true}`.
+    #[test]
+    fn set_sync_source_emits_sync_and_link_enabled_events() {
+        use crate::event::EngineEvent;
+        use crate::models::SyncSource;
+        let e = Engine::new();
+        e.apply_command(Command::SetSyncSource {
+            source: SyncSource::Link,
+        });
+
+        let mut saw_sync = false;
+        let mut saw_enabled = false;
+        while let Some(slot) = e.hot_events.dequeue() {
+            let ev: EngineEvent = postcard::from_bytes(&slot.bytes[..slot.len as usize]).unwrap();
+            match ev {
+                EngineEvent::SyncSourceChanged { source } => {
+                    assert_eq!(source, SyncSource::Link);
+                    saw_sync = true;
+                }
+                EngineEvent::LinkEnabledChanged { enabled } => {
+                    assert!(enabled, "LinkEnabledChanged must report enabled=true");
+                    saw_enabled = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_sync, "SyncSourceChanged must be emitted");
+        assert!(saw_enabled, "LinkEnabledChanged must be emitted");
+    }
+
+    /// Issue #7: selecting Free or MidiClock as the sync source must release the
+    /// Link session — emitting both `SyncSourceChanged{source}` and
+    /// `LinkEnabledChanged{false}`. The Link baseline is established first so the
+    /// disable transition is genuine (mirrors the real flow: Link → Free/​MidiClock).
+    #[test]
+    fn set_sync_source_free_and_midi_clock_emit_link_disabled_event() {
+        use crate::event::EngineEvent;
+        use crate::models::SyncSource;
+        let e = Engine::new();
+        // Establish the Link baseline, then drain its events so each per-source
+        // drain below observes only the transition under test.
+        e.apply_command(Command::SetSyncSource {
+            source: SyncSource::Link,
+        });
+        while e.hot_events.dequeue().is_some() {}
+
+        for source in [SyncSource::Free, SyncSource::MidiClock] {
+            // Defensive: drain any leftover events before applying the transition.
+            while e.hot_events.dequeue().is_some() {}
+            e.apply_command(Command::SetSyncSource { source });
+
+            let mut saw_sync = false;
+            let mut saw_disabled = false;
+            while let Some(slot) = e.hot_events.dequeue() {
+                let ev: EngineEvent =
+                    postcard::from_bytes(&slot.bytes[..slot.len as usize]).unwrap();
+                match ev {
+                    EngineEvent::SyncSourceChanged { source: s } => {
+                        assert_eq!(s, source);
+                        saw_sync = true;
+                    }
+                    EngineEvent::LinkEnabledChanged { enabled } => {
+                        assert!(
+                            !enabled,
+                            "LinkEnabledChanged must report enabled=false for {source:?}"
+                        );
+                        saw_disabled = true;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(saw_sync, "SyncSourceChanged must be emitted for {source:?}");
+            assert!(
+                saw_disabled,
+                "LinkEnabledChanged{{false}} must be emitted for {source:?}"
+            );
+        }
     }
     #[test]
     fn play_stop_toggle_transport_atomic() {
@@ -1319,13 +1602,15 @@ mod tests {
 
     #[test]
     fn scheduler_evaluates_follow_action_play_next() {
-        use crate::models::{Pattern, FollowAction, FollowActionType};
+        use crate::models::{FollowAction, FollowActionType, Pattern};
         let e = Engine::new();
         let mut s = Session::default();
-        let mut p0 = Pattern::default();
-        p0.follow_action = FollowAction {
-            after_loops: 2,
-            action: FollowActionType::PlayNext,
+        let p0 = Pattern {
+            follow_action: FollowAction {
+                after_loops: 2,
+                action: FollowActionType::PlayNext,
+            },
+            ..Default::default()
         };
         s.patterns[0] = Some(p0);
         s.patterns[1] = Some(Pattern::default());
@@ -1334,15 +1619,23 @@ mod tests {
 
         let mut rt = e.new_rt_state();
         let snap = e.snapshot_arc();
-        
+
         // Loop 1
         rt.global_step = 0;
         e.check_scheduler(&mut rt, &snap);
-        assert_eq!(e.scheduler.take_switch(), None, "Should not switch on loop 1");
+        assert_eq!(
+            e.scheduler.take_switch(),
+            None,
+            "Should not switch on loop 1"
+        );
 
         // Loop 2
         rt.global_step = 0;
         e.check_scheduler(&mut rt, &snap);
-        assert_eq!(e.scheduler.take_switch(), Some(1), "Should switch to pattern 1 on loop 2");
+        assert_eq!(
+            e.scheduler.take_switch(),
+            Some(1),
+            "Should switch to pattern 1 on loop 2"
+        );
     }
 }

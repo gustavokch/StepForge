@@ -30,10 +30,7 @@ fn midi_clock_accumulates_one_step_pulse_per_six_ticks() {
 fn link_enabled_toggles_flag() {
     let e = Engine::new();
     e.apply_command(Command::SetLinkEnabled { enabled: true });
-    assert_eq!(
-        e.external_clock.link_enabled.load(Ordering::Acquire),
-        true
-    );
+    assert!(e.external_clock.link_enabled.load(Ordering::Acquire));
 }
 
 // RT-loop consumption of these pulses (`run_rt_loop` under MidiClock advancing the

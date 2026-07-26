@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import os
 
 /// Wraps the Rust FFI. Owns the engine handle lifecycle (CLAUDE.md Hard Rule 5)
 /// and is the **sole** path between SwiftUI and the engine. SwiftUI observes the
@@ -25,6 +26,25 @@ class EngineBridge: ObservableObject, @unchecked Sendable {
     /// The value-type mirror SwiftUI reads. File-private setter: only this file
     /// (the bridge + its mock subclass) mutates it, always on the main thread.
     @Published fileprivate(set) var mirror = SessionMirror()
+
+    /// Lock-protected snapshot of the sync-critical mirror fields, refreshed on the
+    /// MainActor at the tail of each drain batch. Off-main readers — the CoreMIDI
+    /// input callback wired by `MidiManager.bind(to:)` — must NOT touch `mirror`
+    /// (mutated MainActor-only); they read `currentSyncSource` / `currentBpm`
+    /// instead (Issue #1 data race). `mirror` stays the `@Published` source of
+    /// truth for SwiftUI; this snapshot is unpublished, so it never triggers a
+    /// redraw and adds no main-thread churn. `let` + `withLock` = interior
+    /// mutability, so it is safe to capture from any thread.
+    private struct SyncSnapshot {
+        var syncSource: SyncSource = .free
+        var bpm: Double = 120.0
+    }
+    private let syncState = OSAllocatedUnfairLock(initialState: SyncSnapshot())
+
+    /// Off-main-safe read of the current sync source (one lock acquisition).
+    var currentSyncSource: SyncSource { syncState.withLock { $0.syncSource } }
+    /// Off-main-safe read of the current BPM (one lock acquisition).
+    var currentBpm: Double { syncState.withLock { $0.bpm } }
 
     /// Opaque handle. Pass it only back to the FFI; **never** dereference it
     /// (Hard Rule 2). Created by `makeHandle()` (overridable so the mock is FFI-free).
@@ -146,6 +166,13 @@ class EngineBridge: ObservableObject, @unchecked Sendable {
             guard let self else { return; }
             for event in events { self.mirror.apply(event); }
             for (t, s) in playheads { self.mirror.applyPlayhead(trackIdx: t, stepIdx: s); }
+            // Refresh the off-main-readable sync snapshot from freshly-applied
+            // state — last, so it reflects this batch. Off-main CoreMIDI readers
+            // (Issue #1) go through `currentSyncSource` / `currentBpm`, not `mirror`.
+            self.syncState.withLock { snap in
+                snap.syncSource = self.mirror.syncSource
+                snap.bpm = self.mirror.bpm
+            }
         }
     }
 }

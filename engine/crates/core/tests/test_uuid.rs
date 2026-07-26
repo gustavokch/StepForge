@@ -1,5 +1,5 @@
-use uuid::Uuid;
 use sequencer_engine::models::Track;
+use uuid::Uuid;
 
 #[test]
 fn test_uuid_serialization() {

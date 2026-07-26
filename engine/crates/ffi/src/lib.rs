@@ -118,12 +118,14 @@ pub unsafe extern "C" fn engine_start(engine: *mut EngineHandle) -> EngineResult
         let eng = unsafe { Arc::from_raw(engine as *const Engine) };
 
         // Reset shutdown flag to false so worker and RT loops run (crucial if start is called again after stop)
-        eng.shutdown.store(false, std::sync::atomic::Ordering::Release);
+        eng.shutdown
+            .store(false, std::sync::atomic::Ordering::Release);
 
         // Create CoreMIDI client, output port, and virtual source (engine owns these per Rule 7).
         // Non-fatal if CoreMIDI client creation fails (e.g. sandboxed / un-entitled);
         // worker and RT threads must still spawn so playback and UI commands work.
-        let (client, port, source) = unsafe { coremidi::create_client_and_port() }.unwrap_or((0, 0, 0));
+        let (client, port, source) =
+            unsafe { coremidi::create_client_and_port() }.unwrap_or((0, 0, 0));
 
         // Store client/port/source in the engine for disposal in engine_stop
         *eng.coremidi_client.lock().unwrap() = client;
@@ -155,10 +157,19 @@ pub unsafe extern "C" fn engine_start(engine: *mut EngineHandle) -> EngineResult
             None
         };
 
+        // Spawn the off-RT Ableton Link poller (B2). Always spawned; it idles
+        // (no Link calls) while Link is disabled. This is the only thread that
+        // touches ableton-link-rs — never the RT thread (Hard Rule 1).
+        let eng_link = Arc::clone(&eng);
+        let link_poller_handle = std::thread::spawn(move || {
+            eng_link.run_link_poller();
+        });
+
         // Store handles in the engine
         *eng.rt_handle.lock().unwrap() = Some(rt_handle);
         *eng.worker_handle.lock().unwrap() = Some(worker_handle);
         *eng.coremidi_handle.lock().unwrap() = coremidi_handle;
+        *eng.link_poller_handle.lock().unwrap() = Some(link_poller_handle);
 
         // Forget the Arc so it doesn't drop - the handle still owns it
         std::mem::forget(eng);
@@ -197,6 +208,11 @@ pub unsafe extern "C" fn engine_stop(engine: *mut EngineHandle) -> EngineResult 
 
         // Join CoreMIDI worker thread
         if let Some(handle) = eng.coremidi_handle.lock().unwrap().take() {
+            let _ = handle.join();
+        }
+
+        // Join Link poller thread (B2)
+        if let Some(handle) = eng.link_poller_handle.lock().unwrap().take() {
             let _ = handle.join();
         }
 
@@ -244,7 +260,6 @@ pub unsafe extern "C" fn engine_submit_command(
         };
         match command_codec::decode_command(bytes) {
             Ok(command) => {
-                println!("[Rust FFI] Decoded command: {:?}", command);
                 // Task 20a: enqueue into the command queue (drop-oldest on full).
                 // The state worker will apply this command.
                 use sequencer_engine::midi_out::push_drop_oldest;
@@ -289,7 +304,6 @@ pub unsafe extern "C" fn engine_drain_events(
     run_void(engine, |eng| {
         // Try hot channel first (for playhead coalescing, E7)
         if let Some(slot) = eng.hot_events.dequeue() {
-            eprintln!("[Rust FFI] engine_drain_events dequeued hot event (len: {})", slot.len);
             // Box the event bytes for Swift to own
             let len = slot.len as usize;
             let mut bytes: Box<[u8]> = slot.bytes[..len].into();
@@ -308,7 +322,6 @@ pub unsafe extern "C" fn engine_drain_events(
 
         // Hot channel empty, try large channel
         if let Some(event) = eng.large_events.dequeue() {
-            eprintln!("[Rust FFI] engine_drain_events dequeued large event: {:?}", event);
             // Encode the large event into bytes
             if let Ok(vec) = postcard::to_allocvec(&event) {
                 let len = vec.len();

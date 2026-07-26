@@ -83,6 +83,14 @@ pub enum EngineEvent {
     LinkPeersChanged {
         count: usize,
     },
+    /// The Ableton Link session was enabled/disabled. Emitted by `SetSyncSource`
+    /// (auto-enables on Link / disables otherwise) and `SetLinkEnabled`, so the
+    /// UI reflects the *real* session state instead of a stale mirror field that
+    /// nothing ever updated (the prior bug: `mirror.linkEnabled` was always false
+    /// on the real engine, so the Settings toggle had no feedback).
+    LinkEnabledChanged {
+        enabled: bool,
+    },
 }
 
 #[cfg(test)]
@@ -100,6 +108,7 @@ mod tests {
             },
             EngineEvent::Overflow { dropped: 7 },
             EngineEvent::LinkPeersChanged { count: 3 },
+            EngineEvent::LinkEnabledChanged { enabled: true },
         ];
         for e in events {
             let bytes = postcard::to_allocvec(&e).expect("serialize");

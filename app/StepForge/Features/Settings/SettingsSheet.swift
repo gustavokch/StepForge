@@ -3,8 +3,8 @@ import SwiftUI
 /// Settings sheet: MIDI routing, sync source, and global MIDI channel.
 struct SettingsSheet: View {
     @EnvironmentObject private var bridge: EngineBridge
+    @EnvironmentObject private var midiManager: MidiManager
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var midiManager = MidiManager()
 
     private var globalChannelBinding: Binding<UInt8> {
         Binding(
@@ -80,13 +80,15 @@ struct SettingsSheet: View {
                     }
                     .foregroundStyle(Theme.textPrimary)
 
-                    Toggle("Enable Ableton Link", isOn: Binding(
-                        get: { bridge.mirror.linkEnabled },
-                        set: { bridge.submit(.setLinkEnabled(enabled: $0)) }
-                    ))
-                    .tint(Theme.primary)
-
+                    // Selecting "Link" as the sync source now engages the Ableton
+                    // Link session automatically (engine-side, via SetSyncSource),
+                    // so a separate enable toggle is redundant. Peer count stays.
                     LabeledContent("Connected Link Peers", value: "\(bridge.mirror.linkPeers)")
+                        .foregroundStyle(Theme.textPrimary)
+                    // First UI reader for `linkEnabled` (Issue #6): surfaces whether
+                    // the Link session is actually engaged, derived by the mirror
+                    // from SetSyncSource / LinkEnabledChanged events.
+                    LabeledContent("Link Session", value: bridge.mirror.linkEnabled ? "Active" : "Inactive")
                         .foregroundStyle(Theme.textPrimary)
                 } header: { Text("Sync & Ableton Link") }
             }
