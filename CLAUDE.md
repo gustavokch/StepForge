@@ -4,11 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## StepForge
 
-iOS MIDI drum sequencer with a hard two-layer boundary: a **Rust musical-time core** (`sequencer_engine`) compiled to a static `.a` / xcframework, and a **SwiftUI shell** (`StepForge`) that owns everything non-musical (UI, gestures, Ableton Link, CoreMIDI discovery, haptics, persistence). The two layers communicate only through a byte-serialized command/event channel across a C ABI.
+iOS & macOS MIDI drum sequencer with a hard two-layer boundary: a **Rust musical-time core** (`sequencer_engine`) compiled to a static `.a` / xcframework, and a **SwiftUI shell** (`StepForge`) that owns everything non-musical (UI, gestures, Ableton Link, CoreMIDI discovery, haptics, persistence). The two layers communicate only through a byte-serialized command/event channel across a C ABI.
 
 - Source of truth: `docs/specs/ui-ux-spec.md` + `docs/specs/architecture-spec.md`; resolved contradictions + open issues in `docs/specs/amendments.md`.
 - Foundation design: `docs/superpowers/specs/2026-07-22-project-foundation-design.md`. Implementation plan: `docs/plans/2026-07-22-project-foundation.md`.
-- Status: the Rust workspace and app are scaffolded by the plan; the commands below apply once scaffolded.
+- Status: the engine and the iOS + macOS standalone apps are built and working; the plugin edition (AUv3/VST3/CLAP) is in design.
 
 ## Commands
 
