@@ -23,6 +23,13 @@ use std::sync::atomic::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
 
+/// Beat-slack added to the seek-discontinuity threshold in [`Engine::render_host`]:
+/// a host beat gap beyond two blocks plus this much is treated as a seek/relocate
+/// (not normal block cadence), triggering bar re-alignment + RNG reseed. One beat
+/// is far above any real-time block jitter (~1/1000 beat at typical sizes) yet
+/// below a musical landmark, so only genuine discontinuities trip it.
+const SEEK_SLACK_BEATS: f64 = 1.0;
+
 #[cfg(target_os = "ios")]
 pub struct Link;
 #[cfg(target_os = "ios")]
@@ -598,7 +605,7 @@ impl Engine {
             || rs.last_block_start_beat.is_nan()
             || transport.block_start_beat < rs.last_block_start_beat
             || (transport.block_start_beat - rs.last_block_start_beat)
-                > 2.0 * (block as f64) / samples_per_beat.max(1e-6) + 1.0;
+                > 2.0 * (block as f64) / samples_per_beat.max(1e-6) + SEEK_SLACK_BEATS;
         if !rs.was_playing || jumped {
             self.begin_play(&mut rs.rt);
             let into_bar = (transport.block_start_beat - transport.bar_start_beat).max(0.0);
