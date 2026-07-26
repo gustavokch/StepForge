@@ -147,3 +147,59 @@ fn swung_note_on_past_block_defers_to_a_future_block() {
         "swung note-on deferred to block {note_on_block}, boundary was block {boundary_block} (would be equal if clamped)"
     );
 }
+
+#[test]
+fn stop_transition_emits_all_notes_off_and_freezes() {
+    let eng = Engine::new_host_driven();
+    eng.publish(session_with_step0_hit());
+    let mut rs = HostRenderState::new();
+    let mut out = [sequencer_engine::host::MidiEvent::zero(); 64];
+    // Play a block, then stop.
+    eng.render_host(&mut rs, &transport(120.0, 48_000.0, 256, 0.0, 0.0, true), &[], &mut out);
+    out.iter_mut().for_each(|e| *e = sequencer_engine::host::MidiEvent::zero());
+    let before_next = rs.next_step_beat;
+    let n = eng.render_host(&mut rs, &transport(120.0, 48_000.0, 256, 0.25, 0.0, false), &[], &mut out);
+    // Stop emits CC 123 all-notes-off on channel 10.
+    // CC 123 all-notes-off on the drum channel (default channel 10 → 0xBA).
+    assert!(out[..n].iter().any(|e| (e.status & 0xF0) == 0xB0 && e.data1 == 123), "all-notes-off on stop");
+    // No new note-ons while stopped.
+    assert!(!out[..n].iter().any(|e| (e.status & 0xF0) == 0x90 && e.data2 > 0), "no note-ons while stopped");
+    assert!(!rs.was_playing);
+    // next_step_beat unchanged across the stopped block.
+    assert_eq!(rs.next_step_beat, before_next);
+}
+
+#[test]
+fn play_start_reseeds_rng_deterministically() {
+    // Two engines + render states with identical sessions must produce the same
+    // first note velocity after begin_play reseeds from the snapshot hash.
+    // humanize_velocity > 0 forces the RNG to actually shape velocity — with the
+    // default 0.0 this test would pass trivially without exercising the reseed.
+    // The block is 12_000 samples (two 16ths at 120 BPM/48 kHz) so the step-0
+    // boundary at beat 0.25 falls strictly inside the block and actually fires;
+    // a 6_000-sample block ends exactly on beat 0.25 and (strict `<`) fires
+    // nothing, leaving va == vb == None — a false pass.
+    let mut s = session_with_step0_hit();
+    s.humanize_velocity = 0.5;
+    let mut out_a = [sequencer_engine::host::MidiEvent::zero(); 64];
+    let mut out_b = [sequencer_engine::host::MidiEvent::zero(); 64];
+    let eng_a = Engine::new_host_driven();
+    eng_a.publish(s.clone());
+    let mut rs_a = HostRenderState::new();
+    let na = eng_a.render_host(&mut rs_a, &transport(120.0, 48_000.0, 12_000, 0.0, 0.0, true), &[], &mut out_a);
+    let eng_b = Engine::new_host_driven();
+    eng_b.publish(s);
+    let mut rs_b = HostRenderState::new();
+    let nb = eng_b.render_host(&mut rs_b, &transport(120.0, 48_000.0, 12_000, 0.0, 0.0, true), &[], &mut out_b);
+    // Status family, not literal 0x99: default channel 10 → 0x9A. A literal
+    // 0x99 would match nothing, leaving va == vb == None (a false pass).
+    let va = out_a[..na]
+        .iter()
+        .find(|e| (e.status & 0xF0) == 0x90 && e.data2 > 0)
+        .map(|e| e.data2);
+    let vb = out_b[..nb]
+        .iter()
+        .find(|e| (e.status & 0xF0) == 0x90 && e.data2 > 0)
+        .map(|e| e.data2);
+    assert_eq!(va, vb, "identical sessions reseed identically");
+}
