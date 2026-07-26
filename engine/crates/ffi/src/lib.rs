@@ -452,7 +452,9 @@ pub extern "C" fn engine_render_state_new() -> *mut RenderStateHandle {
 /// `handle` is NULL or from [`engine_render_state_new`]; no concurrent use.
 #[no_mangle]
 pub unsafe extern "C" fn engine_render_state_free(handle: *mut RenderStateHandle) {
-    let _ = catch_unwind(AssertUnwindSafe(|| unsafe { handle::free_render_state(handle) }));
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        handle::free_render_state(handle)
+    }));
 }
 
 /// Advance the engine by one host audio block on the host's RT thread. Writes

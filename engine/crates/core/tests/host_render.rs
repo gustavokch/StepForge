@@ -2,21 +2,33 @@
 //! Drives the reused `process()` core from a synthetic host transport — no
 //! threads, no plugin wrapper.
 
+use proptest::prelude::*;
 use sequencer_engine::engine::Engine;
 use sequencer_engine::host::{HostRenderState, HostTransport};
 use sequencer_engine::models::{Session, Step, VelocityZone, STEP_COUNT};
-use proptest::prelude::*;
 
 fn session_with_step0_hit() -> Session {
     let mut s = Session::default(); // bpm 120, 4 default tracks, patterns all Some
     let p = s.patterns[0].as_mut().unwrap();
-    p.tracks[0].steps[0] = Step { active: true, velocity_zone: VelocityZone::Accent, ..Default::default() };
+    p.tracks[0].steps[0] = Step {
+        active: true,
+        velocity_zone: VelocityZone::Accent,
+        ..Default::default()
+    };
     p.tracks[0].midi_note = 36;
     s
 }
 
 fn transport(tempo: f64, sr: f64, block: u32, beat: f64, bar: f64, playing: bool) -> HostTransport {
-    HostTransport { tempo_bpm: tempo, sample_rate: sr, block_samples: block, block_start_beat: beat, bar_start_beat: bar, is_playing: playing, beats_per_bar: 4.0 }
+    HostTransport {
+        tempo_bpm: tempo,
+        sample_rate: sr,
+        block_samples: block,
+        block_start_beat: beat,
+        bar_start_beat: bar,
+        is_playing: playing,
+        beats_per_bar: 4.0,
+    }
 }
 
 #[test]
@@ -25,7 +37,12 @@ fn stopped_engine_emits_nothing() {
     eng.publish(session_with_step0_hit());
     let mut rs = HostRenderState::new();
     let mut out = [sequencer_engine::host::MidiEvent::zero(); 64];
-    let n = eng.render_host(&mut rs, &transport(120.0, 48_000.0, 256, 0.0, 0.0, false), &[], &mut out);
+    let n = eng.render_host(
+        &mut rs,
+        &transport(120.0, 48_000.0, 256, 0.0, 0.0, false),
+        &[],
+        &mut out,
+    );
     assert_eq!(n, 0, "stopped transport emits no note-ons");
 }
 
@@ -41,15 +58,26 @@ fn play_advances_one_step_per_16th_boundary() {
     let mut total_notes = 0usize;
     for i in 0..16 {
         let mut out = [sequencer_engine::host::MidiEvent::zero(); 64];
-        let n = eng.render_host(&mut rs, &transport(120.0, sr, block, beat, 0.0, true), &[], &mut out);
+        let n = eng.render_host(
+            &mut rs,
+            &transport(120.0, sr, block, beat, 0.0, true),
+            &[],
+            &mut out,
+        );
         for ev in &out[..n] {
             // Status FAMILY, not a literal nibble: the default
             // global_midi_channel is 10, so the drum channel rides nibble 0xA
             // (0x9A note-on / 0x8A note-off). Asserting the family keeps this
             // correct if the default channel ever changes.
             let fam = ev.status & 0xF0;
-            assert!(fam == 0x90 || fam == 0x80, "note-on/off status family, got {:#04x}", ev.status);
-            if fam == 0x90 && ev.data2 > 0 { total_notes += 1; }
+            assert!(
+                fam == 0x90 || fam == 0x80,
+                "note-on/off status family, got {:#04x}",
+                ev.status
+            );
+            if fam == 0x90 && ev.data2 > 0 {
+                total_notes += 1;
+            }
         }
         beat += 0.25; // one 16th per block
         let _ = i;
@@ -72,9 +100,18 @@ fn play_start_mid_bar_aligns_per_track_step() {
     eng.publish(session_with_step0_hit());
     let mut rs = HostRenderState::new();
     let mut out = [sequencer_engine::host::MidiEvent::zero(); 64];
-    eng.render_host(&mut rs, &transport(120.0, 48_000.0, 256, 1.0, 0.0, true), &[], &mut out);
+    eng.render_host(
+        &mut rs,
+        &transport(120.0, 48_000.0, 256, 1.0, 0.0, true),
+        &[],
+        &mut out,
+    );
     let length = eng.snapshot_arc().patterns[0].as_ref().unwrap().tracks[0].length;
-    assert_eq!(rs.rt.per_track[0].step_idx, 4 % length, "per-track step aligned to the bar");
+    assert_eq!(
+        rs.rt.per_track[0].step_idx,
+        4 % length,
+        "per-track step aligned to the bar"
+    );
     assert_eq!(rs.rt.global_step, 4, "global_step aligned to the bar");
 }
 
@@ -91,17 +128,31 @@ fn note_off_outlasts_block_and_fires_in_a_future_block() {
     let mut saw_note_off = false;
     for _ in 0..48 {
         let mut out = [sequencer_engine::host::MidiEvent::zero(); 64];
-        let n = eng.render_host(&mut rs, &transport(120.0, sr, block, beat, 0.0, true), &[], &mut out);
+        let n = eng.render_host(
+            &mut rs,
+            &transport(120.0, sr, block, beat, 0.0, true),
+            &[],
+            &mut out,
+        );
         for ev in &out[..n] {
             // Status family, not literal nibble (default channel 10 → 0xA).
-            if (ev.status & 0xF0) == 0x90 && ev.data1 == 36 && ev.data2 > 0 { saw_note_on = true; }
-            if (ev.status & 0xF0) == 0x80 && ev.data1 == 36 { saw_note_off = true; }
+            if (ev.status & 0xF0) == 0x90 && ev.data1 == 36 && ev.data2 > 0 {
+                saw_note_on = true;
+            }
+            if (ev.status & 0xF0) == 0x80 && ev.data1 == 36 {
+                saw_note_off = true;
+            }
         }
         beat += (block as f64) / sr * 2.0; // advance ~one 16th (6000 samples) every few blocks
-        if saw_note_on && saw_note_off { break; }
+        if saw_note_on && saw_note_off {
+            break;
+        }
     }
     assert!(saw_note_on, "note-on for note 36 must fire");
-    assert!(saw_note_off, "matching note-off must fire (possibly a later block via the pending queue)");
+    assert!(
+        saw_note_off,
+        "matching note-off must fire (possibly a later block via the pending queue)"
+    );
 }
 
 #[test]
@@ -111,10 +162,16 @@ fn swung_note_on_past_block_defers_to_a_future_block() {
     // 1_000-sample blocks a swung note-on lands ~2_940 samples past its boundary
     // block → it must defer (sample-accurate) to a later block, NOT clamp to
     // block_samples-1 and fire inside the boundary block.
-    let mut s = Session::default();
-    s.global_swing_pct = 49.0;
+    let mut s = Session {
+        global_swing_pct: 49.0,
+        ..Default::default()
+    };
     let p = s.patterns[0].as_mut().unwrap();
-    p.tracks[0].steps[1] = Step { active: true, velocity_zone: VelocityZone::Accent, ..Default::default() };
+    p.tracks[0].steps[1] = Step {
+        active: true,
+        velocity_zone: VelocityZone::Accent,
+        ..Default::default()
+    };
     p.tracks[0].midi_note = 36;
     let eng = Engine::new_host_driven();
     eng.publish(s);
@@ -124,11 +181,16 @@ fn swung_note_on_past_block_defers_to_a_future_block() {
     let beats_per_block = block as f64 / sr * (120.0 / 60.0);
     let mut beat = 0.0f64;
     let mut boundary_block: Option<usize> = None; // block where step 1's boundary fires
-    let mut note_on_block: Option<usize> = None;  // block where the swung note-on emits
+    let mut note_on_block: Option<usize> = None; // block where the swung note-on emits
     for i in 0..64 {
         let mut out = [sequencer_engine::host::MidiEvent::zero(); 64];
         let global_before = rs.rt.global_step;
-        let n = eng.render_host(&mut rs, &transport(120.0, sr, block, beat, 0.0, true), &[], &mut out);
+        let n = eng.render_host(
+            &mut rs,
+            &transport(120.0, sr, block, beat, 0.0, true),
+            &[],
+            &mut out,
+        );
         // Step 1's boundary is the global_step 1 → 2 transition.
         if boundary_block.is_none() && global_before == 1 && rs.rt.global_step == 2 {
             boundary_block = Some(i);
@@ -156,15 +218,36 @@ fn stop_transition_emits_all_notes_off_and_freezes() {
     let mut rs = HostRenderState::new();
     let mut out = [sequencer_engine::host::MidiEvent::zero(); 64];
     // Play a block, then stop.
-    eng.render_host(&mut rs, &transport(120.0, 48_000.0, 256, 0.0, 0.0, true), &[], &mut out);
-    out.iter_mut().for_each(|e| *e = sequencer_engine::host::MidiEvent::zero());
+    eng.render_host(
+        &mut rs,
+        &transport(120.0, 48_000.0, 256, 0.0, 0.0, true),
+        &[],
+        &mut out,
+    );
+    out.iter_mut()
+        .for_each(|e| *e = sequencer_engine::host::MidiEvent::zero());
     let before_next = rs.next_step_beat;
-    let n = eng.render_host(&mut rs, &transport(120.0, 48_000.0, 256, 0.25, 0.0, false), &[], &mut out);
+    let n = eng.render_host(
+        &mut rs,
+        &transport(120.0, 48_000.0, 256, 0.25, 0.0, false),
+        &[],
+        &mut out,
+    );
     // Stop emits CC 123 all-notes-off on channel 10.
     // CC 123 all-notes-off on the drum channel (default channel 10 → 0xBA).
-    assert!(out[..n].iter().any(|e| (e.status & 0xF0) == 0xB0 && e.data1 == 123), "all-notes-off on stop");
+    assert!(
+        out[..n]
+            .iter()
+            .any(|e| (e.status & 0xF0) == 0xB0 && e.data1 == 123),
+        "all-notes-off on stop"
+    );
     // No new note-ons while stopped.
-    assert!(!out[..n].iter().any(|e| (e.status & 0xF0) == 0x90 && e.data2 > 0), "no note-ons while stopped");
+    assert!(
+        !out[..n]
+            .iter()
+            .any(|e| (e.status & 0xF0) == 0x90 && e.data2 > 0),
+        "no note-ons while stopped"
+    );
     assert!(!rs.was_playing);
     // next_step_beat unchanged across the stopped block.
     assert_eq!(rs.next_step_beat, before_next);
@@ -187,11 +270,21 @@ fn play_start_reseeds_rng_deterministically() {
     let eng_a = Engine::new_host_driven();
     eng_a.publish(s.clone());
     let mut rs_a = HostRenderState::new();
-    let na = eng_a.render_host(&mut rs_a, &transport(120.0, 48_000.0, 12_000, 0.0, 0.0, true), &[], &mut out_a);
+    let na = eng_a.render_host(
+        &mut rs_a,
+        &transport(120.0, 48_000.0, 12_000, 0.0, 0.0, true),
+        &[],
+        &mut out_a,
+    );
     let eng_b = Engine::new_host_driven();
     eng_b.publish(s);
     let mut rs_b = HostRenderState::new();
-    let nb = eng_b.render_host(&mut rs_b, &transport(120.0, 48_000.0, 12_000, 0.0, 0.0, true), &[], &mut out_b);
+    let nb = eng_b.render_host(
+        &mut rs_b,
+        &transport(120.0, 48_000.0, 12_000, 0.0, 0.0, true),
+        &[],
+        &mut out_b,
+    );
     // Status family, not literal 0x99: default channel 10 → 0x9A. A literal
     // 0x99 would match nothing, leaving va == vb == None (a false pass).
     let va = out_a[..na]
@@ -249,10 +342,23 @@ fn incoming_command_octave_note_queues_pattern_select() {
     eng.publish(s);
     let mut rs = HostRenderState::new();
     // Note 61 in the command octave (60..) → pattern index 1.
-    let midi_in = [sequencer_engine::host::MidiEvent { sample_offset: 0, status: 0x90, data1: 61, data2: 100 }];
+    let midi_in = [sequencer_engine::host::MidiEvent {
+        sample_offset: 0,
+        status: 0x90,
+        data1: 61,
+        data2: 100,
+    }];
     let mut out = [sequencer_engine::host::MidiEvent::zero(); 64];
-    eng.render_host(&mut rs, &transport(120.0, 48_000.0, 256, 0.0, 0.0, true), &midi_in, &mut out);
+    eng.render_host(
+        &mut rs,
+        &transport(120.0, 48_000.0, 256, 0.0, 0.0, true),
+        &midi_in,
+        &mut out,
+    );
     // The render pushed a QueuePattern{1} command; apply it directly (no worker thread here).
     let cmd = eng.commands.dequeue().expect("a queued command");
-    assert!(matches!(cmd, sequencer_engine::command::Command::QueuePattern { index: 1, .. }));
+    assert!(matches!(
+        cmd,
+        sequencer_engine::command::Command::QueuePattern { index: 1, .. }
+    ));
 }

@@ -787,8 +787,7 @@ fn swung_note_on_past_block_defers_to_a_future_block() {
     // 1_000-sample blocks a swung note-on lands ~2_940 samples past its boundary
     // block → it must defer (sample-accurate) to a later block, NOT clamp to
     // block_samples-1 and fire inside the boundary block.
-    let mut s = Session::default();
-    s.global_swing_pct = 49.0;
+    let mut s = Session { global_swing_pct: 49.0, ..Default::default() };
     let p = s.patterns[0].as_mut().unwrap();
     p.tracks[0].steps[1] = Step { active: true, velocity_zone: VelocityZone::Accent, ..Default::default() };
     p.tracks[0].midi_note = 36;
@@ -1065,8 +1064,7 @@ Create `engine/crates/ffi/tests/host_render_api.rs`:
 
 use sequencer_engine_ffi::{
     engine_free, engine_new_host_driven, engine_render, engine_render_state_free,
-    engine_render_state_new, engine_start, engine_stop, EngineResult, MidiEvent, RenderStateHandle,
-    HostTransport,
+    engine_render_state_new, engine_start, engine_stop, EngineResult, MidiEvent, HostTransport,
 };
 
 #[test]

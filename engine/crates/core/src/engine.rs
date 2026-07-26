@@ -1857,7 +1857,13 @@ mod tests {
     }
     #[test]
     fn host_driven_flag_reflects_constructor() {
-        assert!(!Engine::new().host_driven, "standalone default is self-scheduled");
-        assert!(Engine::new_host_driven().host_driven, "host-driven constructor sets the flag");
+        assert!(
+            !Engine::new().host_driven,
+            "standalone default is self-scheduled"
+        );
+        assert!(
+            Engine::new_host_driven().host_driven,
+            "host-driven constructor sets the flag"
+        );
     }
 }

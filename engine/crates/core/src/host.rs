@@ -49,7 +49,12 @@ pub struct MidiEvent {
 
 impl MidiEvent {
     pub const fn zero() -> Self {
-        Self { sample_offset: 0, status: 0, data1: 0, data2: 0 }
+        Self {
+            sample_offset: 0,
+            status: 0,
+            data1: 0,
+            data2: 0,
+        }
     }
 }
 
@@ -78,8 +83,13 @@ pub struct PendingMidiQueue {
 impl PendingMidiQueue {
     pub fn new() -> Self {
         Self {
-            slots: [PendingMidiEvent { abs_sample: 0, status: 0, data1: 0, data2: 0, active: false };
-                PENDING_OFF_DEPTH],
+            slots: [PendingMidiEvent {
+                abs_sample: 0,
+                status: 0,
+                data1: 0,
+                data2: 0,
+                active: false,
+            }; PENDING_OFF_DEPTH],
         }
     }
 
@@ -104,7 +114,13 @@ impl PendingMidiQueue {
         }
         // Full — evict the furthest-future slot if this one is sooner.
         if abs_sample < self.slots[victim].abs_sample {
-            self.slots[victim] = PendingMidiEvent { abs_sample, status, data1, data2, active: true };
+            self.slots[victim] = PendingMidiEvent {
+                abs_sample,
+                status,
+                data1,
+                data2,
+                active: true,
+            };
         }
     }
 
@@ -203,7 +219,10 @@ mod tests {
         q.drain_due(1_500, 3_000, |ev| emitted.push(ev));
         assert_eq!(emitted.len(), 1);
         assert_eq!(emitted[0].data1, 38);
-        assert_eq!(emitted[0].data2, 100, "a deferred note-on keeps its velocity");
+        assert_eq!(
+            emitted[0].data2, 100,
+            "a deferred note-on keeps its velocity"
+        );
         // Fully drained.
         emitted.clear();
         q.drain_due(3_000, 4_000, |_| panic!("no more"));
