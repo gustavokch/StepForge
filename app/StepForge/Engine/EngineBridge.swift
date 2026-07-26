@@ -46,6 +46,18 @@ class EngineBridge: ObservableObject, @unchecked Sendable {
     /// Off-main-safe read of the current BPM (one lock acquisition).
     var currentBpm: Double { syncState.withLock { $0.bpm } }
 
+    /// Copy the mirror's sync fields into the lock-protected snapshot. Called on
+    /// the MainActor as the tail of each drain batch, and by the mock's optimistic
+    /// echo, so off-main readers (`currentSyncSource` / `currentBpm`) see the
+    /// latest applied state. (Issue #1) `fileprivate` so the same-file subclass
+    /// `MockEngineBridge` can call it.
+    fileprivate func refreshSyncSnapshot() {
+        syncState.withLock { snap in
+            snap.syncSource = mirror.syncSource
+            snap.bpm = mirror.bpm
+        }
+    }
+
     /// Opaque handle. Pass it only back to the FFI; **never** dereference it
     /// (Hard Rule 2). Created by `makeHandle()` (overridable so the mock is FFI-free).
     private var handle: UnsafeMutablePointer<EngineHandle>?
@@ -167,12 +179,8 @@ class EngineBridge: ObservableObject, @unchecked Sendable {
             for event in events { self.mirror.apply(event); }
             for (t, s) in playheads { self.mirror.applyPlayhead(trackIdx: t, stepIdx: s); }
             // Refresh the off-main-readable sync snapshot from freshly-applied
-            // state — last, so it reflects this batch. Off-main CoreMIDI readers
-            // (Issue #1) go through `currentSyncSource` / `currentBpm`, not `mirror`.
-            self.syncState.withLock { snap in
-                snap.syncSource = self.mirror.syncSource
-                snap.bpm = self.mirror.bpm
-            }
+            // state — last, so it reflects this batch. (Issue #1)
+            self.refreshSyncSnapshot()
         }
     }
 }
@@ -189,6 +197,12 @@ final class MockEngineBridge: EngineBridge, @unchecked Sendable {
     override init() {
         super.init()
         mirror = .demoSeed
+        // Seed the off-main-readable snapshot from `.demoSeed` so `currentBpm` /
+        // `currentSyncSource` track the seeded mirror from init (parity with the
+        // production bridge's tail-of-batch refresh). No-op today — demoSeed
+        // (bpm 120 / .free) == SyncSnapshot() defaults — but future-proofs the
+        // seed/snapshot linkage if demoSeed ever moves off the defaults.
+        refreshSyncSnapshot()
     }
 
     override func start() { /* no threads, no drain */ }
@@ -199,5 +213,6 @@ final class MockEngineBridge: EngineBridge, @unchecked Sendable {
 
     override func submit(_ command: Command) {
         mirror.applyOptimistic(command)
+        refreshSyncSnapshot()   // keep the off-main-readable snapshot consistent with the mock's mirror
     }
 }
