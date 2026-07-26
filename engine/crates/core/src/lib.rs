@@ -9,6 +9,7 @@ pub mod clock;
 pub mod command;
 pub mod engine;
 pub mod event;
+pub mod host;
 pub mod midi;
 pub mod midi_out;
 pub mod models;
