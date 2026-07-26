@@ -64,6 +64,10 @@ fn event_fixtures() -> Vec<(&'static str, EngineEvent)> {
                 message: "boom".to_string(),
             },
         ),
+        (
+            "ev_linkenabled_true",
+            EngineEvent::LinkEnabledChanged { enabled: true },
+        ),
     ]
 }
 

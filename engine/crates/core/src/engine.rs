@@ -423,13 +423,16 @@ impl Engine {
         }
     }
 
-    /// Off-RT Ableton Link poller (B2). The SOLE thread that touches
-    /// `external_clock.link`: while Link is enabled it captures the session
-    /// state + clock at a bounded rate and publishes the beat position to
+    /// Off-RT Ableton Link poller (B2). The sole *polling reader* of
+    /// `external_clock.link` — the state worker is the sole *mutating writer*,
+    /// via `set_link_session` (Issue #2). While Link is enabled it captures the
+    /// session state + clock at a bounded rate and publishes the beat position to
     /// `link_beats_micros` (which the RT loop reads lock-free) and emits
     /// `LinkPeersChanged` on peer-count changes. All ableton-link-rs calls
     /// (which allocate / may contend with Link's internal thread) happen here —
-    /// never on the RT thread (Hard Rule 1).
+    /// never on the RT thread (Hard Rule 1). The poller takes the `link` mutex
+    /// with `try_lock` (below) so it never blocks on — and never deadlocks with —
+    /// a worker mid-`enable`/`disable`; contention just skips that 1 ms tick.
     pub fn run_link_poller(self: &Arc<Engine>) {
         // `usize::MAX` is a sentinel that can never equal a real peer count, so
         // the first poll after startup — and the first poll after every
@@ -584,6 +587,49 @@ impl Engine {
         }
     }
 
+    /// Worker-only: enable/disable the native Ableton Link session, publish the
+    /// `link_enabled` flag, and emit `LinkEnabledChanged`. Runs OFF the RT thread
+    /// (`SetSyncSource` / `SetLinkEnabled` arms) — the only Link mutation path.
+    /// The RT thread reads only the `link_enabled` + `link_beats_micros` atomics
+    /// (Hard Rule 1); the `link` Mutex is never held on RT, and the poller takes
+    /// it with `try_lock` so this never blocks.
+    ///
+    /// Why the `MutexGuard` spans `block_on` (Issue #2): `ableton-link-rs`'s
+    /// `BasicLink` is **not** `Clone` (its `Controller` owns a non-cloneable tokio
+    /// `Receiver`), and `enable()` / `disable()` are `async fn(&mut self)`. So the
+    /// `&mut Link` needed to enable/disable is reachable only through the guard —
+    /// the guard *must* remain held across `block_on`. This is safe because the
+    /// only contender is the poller, which uses `try_lock` (see `run_link_poller`);
+    /// skip-on-contention never blocks, and `block_on` runs on a dedicated worker
+    /// thread (never a tokio runtime thread) — the documented `Runtime::block_on`
+    /// usage — so there is no deadlock.
+    ///
+    /// Without this, selecting Link as the sync source left `link_enabled=false`
+    /// → the off-RT poller idled → `link_beats_micros` stayed 0 → the RT Link arm
+    /// never advanced (BPM/transport sync stuck). Auto-enabling on source select
+    /// makes "Sync Source = Link" actually engage the session.
+    fn set_link_session(&self, enabled: bool) {
+        if let Ok(mut link) = self.external_clock.link.lock() {
+            #[cfg(not(target_os = "ios"))]
+            {
+                if enabled {
+                    self.external_clock.tokio_rt.block_on(link.enable());
+                } else {
+                    self.external_clock.tokio_rt.block_on(link.disable());
+                }
+            }
+            #[cfg(target_os = "ios")]
+            let _ = &mut link;
+        }
+        self.external_clock
+            .link_enabled
+            .store(enabled, Ordering::Release);
+        let _ = crate::midi_out::push_event(
+            &self.hot_events,
+            &EngineEvent::LinkEnabledChanged { enabled },
+        );
+    }
+
     /// Apply one command by clone-mutate-publish (the worker's per-command body).
     /// Algorithms/scheduler/load-session arms are wired in their own tasks.
     pub fn apply_command(&self, cmd: Command) {
@@ -620,23 +666,13 @@ impl Engine {
                     &self.hot_events,
                     &EngineEvent::SyncSourceChanged { source },
                 );
+                // Selecting Link engages the Ableton Link session; Free/MidiClock
+                // releases it (Defect 3 fix). Drives `link_enabled` + emits
+                // `LinkEnabledChanged` via the shared worker helper.
+                self.set_link_session(matches!(source, crate::models::SyncSource::Link));
             }
             SetLinkEnabled { enabled } => {
-                if let Ok(mut link) = self.external_clock.link.lock() {
-                    #[cfg(not(target_os = "ios"))]
-                    {
-                        if enabled {
-                            self.external_clock.tokio_rt.block_on(link.enable());
-                        } else {
-                            self.external_clock.tokio_rt.block_on(link.disable());
-                        }
-                    }
-                    #[cfg(target_os = "ios")]
-                    let _ = &mut link;
-                }
-                self.external_clock
-                    .link_enabled
-                    .store(enabled, Ordering::Release);
+                self.set_link_session(enabled);
             }
             MidiClockTick => {
                 // 24 PPQN → 6 ticks per 16th step. Worker accumulates raw
@@ -1198,6 +1234,117 @@ mod tests {
             16,
             "1 bar (4 beats) = 16"
         );
+    }
+
+    /// Defect 3 fix: selecting Link as the sync source must enable the Link
+    /// session (so the off-RT poller stops idling and publishes beats); selecting
+    /// Free/MidiClock must disable it. Before the fix `SetSyncSource` left
+    /// `link_enabled=false` and Link sync never engaged.
+    #[test]
+    fn set_sync_source_link_enables_and_disables_session() {
+        let e = Engine::new();
+        e.apply_command(Command::SetSyncSource {
+            source: crate::models::SyncSource::Link,
+        });
+        assert!(
+            e.external_clock.link_enabled.load(Ordering::Acquire),
+            "selecting Link must enable the session"
+        );
+        e.apply_command(Command::SetSyncSource {
+            source: crate::models::SyncSource::Free,
+        });
+        assert!(
+            !e.external_clock.link_enabled.load(Ordering::Acquire),
+            "selecting Free must disable the session"
+        );
+        e.apply_command(Command::SetSyncSource {
+            source: crate::models::SyncSource::MidiClock,
+        });
+        assert!(
+            !e.external_clock.link_enabled.load(Ordering::Acquire),
+            "selecting MidiClock must disable the session"
+        );
+    }
+
+    /// Defect 4 fix: the engine must echo Link state as a `LinkEnabledChanged`
+    /// event so the mirror (and UI) reflects reality. `SetSyncSource{Link}`
+    /// emits both `SyncSourceChanged` and `LinkEnabledChanged{true}`.
+    #[test]
+    fn set_sync_source_emits_sync_and_link_enabled_events() {
+        use crate::event::EngineEvent;
+        use crate::models::SyncSource;
+        let e = Engine::new();
+        e.apply_command(Command::SetSyncSource {
+            source: SyncSource::Link,
+        });
+
+        let mut saw_sync = false;
+        let mut saw_enabled = false;
+        while let Some(slot) = e.hot_events.dequeue() {
+            let ev: EngineEvent = postcard::from_bytes(&slot.bytes[..slot.len as usize]).unwrap();
+            match ev {
+                EngineEvent::SyncSourceChanged { source } => {
+                    assert_eq!(source, SyncSource::Link);
+                    saw_sync = true;
+                }
+                EngineEvent::LinkEnabledChanged { enabled } => {
+                    assert!(enabled, "LinkEnabledChanged must report enabled=true");
+                    saw_enabled = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_sync, "SyncSourceChanged must be emitted");
+        assert!(saw_enabled, "LinkEnabledChanged must be emitted");
+    }
+
+    /// Issue #7: selecting Free or MidiClock as the sync source must release the
+    /// Link session — emitting both `SyncSourceChanged{source}` and
+    /// `LinkEnabledChanged{false}`. The Link baseline is established first so the
+    /// disable transition is genuine (mirrors the real flow: Link → Free/​MidiClock).
+    #[test]
+    fn set_sync_source_free_and_midi_clock_emit_link_disabled_event() {
+        use crate::event::EngineEvent;
+        use crate::models::SyncSource;
+        let e = Engine::new();
+        // Establish the Link baseline, then drain its events so each per-source
+        // drain below observes only the transition under test.
+        e.apply_command(Command::SetSyncSource {
+            source: SyncSource::Link,
+        });
+        while e.hot_events.dequeue().is_some() {}
+
+        for source in [SyncSource::Free, SyncSource::MidiClock] {
+            // Defensive: drain any leftover events before applying the transition.
+            while e.hot_events.dequeue().is_some() {}
+            e.apply_command(Command::SetSyncSource { source });
+
+            let mut saw_sync = false;
+            let mut saw_disabled = false;
+            while let Some(slot) = e.hot_events.dequeue() {
+                let ev: EngineEvent =
+                    postcard::from_bytes(&slot.bytes[..slot.len as usize]).unwrap();
+                match ev {
+                    EngineEvent::SyncSourceChanged { source: s } => {
+                        assert_eq!(s, source);
+                        saw_sync = true;
+                    }
+                    EngineEvent::LinkEnabledChanged { enabled } => {
+                        assert!(
+                            !enabled,
+                            "LinkEnabledChanged must report enabled=false for {source:?}"
+                        );
+                        saw_disabled = true;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(saw_sync, "SyncSourceChanged must be emitted for {source:?}");
+            assert!(
+                saw_disabled,
+                "LinkEnabledChanged{{false}} must be emitted for {source:?}"
+            );
+        }
     }
     #[test]
     fn play_stop_toggle_transport_atomic() {

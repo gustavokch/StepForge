@@ -24,4 +24,27 @@ final class EngineBridgeTests: XCTestCase {
         mirror.applyPlayhead(trackIdx: 0, stepIdx: 4)
         XCTAssertEqual(mirror.playheadStep, 4)
     }
+
+    /// Defect 4 fix: the engine now echoes Link state as `LinkEnabledChanged`,
+    /// and the mirror applies it. Before, `linkEnabled` was never updated by the
+    /// real engine (only by the mock), so the Settings toggle had no feedback.
+    func testSessionMirrorAppliesLinkEnabledChanged() {
+        var mirror = SessionMirror()
+        XCTAssertEqual(mirror.linkEnabled, false)
+        mirror.apply(.linkEnabledChanged(enabled: true))
+        XCTAssertTrue(mirror.linkEnabled)
+        mirror.apply(.linkEnabledChanged(enabled: false))
+        XCTAssertFalse(mirror.linkEnabled)
+    }
+
+    /// Issue #3: the mirror must stay self-consistent if the separate
+    /// `LinkEnabledChanged` event is dropped under hot-channel overflow. Applying
+    /// `SyncSourceChanged` alone must derive `linkEnabled` (Link → true, else false).
+    func testSessionMirrorDerivesLinkEnabledFromSyncSourceChanged() {
+        var mirror = SessionMirror()
+        mirror.apply(.syncSourceChanged(source: .link))
+        XCTAssertTrue(mirror.linkEnabled, "selecting Link must derive linkEnabled=true")
+        mirror.apply(.syncSourceChanged(source: .free))
+        XCTAssertFalse(mirror.linkEnabled, "selecting Free must derive linkEnabled=false")
+    }
 }
