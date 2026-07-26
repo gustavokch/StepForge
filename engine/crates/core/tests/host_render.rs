@@ -92,7 +92,11 @@ fn play_advances_one_step_per_16th_boundary() {
         total_notes, 1,
         "track 0 step 0 fires exactly once (at the downbeat)"
     );
-    assert_eq!(first_note_block, Some(0), "downbeat note-on fires in block 0");
+    assert_eq!(
+        first_note_block,
+        Some(0),
+        "downbeat note-on fires in block 0"
+    );
     // 16 blocks × exactly one 16th boundary each → 16 advances → global_step
     // wraps a full bar (STEP_COUNT == 16) back to 0.
     assert_eq!(
