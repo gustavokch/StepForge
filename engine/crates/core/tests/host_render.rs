@@ -5,6 +5,7 @@
 use sequencer_engine::engine::Engine;
 use sequencer_engine::host::{HostRenderState, HostTransport};
 use sequencer_engine::models::{Session, Step, VelocityZone, STEP_COUNT};
+use proptest::prelude::*;
 
 fn session_with_step0_hit() -> Session {
     let mut s = Session::default(); // bpm 120, 4 default tracks, patterns all Some
@@ -202,4 +203,41 @@ fn play_start_reseeds_rng_deterministically() {
         .find(|e| (e.status & 0xF0) == 0x90 && e.data2 > 0)
         .map(|e| e.data2);
     assert_eq!(va, vb, "identical sessions reseed identically");
+}
+
+proptest! {
+    #[test]
+    fn rendered_offsets_stay_in_block_and_step_stays_bounded(
+        tempo in 60.0f64..200.0,
+        sr in 44_100.0f64..96_000.0,
+        block in 16u32..1024,
+        n_blocks in 1usize..64,
+    ) {
+        let eng = Engine::new_host_driven();
+        eng.publish(session_with_step0_hit());
+        let mut rs = HostRenderState::new();
+        let beats_per_block = (block as f64) / sr * (tempo / 60.0);
+        let mut beat = 0.0f64;
+        for _ in 0..n_blocks {
+            let bar = (beat / 4.0).floor() * 4.0;
+            let mut out = [sequencer_engine::host::MidiEvent::zero(); 256];
+            let n = eng.render_host(
+                &mut rs,
+                &transport(tempo, sr, block, beat, bar, true),
+                &[],
+                &mut out,
+            );
+            for ev in &out[..n] {
+                prop_assert!(ev.sample_offset < block, "offset {} >= block {}", ev.sample_offset, block);
+            }
+            prop_assert!(rs.rt.global_step < STEP_COUNT as u32, "global_step out of range");
+            beat += beats_per_block;
+        }
+        // Over a steady run next_step_beat tracks the playhead within one 16th
+        // (it is the first unconsumed boundary, in [beat, beat + 0.25)).
+        prop_assert!(
+            rs.next_step_beat >= beat - 1e-6 && rs.next_step_beat <= beat + 0.25 + 1e-6,
+            "next_step_beat {} drifted from beat {}", rs.next_step_beat, beat
+        );
+    }
 }
