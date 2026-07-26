@@ -559,6 +559,9 @@ impl Engine {
             if written < midi_out.len() {
                 midi_out[written] = ev;
                 written += 1;
+                true
+            } else {
+                false
             }
         });
 

@@ -125,22 +125,32 @@ impl PendingMidiQueue {
     }
 
     /// Emit events whose `abs_sample` falls in `[block_start_abs, block_end_abs)`
-    /// as `MidiEvent`s (offset relative to `block_start_abs`) and deactivate them.
+    /// as `MidiEvent`s (offset relative to `block_start_abs`). The callback returns
+    /// whether it stored the event: on `true` the slot is deactivated; on `false`
+    /// (consumer full) the slot is carried forward to the next block
+    /// (`abs_sample = block_end_abs`) instead of dropped, so a deferred note-off
+    /// that didn't fit still fires later rather than sticking a note.
     pub fn drain_due(
         &mut self,
         block_start_abs: u64,
         block_end_abs: u64,
-        mut out: impl FnMut(MidiEvent),
+        mut out: impl FnMut(MidiEvent) -> bool,
     ) {
         for s in self.slots.iter_mut() {
             if s.active && s.abs_sample >= block_start_abs && s.abs_sample < block_end_abs {
-                out(MidiEvent {
+                let accepted = out(MidiEvent {
                     sample_offset: (s.abs_sample - block_start_abs) as u32,
                     status: s.status,
                     data1: s.data1,
                     data2: s.data2,
                 });
-                s.active = false;
+                if accepted {
+                    s.active = false;
+                } else {
+                    // Consumer full: retry next block. Never drop — a lost
+                    // deferred note-off would stick a note.
+                    s.abs_sample = block_end_abs;
+                }
             }
         }
     }
@@ -209,14 +219,20 @@ mod tests {
         q.schedule(1_000, 0x80, 36, 0);
         q.schedule(2_000, 0x9A, 38, 100);
         let mut emitted = Vec::new();
-        q.drain_due(0, 1_500, |ev| emitted.push(ev));
+        q.drain_due(0, 1_500, |ev| {
+            emitted.push(ev);
+            true
+        });
         // Only the abs=1_000 one is due within [0,1_500).
         assert_eq!(emitted.len(), 1);
         assert_eq!(emitted[0].sample_offset, 1_000);
         assert_eq!(emitted[0].data1, 36);
         // Draining again in a later block picks up the survivor — with its data2.
         emitted.clear();
-        q.drain_due(1_500, 3_000, |ev| emitted.push(ev));
+        q.drain_due(1_500, 3_000, |ev| {
+            emitted.push(ev);
+            true
+        });
         assert_eq!(emitted.len(), 1);
         assert_eq!(emitted[0].data1, 38);
         assert_eq!(
@@ -239,8 +255,45 @@ mod tests {
         q.schedule(2_000, 0x9A, 38, 100);
         q.clear();
         let mut emitted = Vec::new();
-        q.drain_due(0, 10_000, |ev| emitted.push(ev));
+        q.drain_due(0, 10_000, |ev| {
+            emitted.push(ev);
+            true
+        });
         assert!(emitted.is_empty(), "clear drops all scheduled events");
+    }
+
+    #[test]
+    fn drain_due_carries_forward_when_consumer_is_full() {
+        // A due event the consumer can't store (midi_out full) must NOT be
+        // permanently dropped — a lost deferred note-off would stick a note.
+        // It carries forward to the next block and is delivered there.
+        let mut q = PendingMidiQueue::new();
+        q.schedule(10, 0x80, 36, 0);
+        q.schedule(20, 0x9A, 38, 100);
+        let mut cap = 1;
+        let mut emitted = Vec::new();
+        q.drain_due(0, 100, |ev| {
+            if cap > 0 {
+                cap -= 1;
+                emitted.push(ev);
+                true
+            } else {
+                false
+            }
+        });
+        assert_eq!(emitted.len(), 1, "only one accepted this block");
+        // The rejected event survived (carried to abs=100), not lost.
+        emitted.clear();
+        q.drain_due(100, 200, |ev| {
+            emitted.push(ev);
+            true
+        });
+        assert_eq!(
+            emitted.len(),
+            1,
+            "rejected event carried forward to the next block, not dropped"
+        );
+        assert_eq!(emitted[0].data1, 38, "the deferred note-on survived");
     }
 
     #[test]
