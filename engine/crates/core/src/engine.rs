@@ -512,6 +512,13 @@ impl Engine {
     /// pattern-select commands, and honors play/stop transitions. RT-safe (Hard
     /// Rule 1): no alloc, no lock — reuses `process()`, the lock-free ring, a
     /// non-blocking snapshot read, and fixed-size arrays in `HostRenderState`.
+    ///
+    /// Phase 0 limitation: `process_one` (and the worker's pattern-switch arm)
+    /// still push `EngineEvent`s (playhead, `PatternSwitched`) onto the hot/large
+    /// event channels, but host-driven mode has no event drain — `engine_render`
+    /// returns only MIDI. Those bounded channels drop on overflow (Hard Rule 1),
+    /// so nothing breaks, but the host cannot observe playhead/pattern events
+    /// until Phase 2 adds host-side event observation (the editor bundle).
     pub fn render_host(
         &self,
         rs: &mut HostRenderState,
