@@ -4,7 +4,7 @@
 
 use sequencer_engine::engine::Engine;
 use sequencer_engine::host::{HostRenderState, HostTransport};
-use sequencer_engine::models::{Pattern, Session, Step, VelocityZone, STEP_COUNT};
+use sequencer_engine::models::{Session, Step, VelocityZone, STEP_COUNT};
 
 fn session_with_step0_hit() -> Session {
     let mut s = Session::default(); // bpm 120, 4 default tracks, patterns all Some
