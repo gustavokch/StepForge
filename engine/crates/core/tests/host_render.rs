@@ -82,10 +82,11 @@ fn play_advances_one_step_per_16th_boundary() {
         beat += 0.25; // one 16th per block
         let _ = i;
     }
-    // Track 0 has a hit only on step 0. The 16-block run starts at beat 0, which
-    // only aligns (the first boundary fire is at beat 0.25, in block 1), so step
-    // 0 fires once → one note-on. Asserting "at least one" keeps this robust to
-    // the exact per-track step mapping.
+    // Track 0 has a hit only on step 0. The 16-block run starts at a bar
+    // boundary (beat 0 == bar_start_beat 0), so step 0 fires at beat 0 in
+    // block 0 (immediate downbeat on play-start — I1 fix), then again each
+    // subsequent bar. Asserting "at least one" keeps this robust to the exact
+    // per-track step mapping.
     assert!(total_notes >= 1, "expected at least one note-on over a bar");
     // global_step stayed in range.
     assert!(rs.rt.global_step < STEP_COUNT as u32);
@@ -95,7 +96,11 @@ fn play_advances_one_step_per_16th_boundary() {
 fn play_start_mid_bar_aligns_per_track_step() {
     // Host resumes at beat 1.0 — four 16ths into the bar. Each track's playhead
     // must align to step 4 (not step 0), so a mid-bar resume doesn't replay the
-    // downbeat. Exact for speed_ratio 1.0 (the default).
+    // downbeat. With immediate-fire (I1 fix), step 4 also FIRES in this block,
+    // advancing `global_step` and each `per_track[..].step_idx` by 1 (the
+    // default `speed_ratio == 1.0` advances exactly +1 per `process_one`).
+    // If alignment were WRONG (step 0), `global_step` would be 1, not 5 — so
+    // the assertions below still distinguish correct alignment.
     let eng = Engine::new_host_driven();
     eng.publish(session_with_step0_hit());
     let mut rs = HostRenderState::new();
@@ -109,10 +114,38 @@ fn play_start_mid_bar_aligns_per_track_step() {
     let length = eng.snapshot_arc().patterns[0].as_ref().unwrap().tracks[0].length;
     assert_eq!(
         rs.rt.per_track[0].step_idx,
-        4 % length,
-        "per-track step aligned to the bar"
+        5 % length,
+        "step 4 aligned + fired (advancing to 5)"
     );
-    assert_eq!(rs.rt.global_step, 4, "global_step aligned to the bar");
+    assert_eq!(
+        rs.rt.global_step, 5,
+        "global_step 4 aligned + fired (advancing to 5)"
+    );
+}
+
+#[test]
+fn play_start_at_bar_boundary_fires_downbeat_immediately() {
+    // I1 regression guard: at a bar boundary (sixteenths == 0), the downbeat
+    // must fire IMMEDIATELY in block 0 at sample_offset == 0 — not at
+    // beat 0.25 (~125 ms silence at 120 BPM). Pre-fix, block 0 emitted
+    // nothing because `next_step_beat` was set to the NEXT boundary; this
+    // test pins the immediate-downbeat behavior after the `+ 1.0` removal.
+    let eng = Engine::new_host_driven();
+    eng.publish(session_with_step0_hit());
+    let mut rs = HostRenderState::new();
+    let mut out = [sequencer_engine::host::MidiEvent::zero(); 64];
+    let n = eng.render_host(
+        &mut rs,
+        &transport(120.0, 48_000.0, 256, 0.0, 0.0, true),
+        &[],
+        &mut out,
+    );
+    assert!(
+        out[..n].iter().any(|ev| {
+            (ev.status & 0xF0) == 0x90 && ev.data1 == 36 && ev.data2 > 0 && ev.sample_offset == 0
+        }),
+        "downbeat (note 36) must fire at sample_offset 0 in block 0 (immediate on play-start)"
+    );
 }
 
 #[test]

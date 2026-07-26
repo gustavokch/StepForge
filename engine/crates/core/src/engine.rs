@@ -608,7 +608,13 @@ impl Engine {
                     }
                 }
             }
-            rs.next_step_beat = transport.bar_start_beat + (sixteenths as f64 + 1.0) * 0.25;
+            // `next_step_beat` is the CURRENT 16th boundary (at or before
+            // `block_start_beat`), NOT the one after — so on play-start at a
+            // bar boundary (`sixteenths == 0`) the downbeat fires in block 0
+            // at sample 0 (immediate-fire). Matches the standalone `run_rt_loop`,
+            // which calls `process_one` on the first tick after Play (no
+            // ~125 ms silent pre-roll at 120 BPM).
+            rs.next_step_beat = transport.bar_start_beat + sixteenths as f64 * 0.25;
             rs.initialized = true;
         }
         rs.was_playing = true;

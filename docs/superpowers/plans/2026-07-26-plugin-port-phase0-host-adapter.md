@@ -471,10 +471,11 @@ fn play_advances_one_step_per_16th_boundary() {
         beat += 0.25; // one 16th per block
         let _ = i;
     }
-    // Track 0 has a hit only on step 0. The 16-block run starts at beat 0, which
-    // only aligns (the first boundary fire is at beat 0.25, in block 1), so step
-    // 0 fires once → one note-on. Asserting "at least one" keeps this robust to
-    // the exact per-track step mapping.
+    // Track 0 has a hit only on step 0. The 16-block run starts at a bar
+    // boundary (beat 0 == bar_start_beat 0), so step 0 fires at beat 0 in
+    // block 0 (immediate downbeat on play-start — I1 fix), then again each
+    // subsequent bar. Asserting "at least one" keeps this robust to the exact
+    // per-track step mapping.
     assert!(total_notes >= 1, "expected at least one note-on over a bar");
     // global_step stayed in range.
     assert!(rs.rt.global_step < STEP_COUNT as u32);
@@ -484,15 +485,40 @@ fn play_advances_one_step_per_16th_boundary() {
 fn play_start_mid_bar_aligns_per_track_step() {
     // Host resumes at beat 1.0 — four 16ths into the bar. Each track's playhead
     // must align to step 4 (not step 0), so a mid-bar resume doesn't replay the
-    // downbeat. Exact for speed_ratio 1.0 (the default).
+    // downbeat. With immediate-fire (I1 fix), step 4 also FIRES in this block,
+    // advancing `global_step` and each `per_track[..].step_idx` by 1 (the
+    // default `speed_ratio == 1.0` advances exactly +1 per `process_one`).
+    // If alignment were WRONG (step 0), `global_step` would be 1, not 5 — so
+    // the assertions below still distinguish correct alignment.
     let eng = Engine::new_host_driven();
     eng.publish(session_with_step0_hit());
     let mut rs = HostRenderState::new();
     let mut out = [sequencer_engine::host::MidiEvent::zero(); 64];
     eng.render_host(&mut rs, &transport(120.0, 48_000.0, 256, 1.0, 0.0, true), &[], &mut out);
     let length = eng.snapshot_arc().patterns[0].as_ref().unwrap().tracks[0].length;
-    assert_eq!(rs.rt.per_track[0].step_idx, 4 % length, "per-track step aligned to the bar");
-    assert_eq!(rs.rt.global_step, 4, "global_step aligned to the bar");
+    assert_eq!(rs.rt.per_track[0].step_idx, 5 % length, "step 4 aligned + fired (advancing to 5)");
+    assert_eq!(rs.rt.global_step, 5, "global_step 4 aligned + fired (advancing to 5)");
+}
+
+#[test]
+fn play_start_at_bar_boundary_fires_downbeat_immediately() {
+    // I1 regression guard: at a bar boundary (sixteenths == 0), the downbeat
+    // must fire IMMEDIATELY in block 0 at sample_offset == 0 — not at
+    // beat 0.25 (~125 ms silence at 120 BPM). Pre-fix, block 0 emitted
+    // nothing because `next_step_beat` was set to the NEXT boundary; this
+    // test pins the immediate-downbeat behavior after the `+ 1.0` removal.
+    let eng = Engine::new_host_driven();
+    eng.publish(session_with_step0_hit());
+    let mut rs = HostRenderState::new();
+    let mut out = [sequencer_engine::host::MidiEvent::zero(); 64];
+    let n = eng.render_host(&mut rs, &transport(120.0, 48_000.0, 256, 0.0, 0.0, true), &[], &mut out);
+    assert!(
+        out[..n].iter().any(|ev| (ev.status & 0xF0) == 0x90
+            && ev.data1 == 36
+            && ev.data2 > 0
+            && ev.sample_offset == 0),
+        "downbeat (note 36) must fire at sample_offset 0 in block 0 (immediate on play-start)"
+    );
 }
 ```
 
@@ -615,7 +641,13 @@ Then add this method to `impl Engine` (place it right after `fn process_one`, ~l
                     }
                 }
             }
-            rs.next_step_beat = transport.bar_start_beat + (sixteenths as f64 + 1.0) * 0.25;
+            // `next_step_beat` is the CURRENT 16th boundary (at or before
+            // `block_start_beat`), NOT the one after — so on play-start at a
+            // bar boundary (`sixteenths == 0`) the downbeat fires in block 0
+            // at sample 0 (immediate-fire). Matches the standalone `run_rt_loop`,
+            // which calls `process_one` on the first tick after Play (no
+            // ~125 ms silent pre-roll at 120 BPM).
+            rs.next_step_beat = transport.bar_start_beat + sixteenths as f64 * 0.25;
             rs.initialized = true;
         }
         rs.was_playing = true;
@@ -727,7 +759,7 @@ fn emit_midi_msg(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cd engine && cargo test -p sequencer_engine --test host_render`
-Expected: PASS (3 tests).
+Expected: PASS (4 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -1063,7 +1095,7 @@ Create `engine/crates/ffi/tests/host_render_api.rs`:
 //! lifecycle in-process, mirroring how a plugin wrapper will call it.
 
 use sequencer_engine_ffi::{
-    engine_free, engine_new_host_driven, engine_render, engine_render_state_free,
+    engine_free, engine_new, engine_new_host_driven, engine_render, engine_render_state_free,
     engine_render_state_new, engine_start, engine_stop, EngineResult, MidiEvent, HostTransport,
 };
 
@@ -1105,6 +1137,30 @@ fn null_handle_or_state_is_rejected() {
         engine_render_state_free(rs);
         // NULL render state is a tolerated no-op for free.
         engine_render_state_free(std::ptr::null_mut());
+    }
+}
+
+#[test]
+fn engine_render_rejects_standalone_engine() {
+    // M2 host-pairing guard: a host that mis-pairs `engine_new` (standalone)
+    // with `engine_render` must get `ErrInvalidHandle` instead of silently
+    // double-dispatching (self-scheduled RT thread + host RT thread both
+    // driving `process_one`). `host_driven` is false from construction, so no
+    // `engine_start` is needed to exercise the guard.
+    unsafe {
+        let eng = engine_new(); // NOT host_driven
+        assert!(!eng.is_null());
+        let rs = engine_render_state_new();
+        assert!(!rs.is_null());
+
+        let t = HostTransport { tempo_bpm: 120.0, sample_rate: 48_000.0, block_samples: 256, block_start_beat: 0.0, bar_start_beat: 0.0, is_playing: true, beats_per_bar: 4.0 };
+        let mut out = [MidiEvent::zero(); 8];
+        let mut count = 0usize;
+        let r = engine_render(eng, rs, &t, [].as_ptr(), 0, out.as_mut_ptr(), out.len(), &mut count);
+        assert!(matches!(r, EngineResult::ErrInvalidHandle), "engine_render on standalone engine must reject (got {r:?})");
+
+        engine_render_state_free(rs);
+        engine_free(eng);
     }
 }
 ```
@@ -1235,6 +1291,13 @@ pub unsafe extern "C" fn engine_render(
         // SAFETY: caller upholds Hard Rule 5 (no concurrent free); handles come
         // from engine_new_host_driven / engine_render_state_new.
         let eng = unsafe { &*(engine as *const Engine) };
+        // M2: enforce the host-pairing contract — `engine_render` only drives
+        // host-mode engines. A host that mis-pairs `engine_new` (standalone)
+        // with `engine_render` would otherwise double-dispatch (self-scheduled
+        // RT thread + host RT thread both driving `process_one`).
+        if !eng.host_driven {
+            return Err(EngineResult::ErrInvalidHandle);
+        }
         let state = unsafe { &mut *(rs as *mut HostRenderState) };
         let transport = unsafe { &*transport };
         let midi_in: &[MidiEvent] = if midi_in_count == 0 {
@@ -1281,7 +1344,7 @@ Expected: the field list (`tempo_bpm`, `sample_rate`, …, `beats_per_bar`). If 
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `cd engine && cargo test -p sequencer_engine_ffi --test host_render_api`
-Expected: PASS (2 tests).
+Expected: PASS (3 tests).
 
 - [ ] **Step 6: Commit**
 

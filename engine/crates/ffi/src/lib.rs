@@ -486,6 +486,13 @@ pub unsafe extern "C" fn engine_render(
         // SAFETY: caller upholds Hard Rule 5 (no concurrent free); handles come
         // from engine_new_host_driven / engine_render_state_new.
         let eng = unsafe { &*(engine as *const Engine) };
+        // M2: enforce the host-pairing contract — `engine_render` only drives
+        // host-mode engines. A host that mis-pairs `engine_new` (standalone)
+        // with `engine_render` would otherwise double-dispatch (self-scheduled
+        // RT thread + host RT thread both driving `process_one`).
+        if !eng.host_driven {
+            return Err(EngineResult::ErrInvalidHandle);
+        }
         let state = unsafe { &mut *(rs as *mut HostRenderState) };
         let transport = unsafe { &*transport };
         let midi_in: &[MidiEvent] = if midi_in_count == 0 {
