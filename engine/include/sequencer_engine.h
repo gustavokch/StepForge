@@ -54,6 +54,75 @@ typedef struct EngineHandle {
 } EngineHandle;
 
 /**
+ * Opaque handle to a `HostRenderState` (one per host-driven engine instance).
+ * Owned by the plugin wrapper; never dereferenced in C.
+ */
+typedef struct RenderStateHandle {
+    uint8_t _private[0];
+} RenderStateHandle;
+
+/**
+ * Host transport snapshot for one audio block. Filled by the plugin wrapper
+ * from AU `musicalContextBlock`/`transportStateBlock` or nih_plug `Transport`.
+ */
+typedef struct HostTransport {
+    /**
+     * Tempo in beats-per-minute.
+     */
+    double tempo_bpm;
+    /**
+     * Audio sample rate (Hz).
+     */
+    double sample_rate;
+    /**
+     * Number of samples in this block.
+     */
+    uint32_t block_samples;
+    /**
+     * Absolute host beat position at the first sample of this block.
+     */
+    double block_start_beat;
+    /**
+     * Beat position of the current bar's downbeat (≤ `block_start_beat`).
+     */
+    double bar_start_beat;
+    /**
+     * Host transport playing state.
+     */
+    bool is_playing;
+    /**
+     * Beats per bar (time-signature numerator, e.g. 4.0 for 4/4). Reserved for
+     * non-4/4 support in a later phase; the Phase 0 accumulator assumes 4/4
+     * (four 16ths per beat) and does not yet read this field. Included now so
+     * the committed header needs no ABI-breaking field addition later.
+     */
+    double beats_per_bar;
+} HostTransport;
+
+/**
+ * One 3-byte MIDI message with a sample offset within the current block. Used
+ * for both host → engine input and engine → host output.
+ */
+typedef struct MidiEvent {
+    /**
+     * Sample offset within the block, in `[0, block_samples)`.
+     */
+    uint32_t sample_offset;
+    /**
+     * Full status byte including channel (e.g. `0x90 | ch`).
+     */
+    uint8_t status;
+    /**
+     * MIDI data byte 1 (note / controller).
+     */
+    uint8_t data1;
+    /**
+     * MIDI data byte 2 (velocity / value).
+     */
+    uint8_t data2;
+} MidiEvent;
+
+/**
  * Create a new engine. Returns an opaque handle (never NULL).
  */
 struct EngineHandle *engine_new(void);
@@ -148,5 +217,43 @@ enum EngineResult engine_serialize(struct EngineHandle *engine,
  * `ptr`/`len` are NULL/0 or exactly a pair returned by this crate.
  */
 void engine_free_bytes(uint8_t *ptr, uintptr_t len);
+
+/**
+ * Create a host-driven engine. Returns an opaque handle (never NULL). Pair with
+ * [`engine_render_state_new`] and drive via [`engine_render`].
+ */
+struct EngineHandle *engine_new_host_driven(void);
+
+/**
+ * Allocate a per-instance render-state handle for [`engine_render`].
+ */
+struct RenderStateHandle *engine_render_state_new(void);
+
+/**
+ * Free a render-state handle. NULL is a tolerated no-op.
+ *
+ * # Safety
+ * `handle` is NULL or from [`engine_render_state_new`]; no concurrent use.
+ */
+void engine_render_state_free(struct RenderStateHandle *handle);
+
+/**
+ * Advance the engine by one host audio block on the host's RT thread. Writes
+ * outgoing MIDI `MidiEvent`s into `midi_out` (sample offsets within the block)
+ * and returns the count in `*midi_out_count`.
+ *
+ * # Safety
+ * `engine`/`rs`/`transport` valid (or NULL for `engine`/`rs` → error); `midi_in`
+ * valid for `midi_in_count` entries; `midi_out` valid for `midi_out_cap` entries;
+ * `midi_out_count` writable (or NULL).
+ */
+enum EngineResult engine_render(struct EngineHandle *engine,
+                                struct RenderStateHandle *rs,
+                                const struct HostTransport *transport,
+                                const struct MidiEvent *midi_in,
+                                uintptr_t midi_in_count,
+                                struct MidiEvent *midi_out,
+                                uintptr_t midi_out_cap,
+                                uintptr_t *midi_out_count);
 
 #endif  /* SEQUENCER_ENGINE_H */
