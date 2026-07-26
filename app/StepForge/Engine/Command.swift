@@ -45,6 +45,9 @@ enum Command {
     case serialize                                                         // 31
     case loadSession(bytes: [UInt8])                                       // 32
     // -- sync (amendments A15 / E6) --
+    // Engine-internal, not surfaced in the UI (Link auto-enables via SetSyncSource);
+    // kept for explicit control from future surfaces (CLI / automation). Removing it
+    // shifts tag 33 and breaks the C-ABI wire format + golden fixtures — don't remove.
     case setLinkEnabled(enabled: Bool)                                     // 33
     case midiClockTick                                                     // 34
 

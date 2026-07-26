@@ -109,6 +109,11 @@ pub enum Command {
     LoadSession {
         bytes: Vec<u8>,
     },
+    /// Engine-internal toggle for the Ableton Link session — not currently surfaced
+    /// in the UI (the Link toggle was replaced by auto-enable on `SetSyncSource`),
+    /// retained for explicit control from future surfaces (CLI / automation).
+    /// Removing it would shift `MidiClockTick`'s tag (33) and break the C-ABI wire
+    /// format + golden fixtures — do not remove.
     SetLinkEnabled {
         enabled: bool,
     },
