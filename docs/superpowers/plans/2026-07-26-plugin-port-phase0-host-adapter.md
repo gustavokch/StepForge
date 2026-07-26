@@ -1278,7 +1278,7 @@ Expected: matches for all six. `HostTransport` and `MidiEvent` are the **first c
 grep -A7 'typedef struct HostTransport' include/sequencer_engine.h
 ```
 
-Expected: the field list (`tempo_bpm`, `sample_rate`, …, `beats_per_bar`). If instead you see an opaque `typedef struct HostTransport HostTransport;` with no body, let cbindgen parse the core crate — add `parse_deps = ["sequencer_engine"]` under `[parse]` in `cbindgen.toml` and regen. This is safe and additive: only types reachable from exported fns are emitted, and both structs carry only scalars, so no extra core types leak into the header.
+Expected: the field list (`tempo_bpm`, `sample_rate`, …, `beats_per_bar`). If instead you see an opaque `typedef struct HostTransport HostTransport;` with no body, let cbindgen parse the core crate — add `parse_deps = true` plus `include = ["sequencer_engine"]` under `[parse]` in `cbindgen.toml` and regen. (`parse_deps` is a **bool** in cbindgen, not an array — the array form `parse_deps = ["sequencer_engine"]` panics in cbindgen 0.29.x; `include` is what scopes parsing to ONLY `sequencer_engine`, so serde/postcard/arc-swap/heapless are not parsed.) This is safe and additive: only types reachable from exported fns are emitted, and both structs carry only scalars, so no extra core types leak into the header.
 
 - [ ] **Step 5: Run test to verify it passes**
 
