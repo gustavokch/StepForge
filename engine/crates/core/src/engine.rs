@@ -8,6 +8,7 @@ use crate::clock::{
 };
 use crate::command::Command;
 use crate::event::EngineEvent;
+use crate::host::{HostRenderState, HostTransport, MidiEvent, PendingMidiQueue};
 use crate::midi::{build_note_on, humanize_velocity, ratchet_count, velocity_for_zone};
 use crate::midi_out::{
     command_queue, hot_event_channel, large_event_channel, midi_out_ring, push_large_event,
@@ -502,6 +503,141 @@ impl Engine {
         }
         rt.global_step = (rt.global_step + 1) % crate::models::STEP_COUNT as u32;
         self.check_scheduler(rt, snap);
+    }
+
+    /// Host-driven render: advance the engine across one host audio block on the
+    /// host's RT thread. Fires `process_one` once per 16th boundary that crosses
+    /// the block, converts the lock-free MIDI ring to sample-offset `MidiEvent`s,
+    /// schedules note-offs that outlast the block, maps incoming note-ons to
+    /// pattern-select commands, and honors play/stop transitions. RT-safe (Hard
+    /// Rule 1): no alloc, no lock — reuses `process()`, the lock-free ring, a
+    /// non-blocking snapshot read, and fixed-size arrays in `HostRenderState`.
+    pub fn render_host(
+        &self,
+        rs: &mut HostRenderState,
+        transport: &HostTransport,
+        midi_in: &[MidiEvent],
+        midi_out: &mut [MidiEvent],
+    ) -> usize {
+        let mut written = 0usize;
+        let block = transport.block_samples as u64;
+        let block_start_abs = rs.sample_time;
+        let block_end_abs = block_start_abs + block;
+
+        let snap = self.snapshot.load(); // zero-alloc Guard; immutable for the block
+        let channel = snap.global_midi_channel;
+
+        // (1) Emit pending note-offs from prior blocks due within this block.
+        rs.pending.drain_due(block_start_abs, block_end_abs, |ev| {
+            if written < midi_out.len() {
+                midi_out[written] = ev;
+                written += 1;
+            }
+        });
+
+        // (2) Incoming note-ons in the command octave → pattern-select commands.
+        //     Reuses the worker's `QueuePattern` path; latency ≤ one worker drain.
+        for ev in midi_in {
+            if (ev.status & 0xF0) == 0x90 && ev.data2 > 0 {
+                let idx = (ev.data1 as usize).saturating_sub(60) % crate::models::PATTERN_SLOTS;
+                let _ = crate::midi_out::push_drop_oldest(
+                    &self.commands,
+                    crate::command::Command::QueuePattern {
+                        index: idx,
+                        quantize: crate::models::QuantizeGrain::NextStep,
+                    },
+                );
+            }
+        }
+
+        let bps = (transport.tempo_bpm / 60.0).max(1e-6);
+        let samples_per_beat = transport.sample_rate / bps;
+        let block_end_beat =
+            transport.block_start_beat + (block as f64) / samples_per_beat.max(1e-6);
+
+        // (3) Stop transition: freeze advancement + all-notes-off at offset 0.
+        if !transport.is_playing {
+            if rs.was_playing {
+                if written < midi_out.len() {
+                    midi_out[written] = MidiEvent {
+                        sample_offset: 0,
+                        status: 0xB0 | (channel & 0x0F),
+                        data1: 123,
+                        data2: 0,
+                    };
+                    written += 1;
+                }
+                rs.was_playing = false;
+                // CC 123 killed every sustaining note; drop any events still
+                // queued (note-offs AND deferred note-ons) so they can't fire as
+                // stale events in later stopped blocks.
+                rs.pending.clear();
+            }
+            rs.sample_time = block_end_abs;
+            rs.last_block_start_beat = transport.block_start_beat;
+            return written;
+        }
+
+        // (4) Play-start or seek: reseed RNG + align global_step/next_step_beat
+        //     to the host bar so step 0 lands on the downbeat.
+        let jumped = !rs.initialized
+            || rs.last_block_start_beat.is_nan()
+            || transport.block_start_beat < rs.last_block_start_beat
+            || (transport.block_start_beat - rs.last_block_start_beat)
+                > 2.0 * (block as f64) / samples_per_beat.max(1e-6) + 1.0;
+        if !rs.was_playing || jumped {
+            self.begin_play(&mut rs.rt);
+            let into_bar = (transport.block_start_beat - transport.bar_start_beat).max(0.0);
+            let sixteenths = (into_bar * 4.0).floor() as u32;
+            rs.rt.global_step = sixteenths % crate::models::STEP_COUNT as u32;
+            // Align each track's playhead to the same bar position, so a mid-bar
+            // resume starts at the right step instead of replaying step 0.
+            // `begin_play` just reset every step_idx to 0; overwrite per track.
+            // Exact for speed_ratio 1.0; other ratios are approximated (speed_acc
+            // reset to 0) and self-correct within a step or two. Bounds-checked
+            // against both the active pattern's track count and `per_track`.
+            if let Some(pattern) = snap
+                .patterns
+                .get(snap.active_pattern_index)
+                .and_then(|p| p.as_ref())
+            {
+                for (idx, track) in pattern.tracks.iter().enumerate() {
+                    if let Some(slot) = rs.rt.per_track.get_mut(idx) {
+                        slot.step_idx = (sixteenths as usize) % track.length.max(1);
+                        slot.speed_acc = 0;
+                    }
+                }
+            }
+            rs.next_step_beat = transport.bar_start_beat + (sixteenths as f64 + 1.0) * 0.25;
+            rs.initialized = true;
+        }
+        rs.was_playing = true;
+
+        // (5) Fire every 16th boundary that crosses this block. Strict `<`: a
+        // boundary exactly at block_end_beat belongs to the next block.
+        while rs.next_step_beat < block_end_beat {
+            let off = ((rs.next_step_beat - transport.block_start_beat) * samples_per_beat) as i64;
+            let boundary_offset = off.clamp(0, block as i64) as u32;
+            self.process_one(&mut rs.rt, &snap, true, 0);
+            // Drain this boundary's notes; assign boundary-relative offsets.
+            while let Some(msg) = self.midi.dequeue() {
+                emit_midi_msg(
+                    &msg,
+                    boundary_offset,
+                    block,
+                    block_start_abs,
+                    transport.sample_rate,
+                    &mut rs.pending,
+                    midi_out,
+                    &mut written,
+                );
+            }
+            rs.next_step_beat += 0.25;
+        }
+
+        rs.sample_time = block_end_abs;
+        rs.last_block_start_beat = transport.block_start_beat;
+        written
     }
 
     /// RT: fire a queued pattern switch / retrigger at the current boundary.
@@ -1176,6 +1312,74 @@ fn zone_weight(z: crate::models::VelocityZone) -> f32 {
     match z {
         crate::models::VelocityZone::Accent => 1.0,
         _ => 0.6,
+    }
+}
+
+/// Convert a drained `MidiMsg` (micros-relative, from `process`) into
+/// sample-offset `MidiEvent`s for this block — sample-accurately, never clamped.
+///
+/// A note-on whose swing/micro-timing pushes it past the block that fired its
+/// boundary (common at high swing + small host blocks) is deferred onto `pending`
+/// for the block that actually contains it, exactly as a spanning note-off is.
+/// This matches how the standalone CoreMIDI worker resolves the same offset
+/// against wall-clock — no timing is lost to a block-end clamp.
+///
+/// RT-safe (no alloc): fixed arrays + the bounded `pending` queue only.
+#[allow(clippy::too_many_arguments)]
+fn emit_midi_msg(
+    msg: &crate::midi_out::MidiMsg,
+    boundary_offset: u32,
+    block_samples: u64,
+    block_start_abs: u64,
+    sample_rate: f64,
+    pending: &mut PendingMidiQueue,
+    out: &mut [MidiEvent],
+    written: &mut usize,
+) {
+    let sub_samples = (msg.send_at_offset_micros as f64 / 1_000_000.0 * sample_rate) as u32;
+    let on_within = boundary_offset.saturating_add(sub_samples); // true offset; may exceed block
+    let on_abs = block_start_abs + on_within as u64;
+    // NOTE: `block_samples` is u64 (it feeds absolute-sample arithmetic in
+    // `render_host`); `on_within` is u32 (a within-block offset). Widen here so
+    // the comparison type-checks — matches the `on_within as u64` casts above/below.
+    let note_off_status = msg.status.wrapping_sub(0x10); // 0x9X → 0x8X, channel nibble preserved; wrapping_sub stays panic-free on RT for any status byte
+    let gate_samples = (msg.gate_micros as f64 / 1_000_000.0 * sample_rate) as u64;
+
+    if (on_within as u64) < block_samples {
+        // Note-on fires inside this block.
+        if *written < out.len() {
+            out[*written] = MidiEvent {
+                sample_offset: on_within,
+                status: msg.status,
+                data1: msg.note,
+                data2: msg.velocity,
+            };
+            *written += 1;
+        }
+        // Matching note-off — its gate may span into a later block.
+        if (msg.status & 0xF0) == 0x90 && msg.gate_micros > 0 {
+            let off_within = on_within as u64 + gate_samples;
+            if off_within < block_samples {
+                if *written < out.len() {
+                    out[*written] = MidiEvent {
+                        sample_offset: off_within as u32,
+                        status: note_off_status,
+                        data1: msg.note,
+                        data2: 0,
+                    };
+                    *written += 1;
+                }
+            } else {
+                pending.schedule(block_start_abs + off_within, note_off_status, msg.note, 0);
+            }
+        }
+    } else {
+        // Note-on lands past this block's end — defer it (sample-accurate) to the
+        // block containing `on_abs`, and defer its note-off relative to it.
+        pending.schedule(on_abs, msg.status, msg.note, msg.velocity);
+        if (msg.status & 0xF0) == 0x90 && msg.gate_micros > 0 {
+            pending.schedule(on_abs + gate_samples, note_off_status, msg.note, 0);
+        }
     }
 }
 
