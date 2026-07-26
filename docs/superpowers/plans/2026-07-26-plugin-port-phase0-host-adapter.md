@@ -675,10 +675,13 @@ fn emit_midi_msg(
     let sub_samples = (msg.send_at_offset_micros as f64 / 1_000_000.0 * sample_rate) as u32;
     let on_within = boundary_offset.saturating_add(sub_samples); // true offset; may exceed block
     let on_abs = block_start_abs + on_within as u64;
+    // NOTE: `block_samples` is u64 (it feeds absolute-sample arithmetic in
+    // `render_host`); `on_within` is u32 (a within-block offset). Widen here so
+    // the comparison type-checks — matches the `on_within as u64` casts above/below.
     let note_off_status = msg.status.wrapping_sub(0x10); // 0x9X → 0x8X, channel nibble preserved; wrapping_sub stays panic-free on RT for any status byte
     let gate_samples = (msg.gate_micros as f64 / 1_000_000.0 * sample_rate) as u64;
 
-    if on_within < block_samples {
+    if on_within as u64 < block_samples {
         // Note-on fires inside this block.
         if *written < out.len() {
             out[*written] = MidiEvent {
