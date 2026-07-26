@@ -765,7 +765,7 @@ fn note_off_outlasts_block_and_fires_in_a_future_block() {
     let mut beat = 0.0f64;
     let mut saw_note_on = false;
     let mut saw_note_off = false;
-    for _ in 0..32 {
+    for _ in 0..48 {
         let mut out = [sequencer_engine::host::MidiEvent::zero(); 64];
         let n = eng.render_host(&mut rs, &transport(120.0, sr, block, beat, 0.0, true), &[], &mut out);
         for ev in &out[..n] {
