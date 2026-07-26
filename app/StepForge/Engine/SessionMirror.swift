@@ -119,6 +119,12 @@ struct SessionMirror: Equatable {
             session.bpm = bpm
         case .syncSourceChanged(let s):
             session.syncSource = s
+            // Mirror the engine's auto-enable rule (Defect 3 — same rationale as
+            // `applyOptimistic(.setSyncSource)` below): selecting Link enables the
+            // session, otherwise disables it. Keeps the mirror self-consistent
+            // even if the separate `LinkEnabledChanged` event is dropped under
+            // hot-channel overflow (drop-oldest, 32 slots).
+            linkEnabled = (s == .link)
         case .undoAvailable(let t, let available):
             if available { undoAvailable.insert(t) } else { undoAvailable.remove(t) }
         case .fullSnapshot(let snapshot):

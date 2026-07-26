@@ -85,6 +85,11 @@ struct SettingsSheet: View {
                     // so a separate enable toggle is redundant. Peer count stays.
                     LabeledContent("Connected Link Peers", value: "\(bridge.mirror.linkPeers)")
                         .foregroundStyle(Theme.textPrimary)
+                    // First UI reader for `linkEnabled` (Issue #6): surfaces whether
+                    // the Link session is actually engaged, derived by the mirror
+                    // from SetSyncSource / LinkEnabledChanged events.
+                    LabeledContent("Link Session", value: bridge.mirror.linkEnabled ? "Active" : "Inactive")
+                        .foregroundStyle(Theme.textPrimary)
                 } header: { Text("Sync & Ableton Link") }
             }
             #if os(macOS)

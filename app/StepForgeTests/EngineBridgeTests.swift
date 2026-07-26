@@ -36,4 +36,15 @@ final class EngineBridgeTests: XCTestCase {
         mirror.apply(.linkEnabledChanged(enabled: false))
         XCTAssertFalse(mirror.linkEnabled)
     }
+
+    /// Issue #3: the mirror must stay self-consistent if the separate
+    /// `LinkEnabledChanged` event is dropped under hot-channel overflow. Applying
+    /// `SyncSourceChanged` alone must derive `linkEnabled` (Link → true, else false).
+    func testSessionMirrorDerivesLinkEnabledFromSyncSourceChanged() {
+        var mirror = SessionMirror()
+        mirror.apply(.syncSourceChanged(source: .link))
+        XCTAssertTrue(mirror.linkEnabled, "selecting Link must derive linkEnabled=true")
+        mirror.apply(.syncSourceChanged(source: .free))
+        XCTAssertFalse(mirror.linkEnabled, "selecting Free must derive linkEnabled=false")
+    }
 }
