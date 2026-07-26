@@ -11,8 +11,15 @@ documentation = true
 args = "auto"
 
 [parse]
-# Only emit bindings for the ffi crate itself; core types do not cross the ABI.
-parse_deps = false
+# Host-driven render (Phase 0) makes two core-crate scalar structs —
+# `HostTransport` and `MidiEvent` — reachable from exported `engine_render`.
+# Without parsing the core crate, cbindgen cannot see their fields and emits
+# them as incomplete types. `include` whitelists ONLY `sequencer_engine` — no
+# other dep crates are parsed (serde/postcard/arc-swap/heapless never reach
+# the public ABI). Safe/additive: only types reachable from exported fns are
+# emitted, and both structs are pure scalars.
+parse_deps = true
+include = ["sequencer_engine"]
 
 [export]
 # Exclude CoreMIDI/CoreFoundation internals that should not appear in the public header.

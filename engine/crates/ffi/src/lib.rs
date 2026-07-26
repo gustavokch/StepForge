@@ -15,6 +15,8 @@ pub mod event_codec;
 mod handle;
 
 pub use handle::EngineHandle;
+pub use handle::RenderStateHandle;
+pub use sequencer_engine::host::{HostRenderState, HostTransport, MidiEvent};
 
 /// Maximum bytes an event may occupy on the hot (fixed-slot) RT channel. Events
 /// that would exceed this (e.g. `Serialized`) are routed to the separate off-RT
@@ -120,6 +122,19 @@ pub unsafe extern "C" fn engine_start(engine: *mut EngineHandle) -> EngineResult
         // Reset shutdown flag to false so worker and RT loops run (crucial if start is called again after stop)
         eng.shutdown
             .store(false, std::sync::atomic::Ordering::Release);
+
+        // Host-driven mode (plugin port, Phase 0): spawn ONLY the state worker.
+        // The host drives dispatch via `engine_render`; no self-scheduled RT
+        // thread, no CoreMIDI worker, no Link poller.
+        if eng.host_driven {
+            let eng_worker = Arc::clone(&eng);
+            let worker_handle = std::thread::spawn(move || {
+                eng_worker.run_worker_loop();
+            });
+            *eng.worker_handle.lock().unwrap() = Some(worker_handle);
+            std::mem::forget(eng);
+            return Ok(());
+        }
 
         // Create CoreMIDI client, output port, and virtual source (engine owns these per Rule 7).
         // Non-fatal if CoreMIDI client creation fails (e.g. sandboxed / un-entitled);
@@ -410,4 +425,94 @@ pub unsafe extern "C" fn engine_free_bytes(ptr: *mut u8, len: usize) {
         // (into_boxed_slice shrinks capacity to len).
         let _vec = unsafe { Vec::from_raw_parts(ptr, len, len) };
     }));
+}
+
+/// Create a host-driven engine. Returns an opaque handle (never NULL). Pair with
+/// [`engine_render_state_new`] and drive via [`engine_render`].
+#[no_mangle]
+pub extern "C" fn engine_new_host_driven() -> *mut EngineHandle {
+    match catch_unwind(handle::new_host_handle) {
+        Ok(ptr) => ptr,
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Allocate a per-instance render-state handle for [`engine_render`].
+#[no_mangle]
+pub extern "C" fn engine_render_state_new() -> *mut RenderStateHandle {
+    match catch_unwind(AssertUnwindSafe(handle::new_render_state)) {
+        Ok(ptr) => ptr,
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Free a render-state handle. NULL is a tolerated no-op.
+///
+/// # Safety
+/// `handle` is NULL or from [`engine_render_state_new`]; no concurrent use.
+#[no_mangle]
+pub unsafe extern "C" fn engine_render_state_free(handle: *mut RenderStateHandle) {
+    let _ = catch_unwind(AssertUnwindSafe(|| unsafe {
+        handle::free_render_state(handle)
+    }));
+}
+
+/// Advance the engine by one host audio block on the host's RT thread. Writes
+/// outgoing MIDI `MidiEvent`s into `midi_out` (sample offsets within the block)
+/// and returns the count in `*midi_out_count`.
+///
+/// # Safety
+/// `engine`/`rs`/`transport` valid (or NULL for `engine`/`rs` → error); `midi_in`
+/// valid for `midi_in_count` entries; `midi_out` valid for `midi_out_cap` entries;
+/// `midi_out_count` writable (or NULL).
+#[no_mangle]
+pub unsafe extern "C" fn engine_render(
+    engine: *mut EngineHandle,
+    rs: *mut RenderStateHandle,
+    transport: *const HostTransport,
+    midi_in: *const MidiEvent,
+    midi_in_count: usize,
+    midi_out: *mut MidiEvent,
+    midi_out_cap: usize,
+    midi_out_count: *mut usize,
+) -> EngineResult {
+    match catch_unwind(AssertUnwindSafe(|| {
+        if engine.is_null() || rs.is_null() || transport.is_null() {
+            return Err(EngineResult::ErrInvalidHandle);
+        }
+        if midi_in.is_null() && midi_in_count != 0 {
+            return Err(EngineResult::ErrInvalidBuffer);
+        }
+        // SAFETY: caller upholds Hard Rule 5 (no concurrent free); handles come
+        // from engine_new_host_driven / engine_render_state_new.
+        let eng = unsafe { &*(engine as *const Engine) };
+        // M2: enforce the host-pairing contract — `engine_render` only drives
+        // host-mode engines. A host that mis-pairs `engine_new` (standalone)
+        // with `engine_render` would otherwise double-dispatch (self-scheduled
+        // RT thread + host RT thread both driving `process_one`).
+        if !eng.host_driven {
+            return Err(EngineResult::ErrInvalidHandle);
+        }
+        let state = unsafe { &mut *(rs as *mut HostRenderState) };
+        let transport = unsafe { &*transport };
+        let midi_in: &[MidiEvent] = if midi_in_count == 0 {
+            &[]
+        } else {
+            unsafe { core::slice::from_raw_parts(midi_in, midi_in_count) }
+        };
+        let midi_out: &mut [MidiEvent] = if midi_out_cap == 0 || midi_out.is_null() {
+            &mut []
+        } else {
+            unsafe { core::slice::from_raw_parts_mut(midi_out, midi_out_cap) }
+        };
+        let written = eng.render_host(state, transport, midi_in, midi_out);
+        if !midi_out_count.is_null() {
+            unsafe { *midi_out_count = written };
+        }
+        Ok(())
+    })) {
+        Ok(Ok(())) => EngineResult::Ok,
+        Ok(Err(e)) => e,
+        Err(_) => EngineResult::ErrOther,
+    }
 }

@@ -64,3 +64,34 @@ pub unsafe fn free_handle(handle: *mut EngineHandle) {
 
     // The Arc<Engine> is dropped here, cleaning up the engine state.
 }
+
+use sequencer_engine::host::HostRenderState;
+
+/// Opaque handle to a `HostRenderState` (one per host-driven engine instance).
+/// Owned by the plugin wrapper; never dereferenced in C.
+#[repr(C)]
+pub struct RenderStateHandle {
+    _private: [u8; 0],
+}
+
+/// Allocate a host-driven engine handle (never NULL).
+pub fn new_host_handle() -> *mut EngineHandle {
+    let engine = Arc::new(Engine::new_host_driven());
+    Arc::into_raw(engine) as *mut EngineHandle
+}
+
+/// Allocate a fresh render-state handle (never NULL).
+pub fn new_render_state() -> *mut RenderStateHandle {
+    Box::into_raw(Box::new(HostRenderState::new())) as *mut RenderStateHandle
+}
+
+/// Free a render-state handle. NULL is a tolerated no-op.
+///
+/// # Safety
+/// `handle` is NULL or a pointer from [`new_render_state`]; no concurrent use.
+pub unsafe fn free_render_state(handle: *mut RenderStateHandle) {
+    if handle.is_null() {
+        return;
+    }
+    unsafe { drop(Box::from_raw(handle as *mut HostRenderState)) };
+}

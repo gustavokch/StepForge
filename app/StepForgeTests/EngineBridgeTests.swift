@@ -47,4 +47,23 @@ final class EngineBridgeTests: XCTestCase {
         mirror.apply(.syncSourceChanged(source: .free))
         XCTAssertFalse(mirror.linkEnabled, "selecting Free must derive linkEnabled=false")
     }
+
+    /// Issue #1 refinement: `MockEngineBridge` must keep its off-main-readable
+    /// sync snapshot consistent with its optimistic mirror, so the lock-protected
+    /// `currentBpm` / `currentSyncSource` reflect submitted commands (parity with
+    /// the production bridge, which refreshes the snapshot at the tail of each
+    /// drain batch).
+    func testMockBridgeRefreshesSyncSnapshotOnOptimisticEcho() {
+        let bridge = MockEngineBridge()
+        XCTAssertEqual(bridge.currentBpm, 120.0)
+        XCTAssertEqual(bridge.currentSyncSource, .free)
+
+        bridge.submit(.setBpm(bpm: 144.0))
+        XCTAssertEqual(bridge.currentBpm, 144.0,
+                       "mock snapshot must track optimistic setBpm")
+
+        bridge.submit(.setSyncSource(source: .midiClock))
+        XCTAssertEqual(bridge.currentSyncSource, .midiClock,
+                       "mock snapshot must track optimistic setSyncSource")
+    }
 }
