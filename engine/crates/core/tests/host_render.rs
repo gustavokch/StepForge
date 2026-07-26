@@ -56,6 +56,7 @@ fn play_advances_one_step_per_16th_boundary() {
     let block = 6_000u32; // exactly one 16th per block
     let mut beat = 0.0f64;
     let mut total_notes = 0usize;
+    let mut first_note_block: Option<usize> = None;
     for i in 0..16 {
         let mut out = [sequencer_engine::host::MidiEvent::zero(); 64];
         let n = eng.render_host(
@@ -77,19 +78,27 @@ fn play_advances_one_step_per_16th_boundary() {
             );
             if fam == 0x90 && ev.data2 > 0 {
                 total_notes += 1;
+                if first_note_block.is_none() {
+                    first_note_block = Some(i);
+                }
             }
         }
         beat += 0.25; // one 16th per block
-        let _ = i;
     }
-    // Track 0 has a hit only on step 0. The 16-block run starts at a bar
-    // boundary (beat 0 == bar_start_beat 0), so step 0 fires at beat 0 in
-    // block 0 (immediate downbeat on play-start — I1 fix), then again each
-    // subsequent bar. Asserting "at least one" keeps this robust to the exact
-    // per-track step mapping.
-    assert!(total_notes >= 1, "expected at least one note-on over a bar");
-    // global_step stayed in range.
-    assert!(rs.rt.global_step < STEP_COUNT as u32);
+    // Session defaults have no active steps, so only track 0 step 0 fires —
+    // exactly once, in block 0 (immediate downbeat on play-start — I1 fix);
+    // the next step-0 downbeat would be at beat 4.0, past this 16-block run.
+    assert_eq!(
+        total_notes, 1,
+        "track 0 step 0 fires exactly once (at the downbeat)"
+    );
+    assert_eq!(first_note_block, Some(0), "downbeat note-on fires in block 0");
+    // 16 blocks × exactly one 16th boundary each → 16 advances → global_step
+    // wraps a full bar (STEP_COUNT == 16) back to 0.
+    assert_eq!(
+        rs.rt.global_step, 0,
+        "16 one-16th blocks advance global_step a full bar (wraps to 0)"
+    );
 }
 
 #[test]
