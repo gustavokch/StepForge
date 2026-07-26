@@ -197,6 +197,12 @@ final class MockEngineBridge: EngineBridge, @unchecked Sendable {
     override init() {
         super.init()
         mirror = .demoSeed
+        // Seed the off-main-readable snapshot from `.demoSeed` so `currentBpm` /
+        // `currentSyncSource` track the seeded mirror from init (parity with the
+        // production bridge's tail-of-batch refresh). No-op today — demoSeed
+        // (bpm 120 / .free) == SyncSnapshot() defaults — but future-proofs the
+        // seed/snapshot linkage if demoSeed ever moves off the defaults.
+        refreshSyncSnapshot()
     }
 
     override func start() { /* no threads, no drain */ }
