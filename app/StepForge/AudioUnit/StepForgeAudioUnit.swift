@@ -111,16 +111,33 @@ final class StepForgeAudioUnit: AUAudioUnit {
 
     // MARK: - Host state persistence (DAW project save/restore)
     //
-    // Both accessors share the `["session": Data]` envelope (AUState.pack /
-    // unpack). `get` reads a lock-free COW snapshot via `bridge.serialize()`
+    // The session bytes ride inside the *base class's* ClassInfo dict rather
+    // than replacing it. The AUAudioUnit v2 bridge treats `fullState` as the
+    // v2 `kAudioUnitProperty_ClassInfo` value: it must carry the standard
+    // ClassInfo keys (`<type>`/`<subtype>`/`<manufacturer>`, `version`, the
+    // parameter tree, …) that `super.fullState` produces. Returning a custom
+    // dict in their place makes auval reject the synthesized ClassInfo —
+    // `kAudioUnitErr_InvalidPropertyValue` (-10851) for `["session": Data]`,
+    // or "Class Data does not have required field:`<type>`" for an empty dict.
+    // So: start from `super.fullState` and add `session` on top; on set,
+    // pull `session` out for the engine and forward the rest to super.
+    //
+    // `get` reads a lock-free COW snapshot via `bridge.serialize()`
     // (worker-free — safe even before `engine_start`); `set` submits a
     // `LoadSession` command the state worker applies. `fullStateForDocument`
     // is the document-save variant (used when the host saves the project
     // file); it routes through the same envelope so both paths stay in sync.
 
     override var fullState: [String: Any]? {
-        get { bridge?.serialize().map(AUState.pack) }
-        set { if let data = newValue.flatMap(AUState.unpack) { bridge?.load(data) } }
+        get {
+            guard var state = super.fullState else { return nil }
+            if let data = bridge?.serialize() { state[AUState.sessionKey] = data }
+            return state
+        }
+        set {
+            if let data = newValue.flatMap(AUState.unpack) { bridge?.load(data) }
+            super.fullState = newValue
+        }
     }
 
     override var fullStateForDocument: [String: Any]? {
