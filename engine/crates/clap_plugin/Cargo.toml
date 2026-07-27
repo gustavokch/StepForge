@@ -1,0 +1,20 @@
+[package]
+name = "stepforge_clap"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+sequencer_engine = { path = "../core" }
+stepforge_editor_egui = { path = "../editor_egui" }
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "f36931f7af4646065488a9845d8f8c2f95252c23" }
+nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "f36931f7af4646065488a9845d8f8c2f95252c23" }
+postcard = { version = "1", features = ["alloc"] }
+parking_lot = "0.12"
+
+[dev-dependencies]
+serde_json = "1"
