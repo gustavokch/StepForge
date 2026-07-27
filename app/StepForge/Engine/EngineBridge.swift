@@ -116,6 +116,21 @@ class EngineBridge: ObservableObject, @unchecked Sendable {
         }
     }
 
+    /// Borrowed (AU) mode only: sever this bridge's handle reference under
+    /// `drainQueue.sync` so the AU may `engine_stop`/`engine_free` on its own
+    /// thread with a guarantee that no in-flight `submit`/`serialize`/`drainOnce`
+    /// is touching the handle (Hard Rule 5: no concurrent `engine_*` calls). Once
+    /// this returns, every handle-touching path hits its `guard let h = self.handle`
+    /// and no-ops. Call between `stop()` (drains the timer) and the AU's stop/free.
+    ///
+    /// No-op in standalone mode: the bridge owns the handle there, and nil'ing it
+    /// would orphan the handle + spawned RT/MIDI workers (the standalone `deinit`
+    /// gates stop/free on `ownsLifecycle`, so a nil handle would never be freed).
+    func quiesce() {
+        guard !ownsLifecycle else { return }
+        drainQueue.sync { self.handle = nil }
+    }
+
     deinit {
         drainTimer?.cancel()
         let h = handle

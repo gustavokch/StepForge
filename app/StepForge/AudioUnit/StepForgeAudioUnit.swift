@@ -35,7 +35,9 @@ final class StepForgeAudioUnit: AUAudioUnit {
     /// Incoming MIDI events, walked directly from `AURenderEvent`s. Cap matches
     /// `MIDIMarshaler.inCapacity` (drop-tail bounded → RT-safe).
     private let midiIn: UnsafeMutablePointer<MidiEvent>
-    /// Outgoing MIDI events from `engine_render`. Cap = 256 (engine's expected bound).
+    /// Outgoing MIDI events from `engine_render`. 256 is the Swift-side fixed
+    /// buffer cap (far exceeds anything a drum sequencer emits per block); the
+    /// engine honors whatever `outCap` is passed at the `engine_render` call site.
     private let midiOut: UnsafeMutablePointer<MidiEvent>
     private static let midiOutCap: UInt = 256
 
@@ -47,10 +49,21 @@ final class StepForgeAudioUnit: AUAudioUnit {
 
     override init(componentDescription: AudioComponentDescription,
                  options: AudioComponentInstantiationOptions = []) throws {
-        // Fixed RT buffers first (let properties must be initialized before super.init
-        // can call back into self — and before any early `return`/`throw`).
-        midiIn = .allocate(capacity: MIDIMarshaler.inCapacity)
-        midiOut = .allocate(capacity: Int(StepForgeAudioUnit.midiOutCap))
+        // Fixed RT buffers first: allocate into locals, then assign to the `let`
+        // properties. The cleanup `defer` frees the LOCALS — Swift forbids `self`
+        // access in a defer reachable from a throwing super.init, so referencing the
+        // stored properties there would not compile. The locals hold the same
+        // pointers, so on a throw the buffers are freed; on success they're owned
+        // by the properties (and freed in deinit).
+        let inBuf = UnsafeMutablePointer<MidiEvent>.allocate(capacity: MIDIMarshaler.inCapacity)
+        let outBuf = UnsafeMutablePointer<MidiEvent>.allocate(capacity: Int(StepForgeAudioUnit.midiOutCap))
+        midiIn = inBuf
+        midiOut = outBuf
+        // If super.init or the bus construction below throws, deinit does NOT run
+        // (the object never finished initializing), so these allocations would
+        // leak. Deallocate on throw only — on success `didCompleteInit` flips last.
+        var didCompleteInit = false
+        defer { if !didCompleteInit { inBuf.deallocate(); outBuf.deallocate() } }
         try super.init(componentDescription: componentDescription, options: options)
 
         // Build the bus array at init so `outputBusses` is non-empty before
@@ -67,22 +80,37 @@ final class StepForgeAudioUnit: AUAudioUnit {
         // NOT spawn the self-scheduled RT/MIDI threads — the host drives those
         // via internalRenderBlock → engine_render). Never NULL per the C header.
         engine = engine_new_host_driven()
-        if let e = engine { _ = engine_start(e) }
-
-        // Borrowed bridge for the editor's command/event path (drain timer only).
-        // The bridge does NOT own the handle (AU does) and skips engine_start/stop/free.
+        // Arm the host-driven state worker; if it fails, LoadSession/fullState
+        // restore silently no-ops — log it so the failure is visible. The bridge
+        // is still created (drain/submit/serialize work regardless of the state
+        // worker; only restore is affected), which keeps `bridge` contractually
+        // non-nil for `bridgeForEditor()`. engine_new_host_driven() never returns
+        // NULL (C header contract).
         if let e = engine {
+            if engine_start(e).rawValue != 0 {   // EngineResult::Ok == 0 (sequencer_engine.h)
+                print("[StepForgeAudioUnit] ERROR: engine_start failed — LoadSession/fullState restore will no-op")
+            }
+            // Borrowed bridge for the editor's command/event path (drain timer
+            // only). The bridge does NOT own the handle (AU does) and skips
+            // engine_start/stop/free.
             bridge = EngineBridge(handle: e)
             bridge?.start()
         }
+        didCompleteInit = true
     }
 
     deinit {
         // Hard Rule 5: stop returns before free; no concurrent engine_* calls.
-        // The bridge's drain queue serializes its own handle-touching calls; the
-        // AU's engine_stop/free run here, on the AU's dealloc thread, after the
-        // bridge has been stopped (so no overlap with a drain tick).
+        // The bridge's drain queue serializes its OWN handle-touching calls
+        // (submit/serialize/drainOnce), but the editor/VC holds a strong ref to
+        // the borrowed bridge — `bridge = nil` does NOT deallocate it, so an
+        // in-flight editor `submit` could touch the handle on `drainQueue` while
+        // the AU's stop/free run here on the dealloc thread. `quiesce()` nils the
+        // bridge's handle under `drainQueue.sync` (after `stop()` drained any
+        // running tick), so once it returns no bridge path can reach the handle
+        // and the AU's stop/free are safe from overlap.
         bridge?.stop()
+        bridge?.quiesce()
         bridge = nil
         if let e = engine {
             _ = engine_stop(e)
@@ -102,12 +130,15 @@ final class StepForgeAudioUnit: AUAudioUnit {
 
     override var outputBusses: AUAudioUnitBusArray { _outputBusses }
 
-    /// Expose the borrowed editor bridge to the view controller. Falls back to a
-    /// fresh owned bridge only if init failed to construct one (defensive — the
-    /// engine path is expected to be live whenever the AU is). Default
-    /// `internal` access: the AU and its VC are in the same target/module but
-    /// separate files, so `fileprivate` (per the brief) blocks cross-file use.
-    func bridgeForEditor() -> EngineBridge { bridge ?? EngineBridge() }
+    /// Expose the borrowed editor bridge to the view controller. `bridge` is
+    /// contractually non-nil whenever the AU reached editor binding (the engine
+    /// path is armed at init before `bridge` is constructed, and
+    /// `engine_new_host_driven()` never returns NULL), so the force-unwrap makes
+    /// that contract explicit rather than masking a nil with a dead, leaking
+    /// standalone engine. `internal` access: the AU and its VC are in the same
+    /// target/module but separate files, so `fileprivate` (per the brief) blocks
+    /// cross-file use.
+    func bridgeForEditor() -> EngineBridge { bridge! }
 
     // MARK: - Host state persistence (DAW project save/restore)
     //
@@ -207,11 +238,20 @@ final class StepForgeAudioUnit: AUAudioUnit {
         let midiOut = self.midiOut
         let inCap = UInt(MIDIMarshaler.inCapacity)
         let outCap = StepForgeAudioUnit.midiOutCap
+        // Cache the bus sample rate at capture time (the format is fixed at
+        // allocateRenderResources; a host format change reallocates the whole AU).
+        let sampleRate = bus.format.sampleRate
 
         return { actionFlags, timestamp, frameCount, outputBusNumber,
                        outputData, realtimeEventListHead, pullInputBlock in
-            // (0) Guard engine + render-state. If the AU is tearing down, signal
-            // the host to retry rather than dereferencing a stale handle.
+            // (0) Guard engine + render-state. These are captured once at
+            // allocateRenderResources, so the guard only fires if allocation
+            // produced nil (it never does — allocateRenderResources creates `rs`).
+            // It does NOT catch teardown: after deallocateRenderResources nils
+            // self.renderState, this closure's captured `rs` is still non-nil.
+            // Teardown safety relies on the host contract ("no render after
+            // deallocateRenderResources") plus _internalRenderBlock being nil'd
+            // there. kAudioUnitErr_Uninitialized yields silence, not a host retry.
             guard let engine, let rs else {
                 return kAudioUnitErr_Uninitialized
             }
@@ -231,7 +271,7 @@ final class StepForgeAudioUnit: AUAudioUnit {
             let isPlaying = flags.contains(.moving)
 
             var transport = HostTransportBuilder.make(
-                sampleRate: bus.format.sampleRate,
+                sampleRate: sampleRate,
                 frameCount: frameCount,
                 tempo: tempo,
                 beat: beat,
@@ -251,7 +291,9 @@ final class StepForgeAudioUnit: AUAudioUnit {
                 if head.eventType == .MIDI, inCount < inCap {
                     let midi = cur.pointee.MIDI
                     let rel = head.eventSampleTime - blockStart
-                    let offset = UInt32(Swift.max(0, rel))
+                    // Clamp the sample offset to [0, frameCount] (defense-in-depth:
+                    // a stray future event can't overrun the current block).
+                    let offset = UInt32(Swift.min(Swift.max(0, rel), Int64(frameCount)))
                     midiIn[Int(inCount)] = MidiEvent(
                         sample_offset: offset,
                         status: midi.data.0,
@@ -271,6 +313,9 @@ final class StepForgeAudioUnit: AUAudioUnit {
             _ = engine_render(engine, rs, &transport,
                               midiIn, inCount,
                               midiOut, outCap, &outCount)
+            // Defense-in-depth: the engine is trusted to honor `outCap`, but clamp
+            // so the emit loop below can't overrun midiOut if it ever didn't.
+            if outCount > outCap { outCount = outCap }
 
             // (4) Forward emitted MIDI to the host via the classic AUMIDIOutputEventBlock.
             //     3 bytes are built on the STACK (a tuple, rebound to UInt8) — never a
@@ -289,9 +334,17 @@ final class StepForgeAudioUnit: AUAudioUnit {
                 }
             }
 
-            // (5) Silence: returning noErr without writing outputData is treated
-            //     as silence by the host (Task 4 proved this passes auval). The
-            //     engine emits MIDI, not audio — the dummy audio bus stays clean.
+            // (5) Zero-fill the dummy audio bus. The AU emits MIDI, not audio, so
+            //     the output is silence — but write it explicitly (one memset per
+            //     buffer, RT-safe) so a host that taps the MIDI-FX audio out never
+            //     emits stale buffer content. memset + buffer-list iteration are
+            //     alloc/lock-free (Hard Rule 1); engine_render is the only FFI here.
+            let buffers = UnsafeMutableAudioBufferListPointer(outputData)
+            for buf in buffers {
+                if let data = buf.mData {
+                    _ = memset(data, 0, Int(buf.mDataByteSize))
+                }
+            }
             return noErr
         }
     }

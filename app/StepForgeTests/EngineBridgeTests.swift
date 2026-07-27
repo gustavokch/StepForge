@@ -107,4 +107,52 @@ final class EngineBridgeTests: XCTestCase {
         XCTAssertNotNil(bridge.serialize())
         bridge.start(); bridge.stop()
     }
+
+    /// Review #1 (teardown race): `quiesce()` must sever the borrowed bridge's
+    /// handle reference under `drainQueue.sync` so the AU can stop/free the engine
+    /// with no in-flight `submit`/`serialize` touching the handle (Hard Rule 5).
+    /// After it returns, `hasHandle` is false, every handle call no-ops, and the
+    /// raw handle is untouched (quiesce does NOT stop/free the AU's engine).
+    func testBorrowedBridgeQuiesceMakesSubmitAndSerializeNoop() {
+        let raw = engine_new_host_driven()
+        XCTAssertNotNil(raw, "engine_new_host_driven must return a handle")
+        defer { engine_free(raw) }   // TEST owns it; quiesce must not free it
+
+        let bridge = EngineBridge(handle: raw!)
+        XCTAssertTrue(bridge.hasHandle)
+        XCTAssertNotNil(bridge.serialize(),
+                        "pre-quiesce: borrowed bridge must serialize against the raw handle")
+
+        bridge.quiesce()
+
+        // (1) handle reference dropped
+        XCTAssertFalse(bridge.hasHandle,
+                       "quiesce must nil the borrowed handle")
+
+        // (2) handle-touching calls become no-ops (no crash, no FFI)
+        XCTAssertNil(bridge.serialize(),
+                     "post-quiesce: serialize must no-op and return nil")
+        bridge.submit(.setBpm(bpm: 144.0))   // must not crash; silently dropped
+
+        // (3) the raw handle is still valid — quiesce did NOT stop/free it. A
+        // fresh borrowed bridge around `raw` must still serialize; if quiesce had
+        // freed it, this (and the defer above) would double-free or crash.
+        let probe = EngineBridge(handle: raw!)
+        XCTAssertNotNil(probe.serialize(),
+                        "quiesce must not free or invalidate the AU's borrowed handle")
+        probe.stop()
+    }
+
+    /// Review #1: `quiesce()` is a no-op on a standalone bridge (which owns its
+    /// handle) — it must NOT nil the handle (that would orphan the handle + the
+    /// RT/MIDI workers `start()` spawns). Pins the "standalone path unchanged" rule.
+    func testQuiesceIsNoopOnStandaloneBridge() {
+        let bridge = EngineBridge()   // standalone: owns lifecycle
+        XCTAssertTrue(bridge.hasHandle)
+        bridge.quiesce()              // must be a no-op
+        XCTAssertTrue(bridge.hasHandle, "standalone quiesce must not nil the handle")
+        XCTAssertNotNil(bridge.serialize(),
+                        "standalone bridge must still serialize after quiesce")
+        bridge.start(); bridge.stop()
+    }
 }

@@ -28,8 +28,7 @@ final class StepForgeEditorViewController: AUViewController, AUAudioUnitFactory 
         let bridge = au.bridgeForEditor()
         view = NSHostingView(rootView:
             PluginEditorView()
-                .environmentObject(bridge)
-                .environment(\.usePluginTransport, true))
+                .environmentObject(bridge))
         view.frame = NSRect(x: 0, y: 0, width: 760, height: 520)
         // Seed the mirror with a full snapshot so the editor isn't blank for one
         // drain tick after open. No-op if the snapshot is already in flight.
