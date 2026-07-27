@@ -102,6 +102,13 @@ final class StepForgeAudioUnit: AUAudioUnit {
 
     override var outputBusses: AUAudioUnitBusArray { _outputBusses }
 
+    /// Expose the borrowed editor bridge to the view controller. Falls back to a
+    /// fresh owned bridge only if init failed to construct one (defensive — the
+    /// engine path is expected to be live whenever the AU is). Default
+    /// `internal` access: the AU and its VC are in the same target/module but
+    /// separate files, so `fileprivate` (per the brief) blocks cross-file use.
+    func bridgeForEditor() -> EngineBridge { bridge ?? EngineBridge() }
+
     /// Stereo (2-ch) dummy output. The AU emits MIDI, not audio — the audio
     /// buffer is left unwritten (returning `noErr` is silence to the host).
     override var channelCapabilities: [NSNumber] { [2, 2] }

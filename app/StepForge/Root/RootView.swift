@@ -4,8 +4,6 @@ import SwiftUI
 /// active mode's content (ui-ux-spec §1 — Editing default ⇄ Performance, toggled
 /// by a corner icon; MIDI/sync behind a Settings sheet). Owns the scene-phase →
 /// engine-lifecycle handoff (Hard Rule 5).
-enum AppMode { case editing, performance }
-
 struct RootView: View {
     @EnvironmentObject private var bridge: EngineBridge
     @EnvironmentObject private var midiManager: MidiManager

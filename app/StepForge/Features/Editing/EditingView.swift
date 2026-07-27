@@ -7,6 +7,10 @@ struct EditingView: View {
     @EnvironmentObject private var bridge: EngineBridge
     @Environment(\.horizontalSizeClass) private var hSize
     @Environment(\.verticalSizeClass) private var vSize
+    /// Swap `TransportBar` → `PluginTransportBar` when hosted inside the AU
+    /// editor (the host owns transport there). Default `false` ⇒ standalone
+    /// renders the standalone `TransportBar` bit-for-bit unchanged.
+    @Environment(\.usePluginTransport) private var usePluginTransport
 
     /// 8 or 16 columns shown at once (ui-ux-spec §2.1). Cell size is derived so
     /// exactly `visibleSteps` fit the width; the full 16 scroll horizontally.
@@ -20,7 +24,11 @@ struct EditingView: View {
 
     var body: some View {
         VStack(spacing: Theme.Spacing.sm) {
-            TransportBar(visibleSteps: $visibleSteps)
+            if usePluginTransport {
+                PluginTransportBar(visibleSteps: $visibleSteps)
+            } else {
+                TransportBar(visibleSteps: $visibleSteps)
+            }
             FeelBar()
             TrackManagementBar()
             TrackList(visibleSteps: visibleSteps,

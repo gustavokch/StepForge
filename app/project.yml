@@ -19,6 +19,7 @@ targets:
         excludes:
           - "AudioUnit/StepForgeAudioUnit.swift"
           - "AudioUnit/StepForgeEditorViewController.swift"
+          - "AudioUnit/PluginEditorView.swift"
           - "AudioUnit/Info.plist"
     settings:
       base:
@@ -48,6 +49,7 @@ targets:
         excludes:
           - "AudioUnit/StepForgeAudioUnit.swift"
           - "AudioUnit/StepForgeEditorViewController.swift"
+          - "AudioUnit/PluginEditorView.swift"
           - "AudioUnit/Info.plist"
     settings:
       base:
