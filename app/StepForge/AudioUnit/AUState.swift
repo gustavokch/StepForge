@@ -4,7 +4,7 @@ import Foundation
 /// `fullStateForDocument` use the same `["session": Data]` envelope: serialize on
 /// get, `loadSession` on set. Pure (no handle, no side effects) → unit-testable
 /// without an AU or host, and safe for the iOS app + test targets (mirrors
-/// `HostTransportBuilder` / `MIDIMarshaler`: pure helper, no `#if os(macOS)`).
+/// `HostTransportBuilder`: pure helper, no `#if os(macOS)`).
 enum AUState {
     /// Dictionary key under which the serialized session bytes are stored.
     static let sessionKey = "session"

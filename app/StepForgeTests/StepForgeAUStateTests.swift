@@ -28,22 +28,19 @@ final class StepForgeAUStateTests: XCTestCase {
         XCTAssertNil(AUState.unpack([AUState.sessionKey: "not data"]))
     }
 
-    /// End-to-end through a borrowed bridge against a real host-driven engine:
-    /// serialize → pack → unpack → load → serialize must round-trip the SAME
-    /// bytes. This is the exact path the AU's `fullState` accessor takes.
-    ///
-    /// `engine_start(raw)` is called on the raw handle BEFORE `bridge.start()`:
-    /// the bridge is borrowed (skips `engine_start`), so without this call the
-    /// state worker would never run, the `LoadSession` command would never be
-    /// processed, and the final `serialize()` would return the INITIAL session
-    /// (not the loaded bytes). Starting the worker makes this a real round-trip
-    /// — `bridge.serialize()` after `load` must equal the bytes we packed.
+    /// End-to-end through a borrowed bridge against a real host-driven engine,
+    /// exercising the AU's `fullState` set path. `engine_submit_command` only
+    /// enqueues to the MPSC queue — the self-scheduled state worker applies the
+    /// command asynchronously — so the test mutates to a *distinct* state first,
+    /// then restores the original via `load`, polling `serialize()` to a deadline
+    /// rather than asserting immediately. (An immediate assert would pass whether
+    /// or not the worker ever ran: loading the *current* session back into itself
+    /// is a no-op either way — the flaw in the previous version of this test.)
+    /// `engine_start(raw)` arms the worker; the borrowed bridge skips
+    /// `engine_start` in AU mode, so arming is the test's responsibility.
     func testSerializeLoadRoundTripViaBorrowedBridge() {
         let raw = engine_new_host_driven()!
         XCTAssertNotNil(raw, "engine_new_host_driven must return a handle")
-        // Arm the state worker on the raw handle so it processes LoadSession.
-        // The borrowed bridge will NOT call engine_start (it skips lifecycle in
-        // AU mode), so this is the test's responsibility.
         XCTAssertEqual(engine_start(raw).rawValue, 0, "state worker must arm (EngineResult.Ok = 0)")
         defer {
             engine_stop(raw)   // must return before free (Hard Rule 5)
@@ -52,22 +49,43 @@ final class StepForgeAUStateTests: XCTestCase {
 
         let bridge = EngineBridge(handle: raw)   // borrowed: won't start/stop/free
         bridge.start(); defer { bridge.stop() }   // arms the drain timer only
-        bridge.requestSnapshot()
 
-        // Serialize the current session → pack → unpack → reload it.
-        let first = bridge.serialize()
-        XCTAssertNotNil(first, "serialize is worker-free; must return bytes against a live handle")
+        // S0 = the initial session bytes (default tempo).
+        guard let s0 = bridge.serialize() else {
+            return XCTFail("serialize must return bytes against a live handle")
+        }
 
-        let dict = AUState.pack(first!)
-        let recovered = AUState.unpack(dict)
-        XCTAssertEqual(recovered, first, "AUState pack/unpack must round-trip serialize's bytes")
+        // Mutate to a DISTINCT state (tempo 144 != default), then wait for the
+        // worker to apply it. If the worker never ran, this times out -> fail.
+        bridge.submit(.setBpm(bpm: 144.0))
+        guard pollSerialize(bridge, until: { $0 != s0 }, timeout: 2.0) != nil else {
+            return XCTFail("worker never applied setBpm (serialize stayed == S0)")
+        }
 
-        bridge.load(recovered!)
+        // Restore S0 through the AU's fullState envelope (pack -> unpack -> load).
+        bridge.load(AUState.unpack(AUState.pack(s0))!)
 
-        // State worker is running → LoadSession is applied → re-serialize must
-        // equal the bytes we just loaded (a genuine round-trip, not a no-op).
-        let after = bridge.serialize()
-        XCTAssertEqual(after, recovered,
-                       "serialize after load must equal the loaded bytes (worker processed LoadSession)")
+        // The worker MUST apply LoadSession -> serialize() must return S0 again.
+        // If LoadSession were dropped/ignored, serialize stays at the mutated
+        // state and this times out -> fail.
+        let restored = pollSerialize(bridge, until: { $0 == s0 }, timeout: 2.0)
+        XCTAssertNotNil(restored,
+                        "LoadSession must be applied by the worker (serialize must return S0)")
+    }
+
+    /// Poll `bridge.serialize()` every ~5ms until `predicate` matches or `timeout`
+    /// elapses; returns the matching bytes or nil on timeout. Required because
+    /// `engine_submit_command` only enqueues to the MPSC queue — the self-scheduled
+    /// state worker applies the command asynchronously, so it is not reflected in
+    /// `serialize()` until the worker drains the queue.
+    private func pollSerialize(_ bridge: EngineBridge,
+                               until predicate: (Data) -> Bool,
+                               timeout: TimeInterval) -> Data? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let bytes = bridge.serialize(), predicate(bytes) { return bytes }
+            Thread.sleep(forTimeInterval: 0.005)
+        }
+        return nil
     }
 }

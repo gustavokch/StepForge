@@ -76,7 +76,6 @@ final class EngineBridgeTests: XCTestCase {
         XCTAssertNotNil(raw, "engine_new_host_driven must return a handle")
         defer { engine_free(raw) }   // TEST owns it; the borrowed bridge must not free it
 
-        var stolenByDeinit = false
         do {
             let bridge = EngineBridge(handle: raw!)
             XCTAssertTrue(bridge.hasHandle)
@@ -84,8 +83,7 @@ final class EngineBridgeTests: XCTestCase {
             XCTAssertNotNil(bridge.serialize(),  // borrowed handle is usable for serialize
                             "borrowed bridge must serialize against the AU's handle")
             bridge.stop()                        // borrowed: cancels timer, NO engine_stop
-            stolenByDeinit = false
-            _ = stolenByDeinit                   // deinit runs here — must NOT engine_free(raw)
+            // `bridge` deinits here (end of scope) — must NOT engine_free(raw)
         }
         // raw must still be valid after the borrowed bridge deinit'd:
         let bridge2 = EngineBridge(handle: raw!)

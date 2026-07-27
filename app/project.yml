@@ -89,17 +89,52 @@ targets:
         CODE_SIGNING_ALLOWED: "YES"
         CODE_SIGNING_REQUIRED: "NO"
     sources:
-      - path: StepForge/AudioUnit
-      - path: StepForge/Engine
-        excludes:
-          - "MidiManager.swift"
-          - "EngineLifecycle.swift"
-      - path: StepForge/Features
-        excludes:
-          - "Settings/SettingsSheet.swift"
-      - path: StepForge/Theme
-      - path: StepForge/Components
-      - path: StepForge/Gestures
+      # Explicit AU source list: the boundary is declared here, not emergent from
+      # dir includes. A new shared file must be added to appear in the AU (a clear
+      # "missing feature" failure, not a mysterious CoreMIDI link error).
+      # AudioUnit/ — AU glue. Info.plist + StepForgeAU.entitlements stay wired via
+      # INFOPLIST_FILE / CODE_SIGN_ENTITLEMENTS (not as source entries).
+      - path: StepForge/AudioUnit/AUState.swift
+      - path: StepForge/AudioUnit/HostTransportBuilder.swift
+      - path: StepForge/AudioUnit/PluginEditorView.swift
+      - path: StepForge/AudioUnit/PluginTransportBar.swift
+      - path: StepForge/AudioUnit/StepForgeAudioUnit.swift
+      - path: StepForge/AudioUnit/StepForgeEditorViewController.swift
+      # Engine/ — command/event/codec/mirror (NOT MidiManager / EngineLifecycle).
+      - path: StepForge/Engine/Command.swift
+      - path: StepForge/Engine/EngineBridge.swift
+      - path: StepForge/Engine/EngineEvent.swift
+      - path: StepForge/Engine/Models.swift
+      - path: StepForge/Engine/Postcard/PostcardCodable.swift
+      - path: StepForge/Engine/Postcard/PostcardReader.swift
+      - path: StepForge/Engine/Postcard/PostcardWriter.swift
+      - path: StepForge/Engine/SessionMirror.swift
+      # Features/ — reused editor (NOT Settings/SettingsSheet.swift).
+      - path: StepForge/Features/AppMode.swift
+      - path: StepForge/Features/Editing/ActionDrawer.swift
+      - path: StepForge/Features/Editing/EditingView.swift
+      - path: StepForge/Features/Editing/FeelBar.swift
+      - path: StepForge/Features/Editing/GridMetrics.swift
+      - path: StepForge/Features/Editing/NotePickerSheet.swift
+      - path: StepForge/Features/Editing/StepCell.swift
+      - path: StepForge/Features/Editing/StepRow.swift
+      - path: StepForge/Features/Editing/TrackHeader.swift
+      - path: StepForge/Features/Editing/TrackList.swift
+      - path: StepForge/Features/Editing/TrackManagementBar.swift
+      - path: StepForge/Features/Editing/TransportBar.swift
+      - path: StepForge/Features/Performance/PatternOptionsSheet.swift
+      - path: StepForge/Features/Performance/PerformanceView.swift
+      # Theme / Components / Gestures.
+      - path: StepForge/Theme/Color+Kinetic.swift
+      - path: StepForge/Theme/Theme.swift
+      - path: StepForge/Theme/Typography.swift
+      - path: StepForge/Theme/ViewModifiers.swift
+      - path: StepForge/Components/Chip.swift
+      - path: StepForge/Components/Panel.swift
+      - path: StepForge/Components/SectionLabel.swift
+      - path: StepForge/Gestures/Haptics.swift
+      - path: StepForge/Gestures/PinchZoomModifier.swift
+      - path: StepForge/Gestures/StepGestureModifier.swift
     dependencies:
       - framework: ../engine/dist/SequencerEngine.xcframework
         embed: false

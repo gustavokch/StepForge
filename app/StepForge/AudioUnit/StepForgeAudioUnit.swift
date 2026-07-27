@@ -32,13 +32,16 @@ final class StepForgeAudioUnit: AUAudioUnit {
 
     // MARK: - Fixed RT buffers (allocated once in init; no allocation on the hot path)
 
-    /// Incoming MIDI events, walked directly from `AURenderEvent`s. Cap matches
-    /// `MIDIMarshaler.inCapacity` (drop-tail bounded → RT-safe).
+    /// Incoming MIDI events, walked directly from `AURenderEvent`s.
     private let midiIn: UnsafeMutablePointer<MidiEvent>
-    /// Outgoing MIDI events from `engine_render`. 256 is the Swift-side fixed
-    /// buffer cap (far exceeds anything a drum sequencer emits per block); the
-    /// engine honors whatever `outCap` is passed at the `engine_render` call site.
+    /// Outgoing MIDI events from `engine_render`.
     private let midiOut: UnsafeMutablePointer<MidiEvent>
+
+    /// Max incoming MIDI messages walked per block. Bounded → RT-safe (Hard Rule 1).
+    private static let midiInCap: Int = 64
+    /// 256 is the Swift-side fixed buffer cap (far exceeds anything a drum
+    /// sequencer emits per block); the engine honors whatever `outCap` is passed
+    /// at the `engine_render` call site.
     private static let midiOutCap: UInt = 256
 
     // MARK: - Cached render block (built once in allocateRenderResources)
@@ -55,7 +58,7 @@ final class StepForgeAudioUnit: AUAudioUnit {
         // stored properties there would not compile. The locals hold the same
         // pointers, so on a throw the buffers are freed; on success they're owned
         // by the properties (and freed in deinit).
-        let inBuf = UnsafeMutablePointer<MidiEvent>.allocate(capacity: MIDIMarshaler.inCapacity)
+        let inBuf = UnsafeMutablePointer<MidiEvent>.allocate(capacity: StepForgeAudioUnit.midiInCap)
         let outBuf = UnsafeMutablePointer<MidiEvent>.allocate(capacity: Int(StepForgeAudioUnit.midiOutCap))
         midiIn = inBuf
         midiOut = outBuf
@@ -236,7 +239,7 @@ final class StepForgeAudioUnit: AUAudioUnit {
         let rs = self.renderState
         let midiIn = self.midiIn
         let midiOut = self.midiOut
-        let inCap = UInt(MIDIMarshaler.inCapacity)
+        let inCap = UInt(StepForgeAudioUnit.midiInCap)
         let outCap = StepForgeAudioUnit.midiOutCap
         // Cache the bus sample rate at capture time (the format is fixed at
         // allocateRenderResources; a host format change reallocates the whole AU).
@@ -279,7 +282,7 @@ final class StepForgeAudioUnit: AUAudioUnit {
                 isPlaying: isPlaying)
 
             // (2) Walk the AURenderEvent linked list DIRECTLY into the fixed midiIn
-            //     buffer (drop-tail at inCap). NO [RawMIDI] array, no allocation
+            //     buffer (drop-tail at inCap). No intermediate array, no allocation
             //     (Hard Rule 1). Only classic .MIDI events (AURenderEventMIDI = 8):
             //     the union variant is AUMIDIEvent with data: (UInt8,UInt8,UInt8)
             //     and length 1–3. UMP/MIDIEventList input is intentionally ignored.
