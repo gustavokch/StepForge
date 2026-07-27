@@ -63,5 +63,11 @@ targets:
     platform: iOS
     sources:
       - path: StepForgeTests
+    settings:
+      base:
+        SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/../engine/include/sequencer_engine.h"
+        USER_HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../engine/include"
+        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../engine/include"
+        FRAMEWORK_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../engine/dist"
     dependencies:
       - target: StepForge

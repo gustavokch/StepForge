@@ -66,4 +66,45 @@ final class EngineBridgeTests: XCTestCase {
         XCTAssertEqual(bridge.currentSyncSource, .midiClock,
                        "mock snapshot must track optimistic setSyncSource")
     }
+
+    /// Phase 1: a borrowed-handle bridge (AU mode) must NOT own the handle
+    /// lifecycle. start()/stop() arm/cancel the drain timer but skip
+    /// engine_start/engine_stop; deinit must NOT engine_free (the AU owns it).
+    /// The borrowed handle stays valid after the bridge deinits.
+    func testBorrowedBridgeDoesNotOwnLifecycle() {
+        let raw = engine_new_host_driven()
+        XCTAssertNotNil(raw, "engine_new_host_driven must return a handle")
+        defer { engine_free(raw) }   // TEST owns it; the borrowed bridge must not free it
+
+        var stolenByDeinit = false
+        do {
+            let bridge = EngineBridge(handle: raw!)
+            XCTAssertTrue(bridge.hasHandle)
+            bridge.start()                       // borrowed: arms timer, NO engine_start
+            XCTAssertNotNil(bridge.serialize(),  // borrowed handle is usable for serialize
+                            "borrowed bridge must serialize against the AU's handle")
+            bridge.stop()                        // borrowed: cancels timer, NO engine_stop
+            stolenByDeinit = false
+            _ = stolenByDeinit                   // deinit runs here — must NOT engine_free(raw)
+        }
+        // raw must still be valid after the borrowed bridge deinit'd:
+        let bridge2 = EngineBridge(handle: raw!)
+        XCTAssertNotNil(bridge2.serialize(),
+                        "borrowed deinit must not free the AU's handle")
+        bridge2.stop()
+    }
+
+    /// Regression: the standalone init() path is unchanged — makeHandle() still
+    /// returns engine_new() and the bridge owns lifecycle. (Existing
+    /// MockEngineBridge tests cover the FFI-free path; this pins the production
+    /// standalone constructor's ownership.)
+    func testStandaloneInitStillOwnsLifecycle() {
+        // The production init() must still construct a standalone engine. We
+        // can't easily assert ownsLifecycle (private), but we assert the
+        // observable contract: a standalone bridge has a handle and serializes.
+        let bridge = EngineBridge()
+        XCTAssertTrue(bridge.hasHandle, "standalone init still constructs engine_new()")
+        XCTAssertNotNil(bridge.serialize())
+        bridge.start(); bridge.stop()
+    }
 }

@@ -68,7 +68,21 @@ class EngineBridge: ObservableObject, @unchecked Sendable {
     private var drainTimer: DispatchSourceTimer?
     private var didStop = false
 
+    /// Phase 1 plugin mode: when false, the bridge borrows an externally-owned
+    /// handle (the AUAudioUnit owns the engine lifecycle) and only arms the drain
+    /// timer + submits/drains. Default `true` keeps the standalone path identical.
+    private var ownsLifecycle = true
+
     init() { handle = makeHandle() }
+
+    /// Borrow an externally-owned host-driven handle (AU mode). Designated init:
+    /// does NOT call `makeHandle()`/`engine_new()` (the AU already owns the
+    /// engine), and does NOT call `engine_start`/`stop`/`free` — the AU owns the
+    /// handle's lifecycle (Rule 5). Only the drain timer + submit/drain path run.
+    init(handle: UnsafeMutablePointer<EngineHandle>) {
+        self.handle = handle
+        self.ownsLifecycle = false
+    }
 
     /// Handle factory. The real engine calls `engine_new()`; the mock overrides to
     /// return nil so it never touches (or links) the FFI.
@@ -77,10 +91,12 @@ class EngineBridge: ObservableObject, @unchecked Sendable {
     // MARK: - Lifecycle (Hard Rule 5: stop returns before free)
 
     /// Spawn the RT/state/CoreMIDI threads (engine side) and begin draining.
+    /// In borrowed (AU) mode, skip `engine_start` — the AU already started the
+    /// host-driven state worker — but always arm the drain timer.
     func start() {
         drainQueue.sync {
             guard self.handle != nil, self.drainTimer == nil else { return; }
-            if let h = self.handle { _ = engine_start(h); }
+            if self.ownsLifecycle, let h = self.handle { _ = engine_start(h); }
             let timer = DispatchSource.makeTimerSource(queue: self.drainQueue)
             timer.schedule(deadline: .now() + .milliseconds(8), repeating: .milliseconds(8)) // ~120 Hz
             timer.setEventHandler { [weak self] in self?.drainOnce(); }
@@ -90,12 +106,12 @@ class EngineBridge: ObservableObject, @unchecked Sendable {
     }
 
     /// Cancel the drain timer and stop the engine. Must return before `engine_free`
-    /// (Hard Rule 5). `drainQueue.sync` serializes against any in-flight drain/submit.
+    /// (Hard Rule 5). In borrowed mode, only cancel the timer — the AU owns stop/free.
     func stop() {
         drainQueue.sync {
             self.drainTimer?.cancel()
             self.drainTimer = nil
-            if let h = self.handle { _ = engine_stop(h); }
+            if self.ownsLifecycle, let h = self.handle { _ = engine_stop(h); }
             self.didStop = true
         }
     }
@@ -104,9 +120,10 @@ class EngineBridge: ObservableObject, @unchecked Sendable {
         drainTimer?.cancel()
         let h = handle
         let stopped = didStop
+        let owns = ownsLifecycle
         drainQueue.sync {
-            if let h, !stopped { _ = engine_stop(h) }
-            if let h { engine_free(h) }
+            if owns, let h, !stopped { _ = engine_stop(h) }
+            if owns, let h { engine_free(h) }
         }
     }
 
