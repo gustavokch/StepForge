@@ -109,6 +109,25 @@ final class StepForgeAudioUnit: AUAudioUnit {
     /// separate files, so `fileprivate` (per the brief) blocks cross-file use.
     func bridgeForEditor() -> EngineBridge { bridge ?? EngineBridge() }
 
+    // MARK: - Host state persistence (DAW project save/restore)
+    //
+    // Both accessors share the `["session": Data]` envelope (AUState.pack /
+    // unpack). `get` reads a lock-free COW snapshot via `bridge.serialize()`
+    // (worker-free — safe even before `engine_start`); `set` submits a
+    // `LoadSession` command the state worker applies. `fullStateForDocument`
+    // is the document-save variant (used when the host saves the project
+    // file); it routes through the same envelope so both paths stay in sync.
+
+    override var fullState: [String: Any]? {
+        get { bridge?.serialize().map(AUState.pack) }
+        set { if let data = newValue.flatMap(AUState.unpack) { bridge?.load(data) } }
+    }
+
+    override var fullStateForDocument: [String: Any]? {
+        get { fullState }
+        set { fullState = newValue }
+    }
+
     /// Stereo (2-ch) dummy output. The AU emits MIDI, not audio — the audio
     /// buffer is left unwritten (returning `noErr` is silence to the host).
     override var channelCapabilities: [NSNumber] { [2, 2] }
