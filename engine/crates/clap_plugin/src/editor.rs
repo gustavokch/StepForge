@@ -53,10 +53,10 @@ fn tick(engine: &Arc<Engine>, ui_state: &Arc<RwLock<UiState>>, session: &Arc<RwL
         let mut st = ui_state.write();
         // Hot channel: small fixed-slot events (Phase 0: just PlayStateChanged).
         while let Some(slot) = engine.hot_events.dequeue() {
-            if let Ok(ev) = postcard::from_bytes::<EngineEvent>(&slot.bytes[..slot.len as usize]) {
-                if let EngineEvent::PlayStateChanged { playing } = ev {
-                    st.playing = playing;
-                }
+            if let Ok(EngineEvent::PlayStateChanged { playing }) =
+                postcard::from_bytes::<EngineEvent>(&slot.bytes[..slot.len as usize])
+            {
+                st.playing = playing;
                 // Remaining variants are ported in Phase 1.
             }
         }
@@ -64,7 +64,7 @@ fn tick(engine: &Arc<Engine>, ui_state: &Arc<RwLock<UiState>>, session: &Arc<RwL
         while engine.large_events.dequeue().is_some() {}
 
         // Throttled authoritative snapshot refresh + serialize-for-save (~1 Hz at 60 fps).
-        if frame % 60 == 0 {
+        if frame.is_multiple_of(60) {
             let snap = engine.snapshot_arc();
             st.session = Some(snap.clone());
             let env = SessionEnvelope {
