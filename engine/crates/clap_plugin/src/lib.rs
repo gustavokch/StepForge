@@ -68,25 +68,77 @@ impl Plugin for StepForge {
     fn initialize(
         &mut self,
         _layout: &AudioIOLayout,
-        _buffer_config: &BufferConfig,
+        buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
-        // Filled in Task 6.
+        self.sample_rate = buffer_config.sample_rate;
+
+        // Host-driven mode does NOT auto-spawn the state worker — do it once here.
+        let mut wh = self.worker_handle.lock();
+        if wh.is_none() {
+            let e = Arc::clone(&self.engine);
+            *wh = Some(
+                std::thread::Builder::new()
+                    .name("stepforge-worker".into())
+                    .spawn(move || e.run_worker_loop())
+                    .expect("spawn state-worker"),
+            );
+        }
+        drop(wh);
+
+        // State is deserialized into params.session BEFORE initialize; restore it.
+        let bytes = self.params.session.read().clone();
+        if !bytes.is_empty() {
+            let _ = sequencer_engine::midi_out::push_drop_oldest(
+                &self.engine.commands,
+                sequencer_engine::command::Command::LoadSession { bytes },
+            );
+        }
         true
     }
 
     fn process(
         &mut self,
-        _buffer: &mut Buffer,
+        buffer: &mut Buffer,
         _aux: &mut AuxiliaryBuffers,
-        _context: &mut impl ProcessContext<Self>,
+        context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        // Filled in Task 6.
+        let tr = context.transport();
+        let transport = transport::map_transport(
+            tr.tempo,
+            tr.playing,
+            tr.pos_beats(),
+            tr.bar_start_pos_beats(),
+            self.sample_rate,
+            buffer.samples() as u32,
+        );
+
+        // Stack-allocated, fixed-size output buffer. MidiEvent: Copy.
+        let mut midi_out: [sequencer_engine::host::MidiEvent; 1024] =
+            [sequencer_engine::host::MidiEvent::zero(); 1024];
+
+        let n = self
+            .engine
+            .render_host(&mut self.host_render_state, &transport, &[], &mut midi_out);
+
+        for ev in &midi_out[..n] {
+            if let Some(note) = midi::midi_event_to_note(ev) {
+                context.send_event(note);
+            }
+        }
+
         ProcessStatus::Normal
     }
 
     fn deactivate(&mut self) {
-        // Filled in Task 6.
+        self.engine
+            .shutdown
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Some(handle) = self.worker_handle.lock().take() {
+            let _ = handle.join();
+        }
+        // Reset render state so a possible re-initialize starts clean.
+        self.host_render_state = HostRenderState::new();
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {

@@ -11,7 +11,7 @@ path = "src/lib.rs"
 [dependencies]
 sequencer_engine = { path = "../core" }
 stepforge_editor_egui = { path = "../editor_egui" }
-nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "f36931f7af4646065488a9845d8f8c2f95252c23" }
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "f36931f7af4646065488a9845d8f8c2f95252c23", features = ["assert_process_allocs"] }
 nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git", rev = "f36931f7af4646065488a9845d8f8c2f95252c23" }
 postcard = { version = "1", features = ["alloc"] }
 parking_lot = "0.12"
