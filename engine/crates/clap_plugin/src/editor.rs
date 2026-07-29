@@ -43,12 +43,23 @@ pub fn spawn_editor(
             tick(&engine, &ui_state, &session, n);
             apply_theme(ctx);
             let st: RwLockReadGuard<'_, UiState> = ui_state.read();
-            render(ctx, &st, &EngineCommandSink { engine: engine.clone() });
+            render(
+                ctx,
+                &st,
+                &EngineCommandSink {
+                    engine: engine.clone(),
+                },
+            );
         },
     )
 }
 
-fn tick(engine: &Arc<Engine>, ui_state: &Arc<RwLock<UiState>>, session: &Arc<RwLock<Vec<u8>>>, frame: u64) {
+fn tick(
+    engine: &Arc<Engine>,
+    ui_state: &Arc<RwLock<UiState>>,
+    session: &Arc<RwLock<Vec<u8>>>,
+    frame: u64,
+) {
     {
         let mut st = ui_state.write();
         // Hot channel: small fixed-slot events (Phase 0: just PlayStateChanged).

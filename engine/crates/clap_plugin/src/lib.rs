@@ -117,9 +117,9 @@ impl Plugin for StepForge {
         let mut midi_out: [sequencer_engine::host::MidiEvent; 1024] =
             [sequencer_engine::host::MidiEvent::zero(); 1024];
 
-        let n = self
-            .engine
-            .render_host(&mut self.host_render_state, &transport, &[], &mut midi_out);
+        let n =
+            self.engine
+                .render_host(&mut self.host_render_state, &transport, &[], &mut midi_out);
 
         for ev in &midi_out[..n] {
             if let Some(note) = midi::midi_event_to_note(ev) {
