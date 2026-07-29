@@ -1,9 +1,9 @@
 //! StepForge CLAP plugin (Phase 0 skeleton).
 
+mod editor;
 mod midi;
 mod params;
 mod transport;
-// `editor` module added in Task 8.
 
 use nih_plug::prelude::*;
 use parking_lot::{Mutex, RwLock};
@@ -142,7 +142,12 @@ impl Plugin for StepForge {
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
-        None // Filled in Task 8.
+        editor::spawn_editor(
+            Arc::clone(&self.engine),
+            Arc::clone(&self.ui_state),
+            Arc::clone(&self.params.session),
+            self.params.editor_state.clone(),
+        )
     }
 }
 
