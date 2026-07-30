@@ -35,13 +35,13 @@ pub fn spawn_editor(
     create_egui_editor(
         egui_state,
         (),
-        |_ctx, _user_state: &mut ()| {
+        |ctx, _user_state: &mut ()| {
             // build closure runs once before the first frame.
+            apply_theme(ctx);
         },
         move |ctx, _setter, _user_state: &mut ()| {
             let n = frame.fetch_add(1, Ordering::Relaxed) + 1;
             tick(&engine, &ui_state, &session, n);
-            apply_theme(ctx);
             let st: RwLockReadGuard<'_, UiState> = ui_state.read();
             render(
                 ctx,
@@ -71,19 +71,36 @@ fn tick(
                 // Remaining variants are ported in Phase 1.
             }
         }
-        // Large channel: discard for Phase 0 (Serialized/FullSnapshot handled via snapshot_arc below).
-        while engine.large_events.dequeue().is_some() {}
+        // Large channel: surface engine Error events (other large variants —
+        // Serialized, FullSnapshot — are still unhandled in Phase 0).
+        while let Some(ev) = engine.large_events.dequeue() {
+            if let EngineEvent::Error { message, .. } = ev {
+                st.errors.push(message);
+                if st.errors.len() > 5 {
+                    st.errors.remove(0);
+                }
+            }
+        }
 
-        // Throttled authoritative snapshot refresh + serialize-for-save (~1 Hz at 60 fps).
+        // Throttled authoritative snapshot refresh + serialize-for-save (~1 Hz at
+        // 60 fps). Skip the (relatively expensive) clone + postcard serialize when
+        // the snapshot is unchanged: `snapshot_arc` is an ArcSwap load, stable
+        // until a worker command publishes a new COW session.
         if frame.is_multiple_of(60) {
             let snap = engine.snapshot_arc();
-            st.session = Some(snap.clone());
-            let env = SessionEnvelope {
-                version: SESSION_FORMAT_VERSION,
-                session: (*snap).clone(),
-            };
-            if let Ok(bytes) = postcard::to_allocvec(&env) {
-                *session.write() = bytes;
+            let changed = st
+                .session
+                .as_ref()
+                .is_none_or(|prev| !Arc::ptr_eq(prev, &snap));
+            if changed {
+                st.session = Some(snap.clone());
+                let env = SessionEnvelope {
+                    version: SESSION_FORMAT_VERSION,
+                    session: (*snap).clone(),
+                };
+                if let Ok(bytes) = postcard::to_allocvec(&env) {
+                    *session.write() = bytes;
+                }
             }
         }
     }

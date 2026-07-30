@@ -7,4 +7,6 @@ use std::sync::Arc;
 pub struct UiState {
     pub playing: bool,
     pub session: Option<Arc<Session>>,
+    /// Rolling last-N engine error messages (Phase 0 surfacing).
+    pub errors: Vec<String>,
 }
