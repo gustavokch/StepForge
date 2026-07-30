@@ -1,0 +1,73 @@
+# SPEC
+
+## §G GOAL
+Pure-Rust CLAP/VST3 drum-sequencer plugin. `nih_plug` drives reused `sequencer_engine` (host-driven), egui editor replaces SwiftUI — no Swift, no FFI, no `NSView`. Full UI parity w/ iOS app, shipped phased. Phase 0 (skeleton + RT loop + minimal editor) shipped PR #12; Phase 1+ = real UI.
+
+## §C CONSTRAINTS
+- macOS desktop (Phase 0 shipped PR #12; Phase 1+ continues macOS); iOS build MUST stay green ∀ task: `cargo check -p sequencer_engine --target aarch64-apple-ios` PASS.
+- `sequencer_engine` core stays `#![forbid(unsafe_code)]` & untouched — all new code lives in 3 new crates (`editor_egui`, `clap_plugin`, `xtask`).
+- Hard Rule 1 RT sacred: `process()` alloc-free, lock-free, no FFI, no `UiState`/`params.session` access. GUI thread only writes lock-free `engine.commands` & reads ArcSwap snapshot. Enable `nih_plug` `assert_process_allocs` debug.
+- Transport units quarter-notes both sides — no conversion. `pos_beats()`/`bar_start_pos_beats()` → `HostTransport` direct.
+- Pin `nih_plug` + `nih_plug_egui` + `nih_plug_xtask` to ONE shared git rev `f36931f` — never float `master`, never mismatched revs.
+- License: no `vst3-sys` (GPLv3). VST3 via clap-wrapper Phase 4. Phase 0 CLAP only.
+- MIDI config: `MIDI_INPUT = Basic`, `MIDI_OUTPUT = Basic`, `AUDIO_IO_LAYOUTS = &[]` (MIDI-only; Live dummy 2×2 audio bus deferred → Phase 4).
+- egui version align: `editor_egui` uses same egui as `nih_plug_egui` (0.31 @ pinned rev).
+- Zero automation params — driven via `Command`; `Params` carries only `#[persist]` fields.
+
+## §I INTERFACES
+- crate `editor_egui` (lib): `pub trait CommandSink { fn push(&self, cmd: Command) }`, `pub struct UiState`, `pub fn render(ctx, &UiState, &impl CommandSink)`, `pub fn transport_action(playing: bool) -> Command`, `pub fn apply_theme(&Context)`. ⊥ `nih_plug` dep, ⊥ Engine handle, ⊥ FFI — headless-testable.
+- crate `clap_plugin` (lib + cdylib, `stepforge_clap`): `pub struct StepForge` (`impl Plugin` + `impl ClapPlugin` + `nih_export_clap!(StepForge)`), `pub struct StepForgeParams`. Owns `Arc<Engine>`.
+- crate `xtask` (bin): `cargo xtask bundle stepforge_clap --release` → `.clap` under `engine/target/bundled/`.
+- plugin contract: `Engine::new_host_driven()` in `Default`; `process()` → `transport::map_transport()` → `Engine::render_host()` → `midi::midi_event_to_note()` → `context.send_event()`; play→stop edge → explicit `NoteOff` burst ∀ 16×128 (CC 123 filtered); `#[persist] session` → `Command::LoadSession` in `initialize()`; empty session → seed `demo_session()` beat (audible transport sync pre-Phase-1).
+- engine reuse API (unchanged; module-qualified — core has no root re-exports, per `lib.rs`): `engine::Engine::{new_host_driven, render_host, run_worker_loop, snapshot_arc}` + fields `commands`/`hot_events`/`large_events`/`shutdown`; `host::{HostTransport, HostRenderState, MidiEvent}`; `command::Command`; `event::EngineEvent`; `midi_out::push_drop_oldest`; `serde_ext::{SessionEnvelope, SESSION_FORMAT_VERSION}`; `models::Session`.
+- clap id: `org.stepforge.clap`; features `[NoteEffect]` (CLAP note port; `midi-effect` dropped in PR #12).
+- env: none.
+
+## §R RESEARCH
+id|topic|finding|src
+R1|NoteEvent parse|`NoteEvent::from_midi(timing, &[u8])` → `Result<NoteEvent, u8>`: NoteOn vel-0 → `NoteOff`; velocity `/127.0` ∈ [0,1]; `timing` = sample offset (clamped to buffer). CC parses to `MidiCC` (NOT `None`) — our `NoteOn`/`NoteOff` filter drops it|github.com/robbert-vdh/nih-plug `src/midi.rs`
+R2|Transport units|`pos_beats()`/`bar_start_pos_beats()` = quarter-notes (bar len = `num/den*4.0`); `tempo: Option<f64>`, `sample_rate: f32`, `playing: bool`, `time_sig_{numerator,denominator}: Option<i32>` public. Engine also quarter-notes (`0.25` beat/16th) → direct, no conversion|github.com/robbert-vdh/nih-plug `src/context/process.rs`
+R3|MIDI I/O paths|`send_event()` = host output (gated `MIDI_OUTPUT`); `next_event()` = host input (gated `MIDI_INPUT`). Both `&mut self`|github.com/robbert-vdh/nih-plug `src/context/process.rs`
+R4|state persistence|no `serialize_state()`; `#[persist = "key"]` on `PersistentField<T: Serialize+Deserialize>` → JSON string in `PluginState.fields` map; restore via `set_state` (blocks GUI, applied end of process cycle). `Arc<RwLock<Vec<u8>>>` qualifies|github.com/robbert-vdh/nih-plug `src/wrapper/state.rs`
+R5|process() sole RT mutator|`HostRenderState` as `&mut self` field safe — nih_plug guarantees `process()` sole audio-thread mutator of `&mut self`; `reset()` re-inits after `initialize()`/host reset|docs/superpowers/specs/2026-07-27-clap-egui-editor-design.md (verified via nih-plug trait docs)
+R6|egui redraw|`nih_plug_egui` `create_egui_editor` calls `request_repaint()` every frame → ~60Hz continuous redraw while editor open (accepted v1)|docs/superpowers/specs/2026-07-27-clap-egui-editor-design.md
+R7|nih_plug release|`nih_plug` `0.0.0`, maintenance mode (README "encourages iced/vizia"); pin shared git rev ≥ egui-0.31 update (2025-02-23); workspace pins `f36931f`|github.com/robbert-vdh/nih-plug + `engine/crates/clap_plugin/Cargo.toml`
+R8|audio IO|`AUDIO_IO_LAYOUTS = &[]` MIDI-only compiles + validates in Bitwig/Reaper; Ableton Live rejects MIDI-only → dummy 2×2 bus (Phase 4). `midi_inverter` eg uses `&[]`|docs/superpowers/specs/2026-07-27-clap-egui-editor-design.md
+R9|clap-validator|state/param-scan crashes are UPSTREAM nih-plug (unbounded alloc on state restore + validator div-by-zero on zero-param plugin) — NOT our defect, do not chase|PR #12 verification + nih-plug upstream
+
+R1-R4 verified direct @ master (= pinned `f36931f` core trait API); R5/R6/R8 inherited from approved design doc (author verified via zread); R9 from PR #12 verification (upstream nih-plug).
+
+## §V INVARIANTS
+V1: ∀ `process()` & `reset()` call → alloc-free, lock-free, no FFI, no `UiState`/`params.session` access. `assert_process_allocs` (debug) = enforcement gate; `reset()` runs on RT thread → ! alloc-free.
+V2: transport mapping quarter-notes both sides — `pos_beats()`/`bar_start_pos_beats()` → `HostTransport.block_start_beat`/`bar_start_beat` direct, no unit conversion.
+V3: ∀ emitted `MidiEvent` → `sample_offset ∈ [0, block_samples)`; note-off follows note-on per track; only `NoteOn`/`NoteOff` forwarded (CC dropped).
+V4: `editor_egui` ⊥ depend on `nih_plug`, ⊥ hold Engine handle, ⊥ FFI — pure UI, headless-testable.
+V5: iOS build stays green — `cargo check -p sequencer_engine --target aarch64-apple-ios` PASS ∀ task (desktop crates ⊥ contaminate iOS).
+V6: `sequencer_engine` core stays `#![forbid(unsafe_code)]` & untouched — Phase 0 adds no core code.
+V7: `nih_plug` deps share ONE git rev `f36931f` — never float `master`, never mismatched revs.
+V8: session restore: `params.session` non-empty at `initialize()` → push `Command::LoadSession { bytes }` (runs on state-worker); `SESSION_FORMAT_VERSION` embedded in envelope.
+V9: GUI→RT only writes lock-free `engine.commands` (`push_drop_oldest`); RT→GUI reads wait-free ArcSwap snapshot (`snapshot_arc`) + drains fixed-slot channels — RT thread ⊥ block on lock.
+V10: zero automation params — all interaction via `Command`; `Params` = `#[persist]` `editor_state` + `session` only.
+V11: ∀ `initialize()` → `reset()` re-inits `HostRenderState` (clear `pending` MIDI + realign `rt`/`sample_time`/`last_block_start_beat`/`was_playing`). Guards stale render state across state restore (preset/project swap). `HostRenderState::new()` ! alloc-free (fixed arrays). cites I.plugin contract.
+V12: play→stop edge → explicit `NoteOff` burst ∀ 16 channel × 128 note @ timing 0 — CC 123 all-notes-off is dropped by the `NoteOn`/`NoteOff` filter, so stuck-note prevention needs explicit offs. RT-safe (`send_event` lock-free output). cites I.plugin contract.
+V13: ∀ re-activation (deactivate→initialize same instance) ! clear `engine.shutdown` latch (in `ensure_worker`) → spawned worker drains commands. Guards dead-worker regression (PR #12).
+
+## §T TASKS
+id|status|task|cites
+T1|x|scaffold `editor_egui` + `clap_plugin` + `xtask`; pin `nih_plug` rev `f36931f`; workspace members; `.cargo/config.toml`|V5,V6,V7
+T2|x|`transport::map_transport()` pure helper + tests|V2
+T3|x|`midi::midi_event_to_note()` pure helper + tests|V3
+T4|x|`StepForgeParams` `#[persist]` `editor_state` + `session`; JSON round-trip test|V8,V10
+T5|x|`StepForge` struct + `Default` + `impl Plugin` consts + `impl ClapPlugin` + `nih_export_clap!`|I.clap_plugin,V6
+T6|~|fill `initialize()` (sample rate + spawn worker + `LoadSession` restore + demo seed), `process()` (RT loop + reused `midi_buf` + stop-edge `NoteOff` burst), `deactivate()` (teardown: join + latch shutdown + reset `HostRenderState`); enable `assert_process_allocs`. PENDING: `reset()` (re-init `HostRenderState`, alloc-free, RT-thread) — V11 gap left by PR #12|V1,V2,V3,V8,V9,V11,V12,V13
+T7|x|`editor_egui` minimal: `UiState` + `CommandSink` + `transport_action` + `render` + `apply_theme` (BPM/play) + tests|V4
+T8|x|`editor()` wiring + per-frame GUI tick (drain hot/large channels, surface `EngineEvent::Error`, throttle snapshot refresh + serialize-for-save w/ change-detect)|V4,V9
+T9|x|`cargo xtask bundle`; `clap-validator` (R9 upstream crashes noted); load in Bitwig/Reaper (transport follow, MIDI out, state round-trip, editor opens); `cargo test --workspace` + iOS guard|V1,V5
+T10|.|Phase 1 EditingView core — full `UiState.apply_hot`/`apply_large` (`SessionMirror` port), step grid, TransportBar, FeelBar, TrackManagementBar|V4
+T11|.|Phase 2 ActionDrawer + NotePickerSheet (Roll/Vary/Cut/Copy/Paste/Trash/Undo + strength; GM-drums grid + piano roll)|V4
+T12|.|Phase 3 PerformanceView + PatternOptionsSheet (3×3 pattern grid, track LEDs/mutes, quantize, follow-action)|V4
+T13|.|Phase 4 SettingsSheet + theme/typography polish + VST3 (clap-wrapper) + codesign/notarization + CI + Live dummy 2×2 audio bus|V7
+
+## §B BUGS
+id|date|cause|fix
+B1|2026-07-30|deactivate latches `shutdown=true`; re-activate spawned worker saw `while !shutdown` → dead worker, drained nothing (2nd activation silent)|V13
