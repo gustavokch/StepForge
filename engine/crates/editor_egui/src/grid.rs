@@ -24,15 +24,18 @@ use egui::{
 };
 
 use sequencer_engine::command::Command;
-use sequencer_engine::models::{Ratchet, Track, VelocityZone, STEP_COUNT};
+use sequencer_engine::models::{Ratchet, Step, Track, VelocityZone, STEP_COUNT};
 
 use crate::{CommandSink, UiState};
 
 // ---- Palette (design §Widgets) ---- dark graphite tiers, orange active, zones.
 const SURFACE_LOW: Color32 = Color32::from_rgb(0x1B, 0x1B, 0x1B); // inactive cell fill
 const SURFACE_HIGH: Color32 = Color32::from_rgb(0x35, 0x35, 0x35);
-const PRIMARY: Color32 = Color32::from_rgb(0xFF, 0x7F, 0x00); // accent zone / mute-on
-const ZONE_ACCENT: Color32 = Color32::from_rgb(0xFF, 0x7F, 0x00);
+// PRIMARY (UI accent: accent-zone stroke, mute-on fill) and ZONE_ACCENT (step
+// velocity-zone fill) share the same orange deliberately — kept as two names so
+// each call site reads by role, not by coincidental value.
+const PRIMARY: Color32 = Color32::from_rgb(0xFF, 0x7F, 0x00); // accent stroke / mute-on fill
+const ZONE_ACCENT: Color32 = Color32::from_rgb(0xFF, 0x7F, 0x00); // Accent-zone step fill
 const ZONE_MID: Color32 = Color32::from_rgb(0xFF, 0xB6, 0x88);
 const ZONE_LOW: Color32 = Color32::from_rgb(0x98, 0xCB, 0xFF);
 const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xF5, 0xF5, 0xF5);
@@ -65,6 +68,10 @@ fn cell_rects_id() -> Id {
 #[cfg(test)]
 fn ratchet_btn_rects_id() -> Id {
     Id::new("stepforge.grid.ratchet_btns")
+}
+#[cfg(test)]
+fn mute_btn_rects_id() -> Id {
+    Id::new("stepforge.grid.mute_btns")
 }
 
 /// Visible-columns zoom. `Eight` = zoomed in (doubled cell width); `Sixteen` = default.
@@ -141,7 +148,7 @@ struct VelocityZoneStep {
 }
 
 impl VelocityZoneStep {
-    fn from(step: &sequencer_engine::models::Step) -> Self {
+    fn from(step: &Step) -> Self {
         Self {
             active: step.active,
             velocity_zone: step.velocity_zone,
@@ -188,8 +195,11 @@ fn ratchet_label(r: Ratchet) -> &'static str {
 }
 
 /// GM drum name (minimal port of iOS `DrumNames`; full table is T11 NotePicker).
-fn drum_name(note: u8) -> String {
-    let name = match note {
+/// Returns a `&'static str` so the mapped path allocates nothing per frame;
+/// unmapped notes return `"Note"` and the number is shown by the `NOTE {}`
+/// label rendered beside it in the header.
+fn drum_name(note: u8) -> &'static str {
+    match note {
         35 | 36 => "Kick",
         37 => "Side Stick",
         38 | 40 => "Snare",
@@ -199,9 +209,8 @@ fn drum_name(note: u8) -> String {
         46 => "Open Hat",
         49 => "Crash",
         51 => "Ride",
-        _ => return format!("Note {}", note),
-    };
-    name.to_string()
+        _ => "Note",
+    }
 }
 
 fn apply_zoom_input(ctx: &Context) {
@@ -212,11 +221,14 @@ fn apply_zoom_input(ctx: &Context) {
     if ctx.input(|i| i.key_pressed(Key::Num2)) {
         zoom = Zoom::Sixteen;
     }
-    // scroll-wheel: up (negative y) → zoom in.
-    let sy = ctx.input(|i| i.smooth_scroll_delta.y);
-    if sy < 0.0 {
+    // Ctrl/Cmd+scroll zoom: egui routes command-modified wheel into `zoom_delta`
+    // and plain wheel into `smooth_scroll_delta` (for panning), so reading
+    // `zoom_delta` here gates zoom on the platform-command modifier for free.
+    // zoom < 1 (wheel up / pinch together) → zoom in; > 1 → zoom out.
+    let zf = ctx.input(|i| i.zoom_delta());
+    if zf < 1.0 {
         zoom = Zoom::Eight;
-    } else if sy > 0.0 {
+    } else if zf > 1.0 {
         zoom = Zoom::Sixteen;
     }
     write_grid(ctx, |g| g.zoom = zoom);
@@ -235,6 +247,8 @@ pub fn render_step_grid(ui: &mut Ui, state: &UiState, sink: &impl CommandSink) {
         d.get_temp_mut_or_default::<Vec<((usize, usize), Rect)>>(cell_rects_id())
             .clear();
         d.get_temp_mut_or_default::<Vec<(Ratchet, Rect)>>(ratchet_btn_rects_id())
+            .clear();
+        d.get_temp_mut_or_default::<Vec<(usize, Rect)>>(mute_btn_rects_id())
             .clear();
     });
 
@@ -275,8 +289,9 @@ pub fn render_step_grid(ui: &mut Ui, state: &UiState, sink: &impl CommandSink) {
     }
 
     // Ratchet popover (Alt+click target) — floats above, rendered last.
-    if let Some((t, s)) = read_grid(&ctx).ratchet_target {
-        let anchor = read_grid(&ctx).ratchet_pos.unwrap_or(Pos2::new(40.0, 40.0));
+    let g = read_grid(&ctx);
+    if let Some((t, s)) = g.ratchet_target {
+        let anchor = g.ratchet_pos.unwrap_or(Pos2::new(40.0, 40.0));
         render_ratchet_popover(&ctx, anchor, t, s, sink);
     }
 }
@@ -318,7 +333,7 @@ fn step_cell(
     ui: &mut Ui,
     track_idx: usize,
     step_idx: usize,
-    step: sequencer_engine::models::Step,
+    step: Step,
     muted: bool,
     is_within_length: bool,
     is_playing: bool,
@@ -358,7 +373,7 @@ fn step_cell(
 fn paint_cell(
     painter: &egui::Painter,
     rect: Rect,
-    step: sequencer_engine::models::Step,
+    step: Step,
     muted: bool,
     is_within_length: bool,
     is_playing: bool,
@@ -424,14 +439,16 @@ fn handle_cell_gestures(
     rect: Rect,
     track_idx: usize,
     step_idx: usize,
-    step: sequencer_engine::models::Step,
+    step: Step,
     is_within_length: bool,
     sink: &impl CommandSink,
 ) {
     let vs = VelocityZoneStep::from(&step);
 
-    // right-click → delete (design: double-tap-delete → right-click on desktop)
-    if response.secondary_clicked() {
+    // right-click → delete (design: double-tap-delete → right-click on desktop).
+    // Beyond `track.length` the step is inert — iOS disables double-tap-delete
+    // past the length window — so block the delete there.
+    if response.secondary_clicked() && is_within_length {
         sink.push(Command::DeleteStep {
             track_idx,
             step_idx,
@@ -476,10 +493,14 @@ fn handle_cell_gestures(
                     step_idx,
                     zone,
                 }),
-                ClickIntent::Delete => sink.push(Command::DeleteStep {
+                // iOS: double-tap-delete is disabled beyond the length window.
+                // Placing (Set) stays allowed past `track.length`, but the cycle's
+                // Delete state is a no-op there.
+                ClickIntent::Delete if is_within_length => sink.push(Command::DeleteStep {
                     track_idx,
                     step_idx,
                 }),
+                ClickIntent::Delete => {}
             }
         }
     }
@@ -498,7 +519,13 @@ fn header(ui: &mut Ui, track_idx: usize, track: &Track, sink: &impl CommandSink)
                 TEXT_MUTED
             }))
             .fill(if track.muted { PRIMARY } else { SURFACE_HIGH });
-            if ui.add(mute_btn).clicked() {
+            let mute_resp = ui.add(mute_btn);
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| {
+                d.get_temp_mut_or_default::<Vec<(usize, Rect)>>(mute_btn_rects_id())
+                    .push((track_idx, mute_resp.rect));
+            });
+            if mute_resp.clicked() {
                 sink.push(Command::SetTrackMuted {
                     track_idx,
                     muted: !track.muted,
@@ -531,7 +558,7 @@ fn render_ratchet_popover(
     step_idx: usize,
     sink: &impl CommandSink,
 ) {
-    egui::Area::new(Id::new("stepforge.ratchet_popover"))
+    let area_resp = egui::Area::new(Id::new("stepforge.ratchet_popover"))
         .order(egui::Order::Foreground)
         .current_pos(anchor)
         .show(ctx, |ui| {
@@ -547,10 +574,6 @@ fn render_ratchet_popover(
                         let resp = ui.add(
                             egui::Button::new(ratchet_label(r)).min_size(Vec2::new(72.0, 0.0)),
                         );
-                        #[cfg(test)]
-                        if let Some(rrect) = resp.interact_pointer_pos() {
-                            let _ = rrect;
-                        }
                         #[cfg(test)]
                         ctx.data_mut(|d| {
                             d.get_temp_mut_or_default::<Vec<(Ratchet, Rect)>>(
@@ -573,6 +596,24 @@ fn render_ratchet_popover(
                 });
             });
         });
+
+    // Dismiss the popover without committing: Esc, or a primary click anywhere
+    // outside it. `!alt` keeps the same-frame opening Alt+click from
+    // self-dismissing; Alt+clicking another cell re-targets via that cell's
+    // gesture (which runs before this popover render) instead.
+    let rect = area_resp.response.rect;
+    let dismiss = ctx.input(|i| i.key_pressed(Key::Escape))
+        || ctx.input(|i| {
+            i.pointer.primary_clicked()
+                && !i.modifiers.alt
+                && i.pointer.latest_pos().is_none_or(|p| !rect.contains(p))
+        });
+    if dismiss {
+        write_grid(ctx, |g| {
+            g.ratchet_target = None;
+            g.ratchet_pos = None;
+        });
+    }
 }
 
 #[cfg(test)]
@@ -641,7 +682,7 @@ mod tests {
         assert_eq!(drum_name(36), "Kick");
         assert_eq!(drum_name(38), "Snare");
         assert_eq!(drum_name(42), "Closed Hat");
-        assert_eq!(drum_name(12), "Note 12"); // unknown → fallback
+        assert_eq!(drum_name(12), "Note"); // unknown → static fallback (number shown by NOTE label)
     }
 
     // ---- Headless render harness (e2e wiring via real cell rects) ----
@@ -672,6 +713,28 @@ mod tests {
             p.tracks[0].steps[1] = Step {
                 active: true,
                 velocity_zone: VelocityZone::Accent,
+                ..Default::default()
+            };
+        }
+        st
+    }
+
+    fn fixture_short() -> UiState {
+        // Track 0 length = 8: cols 0..7 within length, 8..15 beyond (inert).
+        // step 12 beyond-length and pre-set to active Low — exercises the
+        // click-cycle's Delete-blocked branch past the length window.
+        use sequencer_engine::models::Session;
+        let mut st = UiState {
+            session: Some(Arc::new(Session::default())),
+            ..Default::default()
+        };
+        {
+            let s = Arc::make_mut(st.session.as_mut().unwrap());
+            let p = s.patterns[0].as_mut().unwrap();
+            p.tracks[0].length = 8;
+            p.tracks[0].steps[12] = Step {
+                active: true,
+                velocity_zone: VelocityZone::Low,
                 ..Default::default()
             };
         }
@@ -807,6 +870,37 @@ mod tests {
             });
             self.frame(r);
         }
+        /// Wheel scroll carrying `mods` on the event (egui routes command-modified
+        /// wheel into `zoom_delta`, plain wheel into `smooth_scroll_delta`).
+        fn scroll_with(&self, y: f32, mods: egui::Modifiers) {
+            let mut r = raw_input();
+            r.events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: Vec2::new(0.0, y),
+                modifiers: mods,
+            });
+            self.frame(r);
+        }
+        fn zoom(&self) -> Zoom {
+            self.ctx
+                .data(|d| d.get_temp::<GridUiState>(grid_id()).unwrap_or_default())
+                .zoom
+        }
+        fn ratchet_target(&self) -> Option<(usize, usize)> {
+            self.ctx
+                .data(|d| d.get_temp::<GridUiState>(grid_id()).unwrap_or_default())
+                .ratchet_target
+        }
+        fn mute_btn_center(&self, t: usize) -> Pos2 {
+            self.idle();
+            self.ctx
+                .data(|d| d.get_temp::<Vec<(usize, Rect)>>(mute_btn_rects_id()))
+                .unwrap_or_default()
+                .into_iter()
+                .find(|(tt, _)| *tt == t)
+                .map(|(_, r)| r.center())
+                .expect("mute button rect recorded")
+        }
         fn cmds(&self) -> Vec<Command> {
             self.sink.0.lock().unwrap().clone()
         }
@@ -900,9 +994,8 @@ mod tests {
     #[test]
     fn grid_zoom_key_doubles_cell_width() {
         let h = Harness::new(fixture());
-        let w16 = h.cell_center(0, 0); // prime default zoom = 16
-        let _ = w16;
-        // width at zoom 16
+        let _ = h.cell_center(0, 0); // prime default zoom = 16
+                                     // width at zoom 16
         let rect16 = h
             .ctx
             .data(|d| d.get_temp::<Vec<((usize, usize), Rect)>>(cell_rects_id()))
@@ -930,20 +1023,22 @@ mod tests {
     }
 
     #[test]
-    fn grid_scroll_wheel_zooms_in() {
+    fn grid_scroll_zoom_requires_command_modifier() {
         let h = Harness::new(fixture());
         h.idle();
-        let z_before = h
-            .ctx
-            .data(|d| d.get_temp::<GridUiState>(grid_id()).unwrap_or_default())
-            .zoom;
-        assert_eq!(z_before, Zoom::Sixteen);
-        h.scroll(-50.0); // wheel up → zoom in
-        let z_after = h
-            .ctx
-            .data(|d| d.get_temp::<GridUiState>(grid_id()).unwrap_or_default())
-            .zoom;
-        assert_eq!(z_after, Zoom::Eight);
+        assert_eq!(h.zoom(), Zoom::Sixteen);
+        // Ctrl/Cmd+wheel up → zoom in (egui delivers this via `zoom_delta`).
+        h.scroll_with(-50.0, egui::Modifiers::COMMAND);
+        assert_eq!(h.zoom(), Zoom::Eight);
+    }
+
+    #[test]
+    fn grid_scroll_plain_wheel_does_not_zoom() {
+        let h = Harness::new(fixture());
+        h.idle();
+        assert_eq!(h.zoom(), Zoom::Sixteen);
+        h.scroll(-50.0); // plain wheel → panning, must NOT flip zoom
+        assert_eq!(h.zoom(), Zoom::Sixteen);
     }
 
     #[test]
@@ -984,5 +1079,96 @@ mod tests {
         h.idle();
         // no commands possible with no tracks
         assert!(h.cmds().is_empty());
+    }
+
+    // ---- PR #16 review: beyond-length editability is iOS-faithful ----
+
+    #[test]
+    fn grid_right_click_beyond_length_blocked() {
+        let h = Harness::new(fixture_short()); // track 0 length = 8
+        let pos = h.cell_center(0, 12); // beyond length → inert
+        h.click_secondary(pos);
+        assert!(
+            h.cmds().is_empty(),
+            "right-click beyond length must not delete"
+        );
+    }
+
+    #[test]
+    fn grid_left_click_beyond_length_places_not_deletes() {
+        // empty beyond-length cell → placing (SetStep Mid) is allowed
+        let h = Harness::new(fixture_short());
+        let pos = h.cell_center(0, 11); // beyond length(8), empty
+        h.click_primary(pos, egui::Modifiers::default());
+        let cmds = h.cmds();
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(
+            &cmds[0],
+            Command::SetStep {
+                track_idx: 0,
+                step_idx: 11,
+                zone: VelocityZone::Mid
+            }
+        ));
+
+        // active-Low beyond-length cell → cycle's Delete state is blocked
+        let h2 = Harness::new(fixture_short());
+        let pos2 = h2.cell_center(0, 12); // beyond length(8), active Low
+        h2.click_primary(pos2, egui::Modifiers::default());
+        assert!(
+            h2.cmds().is_empty(),
+            "click-cycle to Delete beyond length must be a no-op"
+        );
+    }
+
+    // ---- PR #16 review: ratchet popover dismiss (Esc + outside click) ----
+
+    #[test]
+    fn grid_ratchet_popover_dismiss_esc() {
+        let h = Harness::new(fixture());
+        let pos = h.cell_center(0, 0);
+        h.click_primary(pos, egui::Modifiers::ALT); // open popover
+        assert_eq!(h.ratchet_target(), Some((0, 0)));
+        h.press_key(Key::Escape);
+        assert_eq!(h.ratchet_target(), None, "Esc should dismiss the popover");
+        assert!(
+            !h.cmds()
+                .iter()
+                .any(|c| matches!(c, Command::SetRatchet { .. })),
+            "dismiss must not emit SetRatchet"
+        );
+    }
+
+    #[test]
+    fn grid_ratchet_popover_dismiss_outside_click() {
+        let h = Harness::new(fixture());
+        let pos = h.cell_center(0, 0);
+        h.click_primary(pos, egui::Modifiers::ALT); // open popover
+        assert_eq!(h.ratchet_target(), Some((0, 0)));
+        // click far outside the popover and outside any cell
+        h.click_primary(Pos2::new(1300.0, 700.0), egui::Modifiers::default());
+        assert_eq!(
+            h.ratchet_target(),
+            None,
+            "outside click should dismiss the popover"
+        );
+    }
+
+    // ---- PR #16 review: header mute toggle coverage ----
+
+    #[test]
+    fn grid_header_mute_toggles() {
+        let h = Harness::new(fixture());
+        let pos = h.mute_btn_center(0); // track 0 default muted = false
+        h.click_primary(pos, egui::Modifiers::default());
+        let cmds = h.cmds();
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(
+            &cmds[0],
+            Command::SetTrackMuted {
+                track_idx: 0,
+                muted: true
+            }
+        ));
     }
 }
