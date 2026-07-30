@@ -1,5 +1,6 @@
 //! StepForge egui editor — pure UI, no nih_plug dependency.
 
+pub mod grid;
 pub mod ui_state;
 pub use ui_state::UiState;
 
@@ -27,7 +28,8 @@ pub fn apply_theme(ctx: &Context) {
     ctx.set_visuals(v);
 }
 
-/// Render the Phase 0 editor: BPM readout (from snapshot) + play/stop toggle.
+/// Render the editor: minimal transport (BPM + play/stop, formalized as
+/// `TransportBar` in T10c) + the Phase 1 §T T10b step grid.
 pub fn render(ctx: &Context, ui_state: &UiState, sink: &impl CommandSink) {
     egui::CentralPanel::default().show(ctx, |ui| {
         let bpm = ui_state.session.as_ref().map(|s| s.bpm).unwrap_or(120.0);
@@ -43,7 +45,7 @@ pub fn render(ctx: &Context, ui_state: &UiState, sink: &impl CommandSink) {
             sink.push(transport_action(ui_state.playing));
         }
 
-        // Surface the latest engine error (Phase 0: read-only).
+        // Surface the latest engine error (read-only).
         if let Some(err) = &ui_state.last_error {
             ui.separator();
             ui.label(
@@ -51,6 +53,10 @@ pub fn render(ctx: &Context, ui_state: &UiState, sink: &impl CommandSink) {
                     .color(egui::Color32::LIGHT_RED),
             );
         }
+
+        ui.separator();
+        // Phase 1 §T T10b — step grid (pinned headers + step cells + gestures).
+        grid::render_step_grid(ui, ui_state, sink);
     });
 }
 
