@@ -469,3 +469,18 @@ Each phase is independently shippable. The spec targets full parity; the plan ph
   Rust + egui path makes it materially easier later than the Swift-bundle path would.
 - **`beats_per_bar` / non-4/4** — engine assumes 4/4 today; full time-signature
   support is a future engine change (host.rs:28-32), independent of this plugin.
+- **Known upstream: nih-plug crashes on garbage CLAP state (fuzz-only).** nih-plug's
+  `ext_state_load` (`src/wrapper/clap/wrapper.rs`) reads an 8-byte LE length prefix
+  from the stream and calls `Vec::with_capacity(length as usize)` with no bound check;
+  a state blob whose prefix decodes to a huge value causes OOM → SIGABRT. Confirmed at
+  the pinned rev `f36931f` (also master's tip — upstream has not fixed it). This is in
+  the framework wrapper, before the plugin's `deserialize_fields`, so no in-plugin
+  workaround exists; it affects every nih-plug CLAP plugin. `clap-validator`'s
+  `state-invalid-random` (3×1 MB random bytes) hits it. **Real DAWs are unaffected**
+  (they send the exact bytes nih-plug wrote: valid length + valid JSON). Accepted for
+  Phase 0; track an upstream issue/PR. Mitigation if later required: vendor a fork that
+  clamps the length (`.min(MAX_STATE_SIZE)`) behind a cargo `[patch]`.
+- **Known upstream: `clap-validator param-conversions` divides by zero on zero-param
+  plugins.** StepForge deliberately exposes zero automation params (driven via
+  `Command`), so the validator's own `param-count` divisor is zero → it crashes itself
+  ("This is a bug in the validator"). Not a plugin defect.
