@@ -16,6 +16,11 @@ targets:
     platform: iOS
     sources:
       - path: StepForge
+        excludes:
+          - "AudioUnit/StepForgeAudioUnit.swift"
+          - "AudioUnit/StepForgeEditorViewController.swift"
+          - "AudioUnit/PluginEditorView.swift"
+          - "AudioUnit/Info.plist"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.stepforge.app
@@ -41,11 +46,18 @@ targets:
     platform: macOS
     sources:
       - path: StepForge
+        excludes:
+          - "AudioUnit/StepForgeAudioUnit.swift"
+          - "AudioUnit/StepForgeEditorViewController.swift"
+          - "AudioUnit/PluginEditorView.swift"
+          - "AudioUnit/Info.plist"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.stepforge.app.mac
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         GENERATE_INFOPLIST_FILE: "YES"
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
         SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/../engine/include/sequencer_engine.h"
         USER_HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../engine/include"
         HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../engine/include"
@@ -54,6 +66,80 @@ targets:
       - framework: ../engine/dist/SequencerEngine.xcframework
         embed: false
       - sdk: CoreMIDI.framework
+      - target: StepForgeAU
+    preBuildScripts:
+      - script: 'bash "$SRCROOT/../engine/scripts/build_engine.sh"'
+        name: Build Rust Engine
+        shell: /bin/sh
+  StepForgeAU:
+    type: app-extension
+    platform: macOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.stepforge.app.mac.StepForgeAU
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        GENERATE_INFOPLIST_FILE: "NO"
+        INFOPLIST_FILE: StepForge/AudioUnit/Info.plist
+        CODE_SIGN_ENTITLEMENTS: StepForge/AudioUnit/StepForgeAU.entitlements
+        ENABLE_APP_SANDBOX: "YES"
+        SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/../engine/include/sequencer_engine.h"
+        USER_HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../engine/include"
+        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../engine/include"
+        FRAMEWORK_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../engine/dist"
+        CODE_SIGNING_ALLOWED: "YES"
+        CODE_SIGNING_REQUIRED: "NO"
+    sources:
+      # Explicit AU source list: the boundary is declared here, not emergent from
+      # dir includes. A new shared file must be added to appear in the AU (a clear
+      # "missing feature" failure, not a mysterious CoreMIDI link error).
+      # AudioUnit/ — AU glue. Info.plist + StepForgeAU.entitlements stay wired via
+      # INFOPLIST_FILE / CODE_SIGN_ENTITLEMENTS (not as source entries).
+      - path: StepForge/AudioUnit/AUState.swift
+      - path: StepForge/AudioUnit/HostTransportBuilder.swift
+      - path: StepForge/AudioUnit/PluginEditorView.swift
+      - path: StepForge/AudioUnit/PluginTransportBar.swift
+      - path: StepForge/AudioUnit/StepForgeAudioUnit.swift
+      - path: StepForge/AudioUnit/StepForgeEditorViewController.swift
+      # Engine/ — command/event/codec/mirror (NOT MidiManager / EngineLifecycle).
+      - path: StepForge/Engine/Command.swift
+      - path: StepForge/Engine/EngineBridge.swift
+      - path: StepForge/Engine/EngineEvent.swift
+      - path: StepForge/Engine/Models.swift
+      - path: StepForge/Engine/Postcard/PostcardCodable.swift
+      - path: StepForge/Engine/Postcard/PostcardReader.swift
+      - path: StepForge/Engine/Postcard/PostcardWriter.swift
+      - path: StepForge/Engine/SessionMirror.swift
+      # Features/ — reused editor (NOT Settings/SettingsSheet.swift).
+      - path: StepForge/Features/AppMode.swift
+      - path: StepForge/Features/Editing/ActionDrawer.swift
+      - path: StepForge/Features/Editing/EditingView.swift
+      - path: StepForge/Features/Editing/FeelBar.swift
+      - path: StepForge/Features/Editing/GridMetrics.swift
+      - path: StepForge/Features/Editing/NotePickerSheet.swift
+      - path: StepForge/Features/Editing/StepCell.swift
+      - path: StepForge/Features/Editing/StepRow.swift
+      - path: StepForge/Features/Editing/TrackHeader.swift
+      - path: StepForge/Features/Editing/TrackList.swift
+      - path: StepForge/Features/Editing/TrackManagementBar.swift
+      - path: StepForge/Features/Editing/TransportBar.swift
+      - path: StepForge/Features/Performance/PatternOptionsSheet.swift
+      - path: StepForge/Features/Performance/PerformanceView.swift
+      # Theme / Components / Gestures.
+      - path: StepForge/Theme/Color+Kinetic.swift
+      - path: StepForge/Theme/Theme.swift
+      - path: StepForge/Theme/Typography.swift
+      - path: StepForge/Theme/ViewModifiers.swift
+      - path: StepForge/Components/Chip.swift
+      - path: StepForge/Components/Panel.swift
+      - path: StepForge/Components/SectionLabel.swift
+      - path: StepForge/Gestures/Haptics.swift
+      - path: StepForge/Gestures/PinchZoomModifier.swift
+      - path: StepForge/Gestures/StepGestureModifier.swift
+    dependencies:
+      - framework: ../engine/dist/SequencerEngine.xcframework
+        embed: false
+      - sdk: AudioToolbox.framework
+      - sdk: CoreAudioKit.framework
     preBuildScripts:
       - script: 'bash "$SRCROOT/../engine/scripts/build_engine.sh"'
         name: Build Rust Engine
@@ -63,5 +149,11 @@ targets:
     platform: iOS
     sources:
       - path: StepForgeTests
+    settings:
+      base:
+        SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/../engine/include/sequencer_engine.h"
+        USER_HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../engine/include"
+        HEADER_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../engine/include"
+        FRAMEWORK_SEARCH_PATHS: "$(inherited) $(SRCROOT)/../engine/dist"
     dependencies:
       - target: StepForge
