@@ -59,7 +59,7 @@ T2|x|`transport::map_transport()` pure helper + tests|V2
 T3|x|`midi::midi_event_to_note()` pure helper + tests|V3
 T4|x|`StepForgeParams` `#[persist]` `editor_state` + `session`; JSON round-trip test|V8,V10
 T5|x|`StepForge` struct + `Default` + `impl Plugin` consts + `impl ClapPlugin` + `nih_export_clap!`|I.clap_plugin,V6
-T6|~|fill `initialize()` (sample rate + spawn worker + `LoadSession` restore + demo seed), `process()` (RT loop + reused `midi_buf` + stop-edge `NoteOff` burst), `deactivate()` (teardown: join + latch shutdown + reset `HostRenderState`); enable `assert_process_allocs`. PENDING: `reset()` (re-init `HostRenderState`, alloc-free, RT-thread) — V11 gap left by PR #12|V1,V2,V3,V8,V9,V11,V12,V13
+T6|x|fill `initialize()` (sample rate + spawn worker + `LoadSession` restore + demo seed), `process()` (RT loop + reused `midi_buf` + stop-edge `NoteOff` burst), `deactivate()` (teardown: join + latch shutdown + reset `HostRenderState`), `reset()` (re-init `HostRenderState` + `was_playing`, alloc-free, RT-thread — closes V11 stale render state on preset/project swap); `assert_process_allocs` enabled (cargo feature)|V1,V2,V3,V8,V9,V11,V12,V13
 T7|x|`editor_egui` minimal: `UiState` + `CommandSink` + `transport_action` + `render` + `apply_theme` (BPM/play) + tests|V4
 T8|x|`editor()` wiring + per-frame GUI tick (drain hot/large channels, surface `EngineEvent::Error`, throttle snapshot refresh + serialize-for-save w/ change-detect)|V4,V9
 T9|x|`cargo xtask bundle`; `clap-validator` (R9 upstream crashes noted); load in Bitwig/Reaper (transport follow, MIDI out, state round-trip, editor opens); `cargo test --workspace` + iOS guard|V1,V5
