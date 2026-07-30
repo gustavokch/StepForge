@@ -43,13 +43,13 @@ pub fn render(ctx: &Context, ui_state: &UiState, sink: &impl CommandSink) {
             sink.push(transport_action(ui_state.playing));
         }
 
-        // Surface engine errors (rolling last-N from UiState). Phase 0: read-only.
-        if !ui_state.errors.is_empty() {
+        // Surface the latest engine error (Phase 0: read-only).
+        if let Some(err) = &ui_state.last_error {
             ui.separator();
-            ui.label(egui::RichText::new("engine errors:").color(egui::Color32::LIGHT_RED));
-            for msg in &ui_state.errors {
-                ui.label(format!("• {msg}"));
-            }
+            ui.label(
+                egui::RichText::new(format!("engine error [{}]: {}", err.code, err.message))
+                    .color(egui::Color32::LIGHT_RED),
+            );
         }
     });
 }
