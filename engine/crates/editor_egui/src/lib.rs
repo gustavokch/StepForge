@@ -1,10 +1,11 @@
 //! StepForge egui editor — pure UI, no nih_plug dependency.
 
 pub mod grid;
+pub mod transport;
 pub mod ui_state;
 pub use ui_state::UiState;
 
-use egui::Context;
+use egui::{Color32, Context};
 use sequencer_engine::command::Command;
 
 /// Sink for commands emitted by UI interactions.
@@ -28,29 +29,19 @@ pub fn apply_theme(ctx: &Context) {
     ctx.set_visuals(v);
 }
 
-/// Render the editor: minimal transport (BPM + play/stop, formalized as
-/// `TransportBar` in T10c) + the Phase 1 §T T10b step grid.
+/// Render the editor: the Phase 1 §T T10c `TransportBar` (play/stop, BPM,
+/// read-only sync badge, zoom toggle) + engine-error surface + the Phase 1
+/// §T T10b step grid.
 pub fn render(ctx: &Context, ui_state: &UiState, sink: &impl CommandSink) {
     egui::CentralPanel::default().show(ctx, |ui| {
-        let bpm = ui_state.session.as_ref().map(|s| s.bpm).unwrap_or(120.0);
-        ui.heading(format!("StepForge — {:.1} BPM", bpm));
-        if ui
-            .button(if ui_state.playing {
-                "■ Stop"
-            } else {
-                "▶ Play"
-            })
-            .clicked()
-        {
-            sink.push(transport_action(ui_state.playing));
-        }
+        transport::render_transport_bar(ui, ui_state, sink);
 
-        // Surface the latest engine error (read-only).
+        // Surface the latest engine error (read-only) — T8.
         if let Some(err) = &ui_state.last_error {
             ui.separator();
             ui.label(
                 egui::RichText::new(format!("engine error [{}]: {}", err.code, err.message))
-                    .color(egui::Color32::LIGHT_RED),
+                    .color(Color32::LIGHT_RED),
             );
         }
 

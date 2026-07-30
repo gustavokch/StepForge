@@ -29,18 +29,20 @@ use sequencer_engine::models::{Ratchet, Step, Track, VelocityZone, STEP_COUNT};
 use crate::{CommandSink, UiState};
 
 // ---- Palette (design §Widgets) ---- dark graphite tiers, orange active, zones.
-const SURFACE_LOW: Color32 = Color32::from_rgb(0x1B, 0x1B, 0x1B); // inactive cell fill
-const SURFACE_HIGH: Color32 = Color32::from_rgb(0x35, 0x35, 0x35);
+// `pub(crate)` so the TransportBar (T10c) reuses the same tokens — one palette,
+// no drift between widgets. Full palette/typography module lands in Phase 4.
+pub(crate) const SURFACE_LOW: Color32 = Color32::from_rgb(0x1B, 0x1B, 0x1B); // inactive cell fill
+pub(crate) const SURFACE_HIGH: Color32 = Color32::from_rgb(0x35, 0x35, 0x35);
 // PRIMARY (UI accent: accent-zone stroke, mute-on fill) and ZONE_ACCENT (step
 // velocity-zone fill) share the same orange deliberately — kept as two names so
 // each call site reads by role, not by coincidental value.
-const PRIMARY: Color32 = Color32::from_rgb(0xFF, 0x7F, 0x00); // accent stroke / mute-on fill
-const ZONE_ACCENT: Color32 = Color32::from_rgb(0xFF, 0x7F, 0x00); // Accent-zone step fill
-const ZONE_MID: Color32 = Color32::from_rgb(0xFF, 0xB6, 0x88);
-const ZONE_LOW: Color32 = Color32::from_rgb(0x98, 0xCB, 0xFF);
-const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xF5, 0xF5, 0xF5);
-const TEXT_MUTED: Color32 = Color32::from_rgb(0x8A, 0x8A, 0x8A);
-const BORDER_WEAK: Color32 = Color32::from_rgb(0x33, 0x33, 0x33);
+pub(crate) const PRIMARY: Color32 = Color32::from_rgb(0xFF, 0x7F, 0x00); // accent stroke / mute-on fill
+pub(crate) const ZONE_ACCENT: Color32 = Color32::from_rgb(0xFF, 0x7F, 0x00); // Accent-zone step fill
+pub(crate) const ZONE_MID: Color32 = Color32::from_rgb(0xFF, 0xB6, 0x88);
+pub(crate) const ZONE_LOW: Color32 = Color32::from_rgb(0x98, 0xCB, 0xFF);
+pub(crate) const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xF5, 0xF5, 0xF5);
+pub(crate) const TEXT_MUTED: Color32 = Color32::from_rgb(0x8A, 0x8A, 0x8A);
+pub(crate) const BORDER_WEAK: Color32 = Color32::from_rgb(0x33, 0x33, 0x33);
 
 // ---- Layout (desktop; iOS `GridMetrics` port, fixed size-classes) ----
 const HEADER_WIDTH: f32 = 120.0;
@@ -89,12 +91,6 @@ impl Zoom {
             Zoom::Sixteen => CELL_W_16,
         }
     }
-    fn toggle(self) -> Self {
-        match self {
-            Zoom::Eight => Zoom::Sixteen,
-            Zoom::Sixteen => Zoom::Eight,
-        }
-    }
 }
 
 /// Widget-local state persisted in `ctx.data` (egui `IdTypeMap` temp storage).
@@ -111,11 +107,13 @@ pub struct GridUiState {
     drag_accum_y: f32,
 }
 
-fn read_grid(ctx: &Context) -> GridUiState {
+/// `pub(crate)`: the TransportBar zoom toggle (T10c) reads/writes the SAME
+/// `grid_id()` temp slot — one zoom state shared by both widgets, no duplicate.
+pub(crate) fn read_grid(ctx: &Context) -> GridUiState {
     ctx.data(|d| d.get_temp::<GridUiState>(grid_id()).unwrap_or_default())
 }
 
-fn write_grid(ctx: &Context, f: impl FnOnce(&mut GridUiState)) {
+pub(crate) fn write_grid(ctx: &Context, f: impl FnOnce(&mut GridUiState)) {
     ctx.data_mut(|d| f(d.get_temp_mut_or_default(grid_id())));
 }
 
@@ -252,16 +250,10 @@ pub fn render_step_grid(ui: &mut Ui, state: &UiState, sink: &impl CommandSink) {
             .clear();
     });
 
-    // Toolbar: zoom toggle (also reachable via `1`/`2` keys + scroll-wheel).
-    ui.horizontal(|ui| {
-        let mut zoomed = zoom == Zoom::Eight;
-        let label = if zoomed { "zoom 8" } else { "zoom 16" };
-        ui.toggle_value(&mut zoomed, label);
-        if zoomed != (zoom == Zoom::Eight) {
-            write_grid(&ctx, |g| g.zoom = g.zoom.toggle());
-        }
-    });
-    ui.separator();
+    // The visible zoom toggle lives in the TransportBar (T10c) — it shares this
+    // widget's `grid_id()` temp slot, so the grid just reads `zoom` here. The
+    // `1`/`2` keys + scroll-wheel (see `apply_zoom_input`) still mutate the same
+    // slot from within the grid region.
 
     let tracks: &[Track] = state.tracks();
     if tracks.is_empty() {
