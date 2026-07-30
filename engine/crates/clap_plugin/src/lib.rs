@@ -97,6 +97,42 @@ mod tests {
 
         p.teardown();
     }
+
+    /// V11: `reset()` runs on the RT thread after `initialize()` / host resets
+    /// (no intervening `deactivate`), so it must clear stale render state on its
+    /// own. Dirty the fields `reset` owns first; a no-op `reset()` would leave
+    /// them dirty → fail.
+    #[allow(clippy::field_reassign_with_default)] // intentional precondition setup
+    #[test]
+    fn reset_clears_render_state() {
+        let mut p = StepForge::default();
+        // Dirty the state `reset()` owns (mimic a playhead mid-flight).
+        p.was_playing = true;
+        p.host_render_state.initialized = true;
+        p.host_render_state.sample_time = 123_456;
+        p.host_render_state.was_playing = true;
+        p.host_render_state.next_step_beat = 7.5;
+
+        p.reset();
+
+        assert!(!p.was_playing, "reset clears wrapper was_playing");
+        assert!(
+            !p.host_render_state.initialized,
+            "reset re-inits HostRenderState"
+        );
+        assert_eq!(
+            p.host_render_state.sample_time, 0,
+            "reset realigns sample_time"
+        );
+        assert!(
+            !p.host_render_state.was_playing,
+            "reset clears internal was_playing"
+        );
+        assert_eq!(
+            p.host_render_state.next_step_beat, 0.0,
+            "reset realigns next_step_beat"
+        );
+    }
 }
 
 impl StepForge {
@@ -248,6 +284,22 @@ impl Plugin for StepForge {
         // Join the worker, latch shutdown, reset per-activation state. Re-entrant
         // via `ensure_worker` on the next `initialize`.
         self.teardown();
+    }
+
+    /// nih_plug calls this on the RT thread after every `initialize()` and on
+    /// host resets — with NO intervening `deactivate`. So unlike `deactivate`,
+    /// the per-block `host_render_state` is still live (carrying a playhead from
+    /// the previous activation) when a preset/project swap re-inits an active
+    /// instance. Re-init it here so render resumes from a clean, stopped
+    /// baseline instead of a misaligned playhead + stale deferred MIDI.
+    ///
+    /// Alloc-free (fixed arrays only) — runs on the RT thread. Mirrors the
+    /// `host_render_state`/`was_playing` reset in `teardown`; both resetting is
+    /// intended and cheap. Does NOT touch the worker (spawned in `initialize`)
+    /// or the shutdown latch — RT thread can't join/spawn. (V11)
+    fn reset(&mut self) {
+        self.host_render_state = HostRenderState::new();
+        self.was_playing = false;
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
