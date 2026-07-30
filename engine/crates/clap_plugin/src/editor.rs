@@ -62,24 +62,25 @@ fn tick(
 ) {
     {
         let mut st = ui_state.write();
-        // Hot channel: small fixed-slot events (Phase 0: just PlayStateChanged).
+        // Hot channel: small fixed-slot events, postcard-decoded → apply.
+        // Playhead is coalesced via apply_playhead (last-wins per track/batch).
         while let Some(slot) = engine.hot_events.dequeue() {
-            if let Ok(EngineEvent::PlayStateChanged { playing }) =
-                postcard::from_bytes::<EngineEvent>(&slot.bytes[..slot.len as usize])
-            {
-                st.playing = playing;
-                // Remaining variants are ported in Phase 1.
-            }
-        }
-        // Large channel: surface engine Error events (other large variants —
-        // Serialized, FullSnapshot — are still unhandled in Phase 0).
-        while let Some(ev) = engine.large_events.dequeue() {
-            if let EngineEvent::Error { message, .. } = ev {
-                st.errors.push(message);
-                if st.errors.len() > 5 {
-                    st.errors.remove(0);
+            if let Ok(ev) = postcard::from_bytes::<EngineEvent>(&slot.bytes[..slot.len as usize]) {
+                if let EngineEvent::Playhead {
+                    track_idx,
+                    step_idx,
+                } = &ev
+                {
+                    st.apply_playhead(*track_idx, *step_idx);
+                } else {
+                    st.apply(&ev);
                 }
             }
+        }
+        // Large channel: already-decoded EngineEvent → apply (Error surfaces,
+        // FullSnapshot replaces session wholesale, Serialized no-op, Overflow).
+        while let Some(ev) = engine.large_events.dequeue() {
+            st.apply(&ev);
         }
 
         // Throttled authoritative snapshot refresh + serialize-for-save (~1 Hz at

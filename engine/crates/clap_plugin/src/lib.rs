@@ -97,6 +97,81 @@ mod tests {
 
         p.teardown();
     }
+
+    /// V11: `reset()` runs on the RT thread after `initialize()` / host resets
+    /// (no intervening `deactivate`), so it must clear stale render state on its
+    /// own. Dirty the fields `reset` owns first; a no-op `reset()` would leave
+    /// them dirty → fail.
+    #[allow(clippy::field_reassign_with_default)] // intentional precondition setup
+    #[test]
+    fn reset_clears_render_state() {
+        let mut p = StepForge::default();
+        // Dirty the state `reset()` owns (mimic a playhead mid-flight).
+        p.was_playing = true;
+        p.host_render_state.initialized = true;
+        p.host_render_state.sample_time = 123_456;
+        p.host_render_state.was_playing = true;
+        p.host_render_state.next_step_beat = 7.5;
+
+        p.reset();
+
+        assert!(!p.was_playing, "reset clears wrapper was_playing");
+        assert!(
+            !p.host_render_state.initialized,
+            "reset re-inits HostRenderState"
+        );
+        assert_eq!(
+            p.host_render_state.sample_time, 0,
+            "reset realigns sample_time"
+        );
+        assert!(
+            !p.host_render_state.was_playing,
+            "reset clears internal was_playing"
+        );
+        assert_eq!(
+            p.host_render_state.next_step_beat, 0.0,
+            "reset realigns next_step_beat"
+        );
+    }
+
+    /// V11 headless coverage for the no-deactivate reset path. nih_plug's
+    /// `Buffer`/`Transport` can't be constructed downstream (no public ctor /
+    /// `pub(crate)` fields), so a literal `process()` test needs a fork. Instead
+    /// drive the *same render fn* `process()` calls (`Engine::render_host`)
+    /// against the post-`reset()` state and assert it resumes from a clean
+    /// baseline — `sample_time` realigned, no stale advance carried over. The
+    /// literal initialize→reset→process DAW sequence stays the manual `T6m`
+    /// check. Fails if `reset()` is a no-op (sample_time stays at 9_999_999).
+    #[allow(clippy::field_reassign_with_default)] // intentional precondition setup
+    #[test]
+    fn reset_then_render_resumes_clean() {
+        let mut p = StepForge::default();
+        // Mimic a prior activation mid-flight: advanced sample_time + a deferred
+        // NoteOff that would surface next block if `reset()` didn't clear it.
+        p.host_render_state.sample_time = 9_999_999;
+        p.host_render_state.pending.schedule(0, 0x80, 60, 0);
+        p.was_playing = true;
+
+        p.reset(); // the no-deactivate re-init path
+
+        assert_eq!(
+            p.host_render_state.sample_time, 0,
+            "reset realigns sample_time before render"
+        );
+
+        // render_host runs clean against post-reset state; sample_time advances
+        // from 0 by exactly one block (not from the stale 9_999_999). The
+        // scheduled deferred NoteOff is gone — `reset()` renewed `pending`.
+        let t =
+            crate::transport::map_transport(Some(120.0), true, Some(0.0), Some(0.0), 48000.0, 256);
+        let _n = p
+            .engine
+            .render_host(&mut p.host_render_state, &t, &[], &mut p.midi_buf[..]);
+        assert_eq!(
+            p.host_render_state.sample_time, 256,
+            "render resumes from the clean baseline after reset"
+        );
+    }
 }
 
 impl StepForge {
@@ -132,6 +207,15 @@ impl StepForge {
         if let Some(handle) = self.worker_handle.lock().take() {
             let _ = handle.join();
         }
+        self.reset_render_state();
+    }
+
+    /// Re-init the per-block render accumulators `process()` mutates/reads.
+    /// Shared by `reset()` (RT-thread, no-deactivate re-init — V11) and
+    /// `teardown()`/`deactivate()` so the two paths provably stay in lockstep
+    /// instead of duplicating the two lines (PR #13 review). Alloc-free
+    /// (`HostRenderState::new()` = fixed arrays only).
+    fn reset_render_state(&mut self) {
         self.host_render_state = HostRenderState::new();
         self.was_playing = false;
     }
@@ -248,6 +332,30 @@ impl Plugin for StepForge {
         // Join the worker, latch shutdown, reset per-activation state. Re-entrant
         // via `ensure_worker` on the next `initialize`.
         self.teardown();
+    }
+
+    /// nih_plug calls this on the RT thread after every `initialize()` and on
+    /// host resets — with NO intervening `deactivate`. So unlike `deactivate`,
+    /// the per-block `host_render_state` is still live (carrying a playhead from
+    /// the previous activation) when a preset/project swap re-inits an active
+    /// instance. Re-init it here so render resumes from a clean, stopped
+    /// baseline instead of a misaligned playhead + stale deferred MIDI. (V11)
+    ///
+    /// Alloc-free (fixed arrays only) — runs on the RT thread. That invariant
+    /// is enforced at runtime, not just by inspection: nih_plug wraps all three
+    /// `plugin.reset()` call sites in `process_wrapper` → `assert_no_alloc` in
+    /// debug builds (the `assert_process_allocs` cargo feature), so a heap
+    /// regression in `HostRenderState::new()` panics on the audio thread. The
+    /// `reset_clears_render_state` unit test checks field-clearing only.
+    ///
+    /// Drops `pending` deferred MIDI on a mid-playback state-restore — same as
+    /// `deactivate`/`teardown`. Stuck notes are mitigated by the all-notes-off
+    /// burst in `process()` and the `start_processing` reset (wrapper). Shares
+    /// its body with `teardown()` via `reset_render_state()` so the two paths
+    /// stay in lockstep. Does NOT touch the worker or the shutdown latch — RT
+    /// thread can't join/spawn.
+    fn reset(&mut self) {
+        self.reset_render_state();
     }
 
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
