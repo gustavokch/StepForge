@@ -93,6 +93,20 @@ impl Plugin for StepForge {
                 &self.engine.commands,
                 sequencer_engine::command::Command::LoadSession { bytes },
             );
+        } else {
+            // No saved state: seed a demo beat so transport sync is audible even
+            // before the editor gains step-editing (Phase 1+). The standalone app
+            // has the user tap steps in; this plugin has no step UI yet.
+            let env = sequencer_engine::serde_ext::SessionEnvelope {
+                version: sequencer_engine::serde_ext::SESSION_FORMAT_VERSION,
+                session: demo_session(),
+            };
+            if let Ok(demo_bytes) = postcard::to_allocvec(&env) {
+                let _ = sequencer_engine::midi_out::push_drop_oldest(
+                    &self.engine.commands,
+                    sequencer_engine::command::Command::LoadSession { bytes: demo_bytes },
+                );
+            }
         }
         true
     }
@@ -160,3 +174,27 @@ impl ClapPlugin for StepForge {
 }
 
 nih_export_clap!(StepForge);
+
+/// A simple 4-on-the-floor beat so the plugin is audible out of the box (and
+/// transport sync can be validated) before the editor gains step-editing (Phase 1+).
+fn demo_session() -> sequencer_engine::models::Session {
+    use sequencer_engine::models::VelocityZone;
+    let mut s = sequencer_engine::models::Session::default();
+    // Pattern::default() track layout: 0=Kick(36), 1=Snare(38), 2=Hat(42), 3=Clap(39).
+    if let Some(pattern) = s.patterns[0].as_mut() {
+        let mut activate = |track: usize, steps: &[usize], zone: VelocityZone| {
+            if let Some(t) = pattern.tracks.get_mut(track) {
+                for &i in steps {
+                    if let Some(st) = t.steps.get_mut(i) {
+                        st.active = true;
+                        st.velocity_zone = zone;
+                    }
+                }
+            }
+        };
+        activate(0, &[0, 4, 8, 12], VelocityZone::Accent); // four-on-the-floor kick
+        activate(1, &[4, 12], VelocityZone::Accent); // backbeat snare
+        activate(2, &[0, 2, 4, 6, 8, 10, 12, 14], VelocityZone::Mid); // eighth-note hats
+    }
+    s
+}
