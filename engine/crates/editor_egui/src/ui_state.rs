@@ -224,6 +224,24 @@ impl UiState {
             .unwrap_or(&[])
     }
 
+    /// Authoritative BPM (snapshot). `120.0` before the first snapshot lands —
+    /// matches `Session::default().bpm` so the TransportBar (T10c) shows a sane
+    /// value pre-echo. Read-only (⊥ optimistic); edits become `Command::SetBpm`
+    /// and the engine echoes `BpmChanged` back through `apply`.
+    pub fn bpm(&self) -> f64 {
+        self.session.as_ref().map(|s| s.bpm).unwrap_or(120.0)
+    }
+
+    /// Authoritative sync source (snapshot). `Free` before the first snapshot.
+    /// Read-only in the plugin (host owns transport); the TransportBar (T10c)
+    /// only labels it.
+    pub fn sync_source(&self) -> SyncSource {
+        self.session
+            .as_ref()
+            .map(|s| s.sync_source)
+            .unwrap_or_default()
+    }
+
     // Nested mutation helpers — `Arc::make_mut` gives COW mutation of the shared
     // snapshot (clone only when refcount > 1, GUI-thread alloc is fine). An
     // out-of-range index from a racy/malformed event is dropped, never panics
