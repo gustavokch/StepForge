@@ -63,7 +63,6 @@ const MUTED_ALPHA: f32 = 0.4;
 fn grid_id() -> Id {
     Id::new("stepforge.grid")
 }
-#[cfg(test)]
 fn cell_rects_id() -> Id {
     Id::new("stepforge.grid.cell_rects")
 }
@@ -101,8 +100,6 @@ pub struct GridUiState {
     pub zoom: Zoom,
     /// Open ratchet popover target `(track, step)` — set by Alt+click.
     pub ratchet_target: Option<(usize, usize)>,
-    /// Screen anchor for the open popover (the Alt-clicked cell center).
-    ratchet_pos: Option<Pos2>,
     /// Accumulated vertical drag delta (y) for the current primary-button drag.
     drag_accum_y: f32,
 }
@@ -238,12 +235,21 @@ fn apply_zoom_input(ctx: &Context) {
 pub fn render_step_grid(ui: &mut Ui, state: &UiState, sink: &impl CommandSink) {
     let ctx = ui.ctx().clone();
     apply_zoom_input(&ctx);
-    let zoom = read_grid(&ctx).zoom;
+    let grid = read_grid(&ctx);
+    let zoom = grid.zoom;
+    // `popover_open` (pre-loop snapshot) drives per-cell rect recording below.
+    // It is false on the Alt+click frame itself; `just_opened` (returned by
+    // `handle_cell_gestures`) records the just-clicked cell that same frame.
+    let popover_open = grid.ratchet_target.is_some();
 
-    #[cfg(test)]
+    // The popover anchor reads the live target-cell rect each frame, so the
+    // cell-rect buffer must clear in prod (not just tests).
     ctx.data_mut(|d| {
         d.get_temp_mut_or_default::<Vec<((usize, usize), Rect)>>(cell_rects_id())
             .clear();
+    });
+    #[cfg(test)]
+    ctx.data_mut(|d| {
         d.get_temp_mut_or_default::<Vec<(Ratchet, Rect)>>(ratchet_btn_rects_id())
             .clear();
         d.get_temp_mut_or_default::<Vec<(usize, Rect)>>(mute_btn_rects_id())
@@ -273,21 +279,32 @@ pub fn render_step_grid(ui: &mut Ui, state: &UiState, sink: &impl CommandSink) {
                     ui.spacing_mut().item_spacing.y = ROW_SPACING;
                     for (t, track) in tracks.iter().enumerate() {
                         let playhead = state.playheads.get(&t).copied();
-                        row(&ctx, ui, t, track, playhead, zoom, sink);
+                        row(&ctx, ui, t, track, playhead, zoom, popover_open, sink);
                     }
                 });
             });
         });
     }
 
-    // Ratchet popover (Alt+click target) — floats above, rendered last.
+    // Ratchet popover (Alt+click target) — floats above, rendered last. The
+    // anchor is the target cell's LIVE rect (recorded this frame by `step_cell`
+    // into `cell_rects_id`), so the popover tracks the cell when the grid is
+    // scrolled horizontally. The old code snapshotted a screen `Pos2` at
+    // Alt-click that went stale on the first scroll.
     let g = read_grid(&ctx);
     if let Some((t, s)) = g.ratchet_target {
-        let anchor = g.ratchet_pos.unwrap_or(Pos2::new(40.0, 40.0));
+        let anchor = ctx
+            .data(|d| d.get_temp::<Vec<((usize, usize), Rect)>>(cell_rects_id()))
+            .unwrap_or_default()
+            .into_iter()
+            .find(|((tt, ss), _)| (*tt, *ss) == (t, s))
+            .map(|(_, r)| r.center())
+            .unwrap_or(Pos2::new(40.0, 40.0));
         render_ratchet_popover(&ctx, anchor, t, s, sink);
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn row(
     ctx: &Context,
     ui: &mut Ui,
@@ -295,6 +312,7 @@ fn row(
     track: &Track,
     playhead: Option<usize>,
     zoom: Zoom,
+    popover_open: bool,
     sink: &impl CommandSink,
 ) {
     ui.horizontal(|ui| {
@@ -313,6 +331,7 @@ fn row(
                 is_within_length,
                 is_playing,
                 zoom,
+                popover_open,
                 sink,
             );
         }
@@ -330,6 +349,7 @@ fn step_cell(
     is_within_length: bool,
     is_playing: bool,
     zoom: Zoom,
+    popover_open: bool,
     sink: &impl CommandSink,
 ) {
     let (rect, response) =
@@ -344,10 +364,13 @@ fn step_cell(
         is_playing,
     );
 
-    handle_cell_gestures(
+    // `handle_cell_gestures` may open the ratchet popover this very frame
+    // (Alt+click); `just_opened` lets us record that cell's rect on the same
+    // frame so the popover anchors correctly instead of flashing to the
+    // fallback pos for one frame.
+    let just_opened = handle_cell_gestures(
         ctx,
         &response,
-        rect,
         track_idx,
         step_idx,
         step,
@@ -355,11 +378,17 @@ fn step_cell(
         sink,
     );
 
-    #[cfg(test)]
-    ctx.data_mut(|d| {
-        d.get_temp_mut_or_default::<Vec<((usize, usize), Rect)>>(cell_rects_id())
-            .push(((track_idx, step_idx), rect));
-    });
+    // Record this cell's rect so the open popover can anchor to its live
+    // position (and follow it under horizontal scroll). `popover_open` covers
+    // the steady state (records every cell while open); `just_opened` covers
+    // the frame the popover opens; `cfg!(test)` lets the headless harness click
+    // any cell with no popover open. No recording work on the common path.
+    if cfg!(test) || popover_open || just_opened {
+        ctx.data_mut(|d| {
+            d.get_temp_mut_or_default::<Vec<((usize, usize), Rect)>>(cell_rects_id())
+                .push(((track_idx, step_idx), rect));
+        });
+    }
 }
 
 fn paint_cell(
@@ -428,14 +457,14 @@ fn paint_cell(
 fn handle_cell_gestures(
     ctx: &Context,
     response: &Response,
-    rect: Rect,
     track_idx: usize,
     step_idx: usize,
     step: Step,
     is_within_length: bool,
     sink: &impl CommandSink,
-) {
+) -> bool {
     let vs = VelocityZoneStep::from(&step);
+    let mut just_opened = false;
 
     // right-click → delete (design: double-tap-delete → right-click on desktop).
     // Beyond `track.length` the step is inert — iOS disables double-tap-delete
@@ -476,8 +505,8 @@ fn handle_cell_gestures(
         if ctx.input(|i| i.modifiers.alt) {
             write_grid(ctx, |g| {
                 g.ratchet_target = Some((track_idx, step_idx));
-                g.ratchet_pos = Some(rect.center());
             });
+            just_opened = true;
         } else {
             match click_intent(vs) {
                 ClickIntent::Set(zone) => sink.push(Command::SetStep {
@@ -496,6 +525,8 @@ fn handle_cell_gestures(
             }
         }
     }
+
+    just_opened
 }
 
 /// Pinned track header: mute toggle (→ `SetTrackMuted`) + drum name + NOTE n.
@@ -557,6 +588,9 @@ fn render_ratchet_popover(
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_min_width(88.0);
                 ui.vertical_centered(|ui| {
+                    // GUI-thread `format!`, only while this popover is open (a
+                    // rare, user-driven state) — V4 requires the RT path to be
+                    // alloc-free, not the GUI thread.
                     ui.label(
                         egui::RichText::new(format!("Ratchet · step {}", step_idx + 1))
                             .color(TEXT_PRIMARY),
@@ -581,7 +615,6 @@ fn render_ratchet_popover(
                             });
                             write_grid(ctx, |g| {
                                 g.ratchet_target = None;
-                                g.ratchet_pos = None;
                             });
                         }
                     }
@@ -603,7 +636,6 @@ fn render_ratchet_popover(
     if dismiss {
         write_grid(ctx, |g| {
             g.ratchet_target = None;
-            g.ratchet_pos = None;
         });
     }
 }
