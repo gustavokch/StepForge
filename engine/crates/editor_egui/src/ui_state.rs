@@ -201,6 +201,29 @@ impl UiState {
         self.playheads.insert(track_idx, step_idx);
     }
 
+    // ---- Immutable read accessors (port of `SessionMirror.activePattern` /
+    // `.tracks`). GUI widgets read these; they never mutate. Bounds-checked —
+    // an out-of-range `active_pattern_index` (or no session) yields empty/None,
+    // never panics (Hard Rule 3 value-layer).
+
+    /// The active pattern (`patterns[active_pattern_index]`), if present.
+    pub fn active_pattern(&self) -> Option<&Pattern> {
+        let s = self.session.as_deref()?;
+        let i = s.active_pattern_index;
+        if i < PATTERN_SLOTS {
+            s.patterns[i].as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// Tracks of the active pattern (empty slice if there is no active pattern).
+    pub fn tracks(&self) -> &[Track] {
+        self.active_pattern()
+            .map(|p| p.tracks.as_slice())
+            .unwrap_or(&[])
+    }
+
     // Nested mutation helpers — `Arc::make_mut` gives COW mutation of the shared
     // snapshot (clone only when refcount > 1, GUI-thread alloc is fine). An
     // out-of-range index from a racy/malformed event is dropped, never panics
