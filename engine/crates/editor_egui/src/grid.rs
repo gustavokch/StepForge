@@ -191,8 +191,8 @@ fn ratchet_label(r: Ratchet) -> &'static str {
 
 /// GM drum name (minimal port of iOS `DrumNames`; full table is T11 NotePicker).
 /// Returns a `&'static str` so the mapped path allocates nothing per frame;
-/// unmapped notes return `"Note"` and the number is shown by the `NOTE {}`
-/// label rendered beside it in the header.
+/// unmapped notes return `"Note"`; the raw number is shown as a hover
+/// tooltip on the header name.
 fn drum_name(note: u8) -> &'static str {
     match note {
         35 | 36 => "Kick",
@@ -529,7 +529,7 @@ fn handle_cell_gestures(
     just_opened
 }
 
-/// Pinned track header: mute toggle (→ `SetTrackMuted`) + drum name + NOTE n.
+/// Pinned track header: mute toggle (→ `SetTrackMuted`) + drum name (note number on hover).
 /// Name/note/speed/length pickers are read-only here (land in T10e/T11).
 fn header(ui: &mut Ui, track_idx: usize, track: &Track, sink: &impl CommandSink) {
     ui.allocate_ui_with_layout(
@@ -555,7 +555,7 @@ fn header(ui: &mut Ui, track_idx: usize, track: &Track, sink: &impl CommandSink)
                 });
             }
             ui.vertical(|ui| {
-                ui.label(
+                let name_resp = ui.label(
                     egui::RichText::new(drum_name(track.midi_note))
                         .color(if track.muted {
                             TEXT_MUTED
@@ -564,11 +564,13 @@ fn header(ui: &mut Ui, track_idx: usize, track: &Track, sink: &impl CommandSink)
                         })
                         .strong(),
                 );
-                ui.label(
-                    egui::RichText::new(format!("NOTE {}", track.midi_note))
-                        .color(TEXT_MUTED)
-                        .text_style(egui::TextStyle::Small),
-                );
+                // Raw MIDI note number as a hover tooltip on the name (lazy:
+                // the `format!` runs only while the pointer is over the name,
+                // not per frame). One line in the 34px header → no clip, and
+                // drops the per-frame NOTE alloc (closes N2).
+                name_resp.on_hover_ui(|ui| {
+                    ui.label(format!("NOTE {}", track.midi_note));
+                });
             });
         },
     );
@@ -706,7 +708,7 @@ mod tests {
         assert_eq!(drum_name(36), "Kick");
         assert_eq!(drum_name(38), "Snare");
         assert_eq!(drum_name(42), "Closed Hat");
-        assert_eq!(drum_name(12), "Note"); // unknown → static fallback (number shown by NOTE label)
+        assert_eq!(drum_name(12), "Note"); // unknown → static fallback (number shown on hover)
     }
 
     // ---- Headless render harness (e2e wiring via real cell rects) ----
