@@ -1059,6 +1059,29 @@ mod tests {
     }
 
     #[test]
+    fn grid_zoom_key_num2_restores_sixteen() {
+        // Keys are the primary zoom control now (scroll-wheel zoom dropped —
+        // DAWs claim Cmd+scroll; see N5). Cover the reverse direction: Num1
+        // widens to 8, Num2 narrows back to the 16-cell width.
+        let h = Harness::new(fixture());
+        let cell_w = |h: &Harness| {
+            h.idle();
+            h.ctx
+                .data(|d| d.get_temp::<Vec<((usize, usize), Rect)>>(cell_rects_id()))
+                .unwrap_or_default()
+                .into_iter()
+                .find(|((t, s), _)| *t == 0 && *s == 0)
+                .map(|(_, r)| r.width())
+                .unwrap()
+        };
+        assert!((cell_w(&h) - CELL_W_16).abs() < 0.5, "default = 16");
+        h.press_key(Key::Num1); // → Eight
+        assert!((cell_w(&h) - CELL_W_8).abs() < 0.5, "Num1 → 8 (wide)");
+        h.press_key(Key::Num2); // → Sixteen
+        assert!((cell_w(&h) - CELL_W_16).abs() < 0.5, "Num2 → 16 (narrow)");
+    }
+
+    #[test]
     fn grid_modifier_click_opens_ratchet_and_sets() {
         let h = Harness::new(fixture());
         let pos = h.cell_center(0, 0);
