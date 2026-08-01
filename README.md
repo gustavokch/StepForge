@@ -143,12 +143,27 @@ xcodebuild -project app/StepForge.xcodeproj -scheme StepForge-macOS \
   -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
 ```
 
+Build and test the CLAP plugin (run from `engine/`):
+
+```bash
+cargo test -p stepforge_editor_egui                 # editor UI tests (pure-egui, host-free)
+cargo clippy -p stepforge_editor_egui --all-targets -- -D warnings
+cargo xtask bundle -p stepforge_clap --release      # -> engine/target/bundled/stepforge_clap.clap
+```
+
+Or build + install the standalone macOS app into `~/Applications`:
+
+```bash
+./build_install_macos.sh
+```
+
 ## Tests
 
 ```bash
 cd engine
 cargo test                                            # core + FFI (incl. C-ABI garbage-bytes safety)
 cargo test -p sequencer_engine_ffi --test ffi_api     # the FFI integration test
+cargo test -p stepforge_editor_egui                   # the CLAP editor UI (pure-egui, host-free)
 cargo fmt && cargo clippy --all-targets -- -D warnings
 ```
 
