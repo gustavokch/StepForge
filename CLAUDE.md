@@ -8,7 +8,7 @@ iOS & macOS MIDI drum sequencer with a hard two-layer boundary: a **Rust musical
 
 - Source of truth: `docs/specs/ui-ux-spec.md` + `docs/specs/architecture-spec.md`; resolved contradictions + open issues in `docs/specs/amendments.md`.
 - Foundation design: `docs/superpowers/specs/2026-07-22-project-foundation-design.md`. Implementation plan: `docs/plans/2026-07-22-project-foundation.md`.
-- Status: the engine and the iOS + macOS standalone apps are built and working; the plugin edition (AUv3/VST3/CLAP) is in design.
+- Status: the engine and the iOS + macOS standalone apps are built and working. The **CLAP plugin edition** — a pure-Rust `nih-plug` + `egui` plugin that consumes `core` in-process (no Swift, no FFI seam) — is in progress in `engine/crates/{editor_egui,clap_plugin}`. AUv3/VST3 remain in design.
 
 ## Commands
 
@@ -48,9 +48,25 @@ xcodebuild -project app/StepForge.xcodeproj -scheme StepForge \
 
 The xcframework is **linked** (not embedded) into the app; `CoreMIDI.framework` is also linked. The Swift bridging header points directly at `engine/include/sequencer_engine.h`.
 
+Plugin (CLAP, Rust) — run from `engine/`:
+
+```bash
+cargo test -p stepforge_editor_egui                          # editor UI tests (pure-egui, host-free)
+cargo clippy -p stepforge_editor_egui --all-targets -- -D warnings
+cargo xtask bundle -p stepforge_clap --release               # -> engine/target/bundled/stepforge_clap.clap
+```
+
+Standalone macOS app — clean build + install into `~/Applications`, run from repo root:
+
+```bash
+./build_install_macos.sh
+```
+
 ## Architecture
 
-**Workspace split (`engine/`).** `crates/core` (`sequencer_engine`, `#![forbid(unsafe_code)]`) holds all musical-time logic, state, and models — pure Rust, host-testable, no platform I/O. `crates/ffi` (`sequencer_engine_ffi`, `#![allow(unsafe_code)]`) is the *only* crate with `unsafe`: the 8 `extern "C"` entry points + CoreMIDI bindings. The unsafe boundary is compiler-enforced, not conventional. `core/src/midi.rs` is pure dispatch math; all CoreMIDI `unsafe` lives in `ffi/src/coremidi.rs`.
+**Workspace split (`engine/`).** `crates/core` (`sequencer_engine`, `#![forbid(unsafe_code)]`) holds all musical-time logic, state, and models — pure Rust, host-testable, no platform I/O. `crates/ffi` (`sequencer_engine_ffi`, `#![allow(unsafe_code)]`) is the *only* crate with `unsafe`: the 8 `extern "C"` entry points + CoreMIDI bindings — the Swift-app surface. The unsafe boundary is compiler-enforced, not conventional. `core/src/midi.rs` is pure dispatch math; all CoreMIDI `unsafe` lives in `ffi/src/coremidi.rs`.
+
+**Two surfaces, one core.** The Swift app crosses the byte-FFI seam above (the rules below govern that path). The CLAP plugin is a *separate, pure-Rust* surface: `crates/editor_egui` (`stepforge_editor_egui`) is the testable egui editor UI (no `nih_plug` dep); `crates/clap_plugin` (`stepforge_clap`, `nih_plug` + `nih_plug_egui`) wraps it and calls `core` directly in-process — no Swift, no C ABI, no `engine_*` entry points. `crates/xtask` runs `nih_plug_xtask` to build the `.clap` bundle. RT-safety (rule 1) and `#![forbid(unsafe_code)]` (rule 6) still apply on the CLAP audio path; the Swift-ownership rules (2, 4, 5, 7) do not — there is no FFI mirror on that path.
 
 **The FFI seam is bytes, not structs.** Commands (Swift → Rust) and events (Rust → Swift) cross the C ABI as postcard-serialized bytes via `command_codec` / `event_codec`; both sides have matching encoders/decoders. No data-carrying `#[repr(C)]` enum is ever passed across. `engine_submit_command(ptr, len)` enqueues to a lock-free **MPSC** queue; `engine_drain_events` pulls. Every `extern "C"` body is wrapped in `catch_unwind` and returns a `#[repr(C)] EngineResult` (malformed bytes → `ErrDecode`, never an abort). Rust-allocated buffers are freed only by `engine_free_bytes`.
 
@@ -89,4 +105,4 @@ Project commands in `.claude/commands/` (invoke as `/<name>`):
 
 ## Where things live
 
-Specs `docs/specs/` · amendments `docs/specs/amendments.md` · design `docs/superpowers/specs/` · plans `docs/plans/` · engine `engine/crates/{core,ffi}` · app `app/StepForge/`.
+Specs `docs/specs/` · amendments `docs/specs/amendments.md` · design `docs/superpowers/specs/` · plans `docs/plans/` · SDD spec `SPEC.md` + status `.ai-state/STATUS.md` · engine `engine/crates/{core,ffi,editor_egui,clap_plugin,xtask}` · Swift app `app/StepForge/` · macOS build/install `build_install_macos.sh`.
