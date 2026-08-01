@@ -8,8 +8,9 @@
 //! back through `UiState::apply` (Hard Rule 2 split, ported from iOS).
 //!
 //! The zoom toggle shares the step-grid's `grid_id()` temp slot (T10b) — ONE zoom
-//! state, owned by the grid, toggled here. `1`/`2` keys + scroll-wheel still live
-//! in `grid::apply_zoom_input`.
+//! state, owned by the grid, toggled here. The `1`/`2` keys are handled in
+//! `grid::apply_zoom_input` (no scroll-wheel zoom — DAWs claim the gesture before
+//! the plugin sees it; see `grid.rs`).
 
 use egui::{Button, DragValue, Id, RichText, Ui};
 use sequencer_engine::command::Command;

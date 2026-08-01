@@ -13,10 +13,15 @@
 //! - vertical drag      → `SetStep Accent` (up) / `Low` (down)
 //! - Alt+click          → ratchet popover (Off/X2/X3/X4) → `SetRatchet`
 //!
-//! Zoom 8/16 via toolbar toggle, scroll-wheel, `1`/`2` keys; `zoom = 8` doubles
-//! cell width (design: cols 0..8 doubled-width). Widget-local state (zoom,
-//! active ratchet popover, in-progress drag accumulator) persists across frames
-//! in egui `ctx.data` temp storage — it is NOT engine mirror state.
+//! Zoom 8/16 via the TransportBar radios + `1`/`2` keys; `zoom = 8` doubles
+//! cell width (cols 0..8 doubled-width). No scroll-wheel zoom: DAWs claim
+//! Cmd+scroll before the plugin sees it, and egui's `zoom_delta` is the same
+//! signal it applies to global `pixels_per_point`, so a wheel-driven grid zoom
+//! is either a no-op (host ate the gesture) or a whole-editor scale — neither
+//! is the grid zoom we want. Plain wheel just pans the row scroller.
+//! Widget-local state (zoom, active ratchet popover, in-progress drag
+//! accumulator) persists across frames in egui `ctx.data` temp storage — it is
+//! NOT engine mirror state.
 
 use egui::{
     Color32, Context, CornerRadius, Id, Key, Layout, PointerButton, Pos2, Rect, Response, Sense,
@@ -63,7 +68,6 @@ const MUTED_ALPHA: f32 = 0.4;
 fn grid_id() -> Id {
     Id::new("stepforge.grid")
 }
-#[cfg(test)]
 fn cell_rects_id() -> Id {
     Id::new("stepforge.grid.cell_rects")
 }
@@ -74,6 +78,10 @@ fn ratchet_btn_rects_id() -> Id {
 #[cfg(test)]
 fn mute_btn_rects_id() -> Id {
     Id::new("stepforge.grid.mute_btns")
+}
+#[cfg(test)]
+fn popover_rect_id() -> Id {
+    Id::new("stepforge.grid.popover_rect")
 }
 
 /// Visible-columns zoom. `Eight` = zoomed in (doubled cell width); `Sixteen` = default.
@@ -101,8 +109,6 @@ pub struct GridUiState {
     pub zoom: Zoom,
     /// Open ratchet popover target `(track, step)` — set by Alt+click.
     pub ratchet_target: Option<(usize, usize)>,
-    /// Screen anchor for the open popover (the Alt-clicked cell center).
-    ratchet_pos: Option<Pos2>,
     /// Accumulated vertical drag delta (y) for the current primary-button drag.
     drag_accum_y: f32,
 }
@@ -194,8 +200,8 @@ fn ratchet_label(r: Ratchet) -> &'static str {
 
 /// GM drum name (minimal port of iOS `DrumNames`; full table is T11 NotePicker).
 /// Returns a `&'static str` so the mapped path allocates nothing per frame;
-/// unmapped notes return `"Note"` and the number is shown by the `NOTE {}`
-/// label rendered beside it in the header.
+/// unmapped notes return `"Note"`; the raw number is shown as a hover
+/// tooltip on the header name.
 fn drum_name(note: u8) -> &'static str {
     match note {
         35 | 36 => "Kick",
@@ -211,22 +217,17 @@ fn drum_name(note: u8) -> &'static str {
     }
 }
 
+/// Zoom follows only the TransportBar radios and the `1`/`2` keys. Scroll-wheel
+/// zoom was removed: DAWs claim Cmd+scroll before the plugin sees it, and egui's
+/// `zoom_delta` is the same signal it applies to global `pixels_per_point`, so a
+/// wheel-driven grid zoom is either a no-op (host ate the gesture) or a
+/// whole-editor scale — neither is the grid zoom we want. Plain wheel pans.
 fn apply_zoom_input(ctx: &Context) {
     let mut zoom = read_grid(ctx).zoom;
     if ctx.input(|i| i.key_pressed(Key::Num1)) {
         zoom = Zoom::Eight;
     }
     if ctx.input(|i| i.key_pressed(Key::Num2)) {
-        zoom = Zoom::Sixteen;
-    }
-    // Ctrl/Cmd+scroll zoom: egui routes command-modified wheel into `zoom_delta`
-    // and plain wheel into `smooth_scroll_delta` (for panning), so reading
-    // `zoom_delta` here gates zoom on the platform-command modifier for free.
-    // zoom < 1 (wheel up / pinch together) → zoom in; > 1 → zoom out.
-    let zf = ctx.input(|i| i.zoom_delta());
-    if zf < 1.0 {
-        zoom = Zoom::Eight;
-    } else if zf > 1.0 {
         zoom = Zoom::Sixteen;
     }
     write_grid(ctx, |g| g.zoom = zoom);
@@ -238,22 +239,34 @@ fn apply_zoom_input(ctx: &Context) {
 pub fn render_step_grid(ui: &mut Ui, state: &UiState, sink: &impl CommandSink) {
     let ctx = ui.ctx().clone();
     apply_zoom_input(&ctx);
-    let zoom = read_grid(&ctx).zoom;
+    let grid = read_grid(&ctx);
+    let zoom = grid.zoom;
+    // `popover_open` (pre-loop snapshot) drives per-cell rect recording below.
+    // It is false on the Alt+click frame itself; `just_opened` (returned by
+    // `handle_cell_gestures`) records the just-clicked cell that same frame.
+    let popover_open = grid.ratchet_target.is_some();
 
-    #[cfg(test)]
+    // The popover anchor reads the live target-cell rect each frame, so the
+    // cell-rect buffer must clear in prod (not just tests).
     ctx.data_mut(|d| {
         d.get_temp_mut_or_default::<Vec<((usize, usize), Rect)>>(cell_rects_id())
             .clear();
+    });
+    #[cfg(test)]
+    ctx.data_mut(|d| {
         d.get_temp_mut_or_default::<Vec<(Ratchet, Rect)>>(ratchet_btn_rects_id())
             .clear();
         d.get_temp_mut_or_default::<Vec<(usize, Rect)>>(mute_btn_rects_id())
             .clear();
+        // Reset the popover-rect probe so a closed popover doesn't keep a stale
+        // rect from the last frame it was open.
+        *d.get_temp_mut_or_default::<Option<Rect>>(popover_rect_id()) = None;
     });
 
     // The visible zoom toggle lives in the TransportBar (T10c) — it shares this
     // widget's `grid_id()` temp slot, so the grid just reads `zoom` here. The
-    // `1`/`2` keys + scroll-wheel (see `apply_zoom_input`) still mutate the same
-    // slot from within the grid region.
+    // `1`/`2` keys (see `apply_zoom_input`) still mutate the same slot from
+    // within the grid region.
 
     let tracks: &[Track] = state.tracks();
     if tracks.is_empty() {
@@ -273,21 +286,38 @@ pub fn render_step_grid(ui: &mut Ui, state: &UiState, sink: &impl CommandSink) {
                     ui.spacing_mut().item_spacing.y = ROW_SPACING;
                     for (t, track) in tracks.iter().enumerate() {
                         let playhead = state.playheads.get(&t).copied();
-                        row(&ctx, ui, t, track, playhead, zoom, sink);
+                        row(&ctx, ui, t, track, playhead, zoom, popover_open, sink);
                     }
                 });
             });
         });
     }
 
-    // Ratchet popover (Alt+click target) — floats above, rendered last.
+    // Ratchet popover (Alt+click target) — floats above, rendered last. The
+    // anchor is the target cell's LIVE rect (recorded this frame by `step_cell`
+    // into `cell_rects_id`), so the popover tracks the cell when the grid is
+    // scrolled horizontally. The old code snapshotted a screen `Pos2` at
+    // Alt-click that went stale on the first scroll.
     let g = read_grid(&ctx);
     if let Some((t, s)) = g.ratchet_target {
-        let anchor = g.ratchet_pos.unwrap_or(Pos2::new(40.0, 40.0));
+        let anchor = ctx
+            .data(|d| d.get_temp::<Vec<((usize, usize), Rect)>>(cell_rects_id()))
+            .unwrap_or_default()
+            .into_iter()
+            .find(|((tt, ss), _)| (*tt, *ss) == (t, s))
+            .map(|(_, r)| r.center())
+            // Load-bearing assumption: egui's `ScrollArea` is NON-virtualizing
+            // — it lays out all 16 cells every frame, so the target cell's rect
+            // is always present in `cell_rects` and this lookup never misses.
+            // If scrolling is ever virtualized (off-screen cells skipped), this
+            // falls silently to the `(40, 40)` fallback and the popover detaches
+            // from the cell under scroll.
+            .unwrap_or(Pos2::new(40.0, 40.0));
         render_ratchet_popover(&ctx, anchor, t, s, sink);
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn row(
     ctx: &Context,
     ui: &mut Ui,
@@ -295,6 +325,7 @@ fn row(
     track: &Track,
     playhead: Option<usize>,
     zoom: Zoom,
+    popover_open: bool,
     sink: &impl CommandSink,
 ) {
     ui.horizontal(|ui| {
@@ -313,6 +344,7 @@ fn row(
                 is_within_length,
                 is_playing,
                 zoom,
+                popover_open,
                 sink,
             );
         }
@@ -330,6 +362,7 @@ fn step_cell(
     is_within_length: bool,
     is_playing: bool,
     zoom: Zoom,
+    popover_open: bool,
     sink: &impl CommandSink,
 ) {
     let (rect, response) =
@@ -344,10 +377,13 @@ fn step_cell(
         is_playing,
     );
 
-    handle_cell_gestures(
+    // `handle_cell_gestures` may open the ratchet popover this very frame
+    // (Alt+click); `just_opened` lets us record that cell's rect on the same
+    // frame so the popover anchors correctly instead of flashing to the
+    // fallback pos for one frame.
+    let just_opened = handle_cell_gestures(
         ctx,
         &response,
-        rect,
         track_idx,
         step_idx,
         step,
@@ -355,11 +391,17 @@ fn step_cell(
         sink,
     );
 
-    #[cfg(test)]
-    ctx.data_mut(|d| {
-        d.get_temp_mut_or_default::<Vec<((usize, usize), Rect)>>(cell_rects_id())
-            .push(((track_idx, step_idx), rect));
-    });
+    // Record this cell's rect so the open popover can anchor to its live
+    // position (and follow it under horizontal scroll). `popover_open` covers
+    // the steady state (records every cell while open); `just_opened` covers
+    // the frame the popover opens; `cfg!(test)` lets the headless harness click
+    // any cell with no popover open. No recording work on the common path.
+    if cfg!(test) || popover_open || just_opened {
+        ctx.data_mut(|d| {
+            d.get_temp_mut_or_default::<Vec<((usize, usize), Rect)>>(cell_rects_id())
+                .push(((track_idx, step_idx), rect));
+        });
+    }
 }
 
 fn paint_cell(
@@ -428,14 +470,14 @@ fn paint_cell(
 fn handle_cell_gestures(
     ctx: &Context,
     response: &Response,
-    rect: Rect,
     track_idx: usize,
     step_idx: usize,
     step: Step,
     is_within_length: bool,
     sink: &impl CommandSink,
-) {
+) -> bool {
     let vs = VelocityZoneStep::from(&step);
+    let mut just_opened = false;
 
     // right-click → delete (design: double-tap-delete → right-click on desktop).
     // Beyond `track.length` the step is inert — iOS disables double-tap-delete
@@ -476,8 +518,8 @@ fn handle_cell_gestures(
         if ctx.input(|i| i.modifiers.alt) {
             write_grid(ctx, |g| {
                 g.ratchet_target = Some((track_idx, step_idx));
-                g.ratchet_pos = Some(rect.center());
             });
+            just_opened = true;
         } else {
             match click_intent(vs) {
                 ClickIntent::Set(zone) => sink.push(Command::SetStep {
@@ -496,9 +538,11 @@ fn handle_cell_gestures(
             }
         }
     }
+
+    just_opened
 }
 
-/// Pinned track header: mute toggle (→ `SetTrackMuted`) + drum name + NOTE n.
+/// Pinned track header: mute toggle (→ `SetTrackMuted`) + drum name (note number on hover).
 /// Name/note/speed/length pickers are read-only here (land in T10e/T11).
 fn header(ui: &mut Ui, track_idx: usize, track: &Track, sink: &impl CommandSink) {
     ui.allocate_ui_with_layout(
@@ -524,7 +568,7 @@ fn header(ui: &mut Ui, track_idx: usize, track: &Track, sink: &impl CommandSink)
                 });
             }
             ui.vertical(|ui| {
-                ui.label(
+                let name_resp = ui.label(
                     egui::RichText::new(drum_name(track.midi_note))
                         .color(if track.muted {
                             TEXT_MUTED
@@ -533,11 +577,11 @@ fn header(ui: &mut Ui, track_idx: usize, track: &Track, sink: &impl CommandSink)
                         })
                         .strong(),
                 );
-                ui.label(
-                    egui::RichText::new(format!("NOTE {}", track.midi_note))
-                        .color(TEXT_MUTED)
-                        .text_style(egui::TextStyle::Small),
-                );
+                // Raw MIDI note number as a hover tooltip on the name (lazy:
+                // the `format!` runs only while the pointer is over the name,
+                // not per frame). One line in the 34px header → no clip, and
+                // drops the per-frame NOTE alloc (closes N2).
+                name_resp.on_hover_text(format!("NOTE {}", track.midi_note));
             });
         },
     );
@@ -557,6 +601,9 @@ fn render_ratchet_popover(
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_min_width(88.0);
                 ui.vertical_centered(|ui| {
+                    // GUI-thread `format!`, only while this popover is open (a
+                    // rare, user-driven state) — V4 requires the RT path to be
+                    // alloc-free, not the GUI thread.
                     ui.label(
                         egui::RichText::new(format!("Ratchet · step {}", step_idx + 1))
                             .color(TEXT_PRIMARY),
@@ -581,7 +628,6 @@ fn render_ratchet_popover(
                             });
                             write_grid(ctx, |g| {
                                 g.ratchet_target = None;
-                                g.ratchet_pos = None;
                             });
                         }
                     }
@@ -594,6 +640,12 @@ fn render_ratchet_popover(
     // self-dismissing; Alt+clicking another cell re-targets via that cell's
     // gesture (which runs before this popover render) instead.
     let rect = area_resp.response.rect;
+    // Test-only probe: expose the popover's screen rect so the headless harness
+    // can assert the anchor tracks the target cell (N3 regression guard).
+    #[cfg(test)]
+    ctx.data_mut(|d| {
+        *d.get_temp_mut_or_default::<Option<Rect>>(popover_rect_id()) = Some(rect);
+    });
     let dismiss = ctx.input(|i| i.key_pressed(Key::Escape))
         || ctx.input(|i| {
             i.pointer.primary_clicked()
@@ -603,7 +655,6 @@ fn render_ratchet_popover(
     if dismiss {
         write_grid(ctx, |g| {
             g.ratchet_target = None;
-            g.ratchet_pos = None;
         });
     }
 }
@@ -674,7 +725,7 @@ mod tests {
         assert_eq!(drum_name(36), "Kick");
         assert_eq!(drum_name(38), "Snare");
         assert_eq!(drum_name(42), "Closed Hat");
-        assert_eq!(drum_name(12), "Note"); // unknown → static fallback (number shown by NOTE label)
+        assert_eq!(drum_name(12), "Note"); // unknown → static fallback (number shown on hover)
     }
 
     // ---- Headless render harness (e2e wiring via real cell rects) ----
@@ -778,6 +829,24 @@ mod tests {
                 .map(|(_, r)| r.center())
                 .expect("cell rect recorded")
         }
+        /// Cell center from the LAST rendered frame's recorded rect — no re-idle,
+        /// so a test can read the popover rect and the cell rect from the same
+        /// frame for a same-frame delta comparison.
+        fn cell_center_now(&self, t: usize, s: usize) -> Option<Pos2> {
+            self.ctx
+                .data(|d| d.get_temp::<Vec<((usize, usize), Rect)>>(cell_rects_id()))
+                .unwrap_or_default()
+                .into_iter()
+                .find(|((tt, ss), _)| *tt == t && *ss == s)
+                .map(|(_, r)| r.center())
+        }
+        /// Ratchet popover `Area` rect from the last rendered frame (test-only
+        /// probe stashed in `render_ratchet_popover`).
+        fn popover_rect(&self) -> Option<Rect> {
+            self.ctx
+                .data(|d| d.get_temp::<Option<Rect>>(popover_rect_id()))
+                .unwrap_or_default()
+        }
         fn ratchet_btn_center(&self, want: Ratchet) -> Pos2 {
             self.ctx
                 .data(|d| d.get_temp::<Vec<(Ratchet, Rect)>>(ratchet_btn_rects_id()))
@@ -852,31 +921,6 @@ mod tests {
                 modifiers: Default::default(),
             });
             self.frame(r);
-        }
-        fn scroll(&self, y: f32) {
-            let mut r = raw_input();
-            r.events.push(egui::Event::MouseWheel {
-                unit: egui::MouseWheelUnit::Point,
-                delta: Vec2::new(0.0, y),
-                modifiers: Default::default(),
-            });
-            self.frame(r);
-        }
-        /// Wheel scroll carrying `mods` on the event (egui routes command-modified
-        /// wheel into `zoom_delta`, plain wheel into `smooth_scroll_delta`).
-        fn scroll_with(&self, y: f32, mods: egui::Modifiers) {
-            let mut r = raw_input();
-            r.events.push(egui::Event::MouseWheel {
-                unit: egui::MouseWheelUnit::Point,
-                delta: Vec2::new(0.0, y),
-                modifiers: mods,
-            });
-            self.frame(r);
-        }
-        fn zoom(&self) -> Zoom {
-            self.ctx
-                .data(|d| d.get_temp::<GridUiState>(grid_id()).unwrap_or_default())
-                .zoom
         }
         fn ratchet_target(&self) -> Option<(usize, usize)> {
             self.ctx
@@ -1015,25 +1059,6 @@ mod tests {
     }
 
     #[test]
-    fn grid_scroll_zoom_requires_command_modifier() {
-        let h = Harness::new(fixture());
-        h.idle();
-        assert_eq!(h.zoom(), Zoom::Sixteen);
-        // Ctrl/Cmd+wheel up → zoom in (egui delivers this via `zoom_delta`).
-        h.scroll_with(-50.0, egui::Modifiers::COMMAND);
-        assert_eq!(h.zoom(), Zoom::Eight);
-    }
-
-    #[test]
-    fn grid_scroll_plain_wheel_does_not_zoom() {
-        let h = Harness::new(fixture());
-        h.idle();
-        assert_eq!(h.zoom(), Zoom::Sixteen);
-        h.scroll(-50.0); // plain wheel → panning, must NOT flip zoom
-        assert_eq!(h.zoom(), Zoom::Sixteen);
-    }
-
-    #[test]
     fn grid_modifier_click_opens_ratchet_and_sets() {
         let h = Harness::new(fixture());
         let pos = h.cell_center(0, 0);
@@ -1143,6 +1168,61 @@ mod tests {
             h.ratchet_target(),
             None,
             "outside click should dismiss the popover"
+        );
+    }
+
+    // ---- PR #18 review: popover anchor tracks the live cell rect (N3) ----
+
+    #[test]
+    fn grid_ratchet_popover_anchor_tracks_cell() {
+        // N3 regression: the popover anchor must derive from the target cell's
+        // LIVE rect each frame (recorded into `cell_rects`), so it follows the
+        // cell when layout shifts. A zoom change (Num1) widens every cell and
+        // pushes cell 8 to the right; the popover must move with it. The pre-N3
+        // code snapshotted a screen `Pos2` at Alt-click, which would NOT track —
+        // popover delta would diverge from cell delta.
+        //
+        // Zoom stands in for horizontal scroll here: both shift the cell's
+        // screen rect and both rely on the same live-rect re-derivation. The
+        // headless harness viewport (1400px) fits all 16 cells, so plain
+        // horizontal scroll has no range; zoom exercises the invariant without
+        // viewport surgery.
+        let h = Harness::new(fixture());
+        let pos = h.cell_center(0, 8); // open the popover on cell (0, 8)
+        h.click_primary(pos, egui::Modifiers::ALT);
+
+        // The release frame recorded the popover rect and the cell rects together.
+        let pop_before = h
+            .popover_rect()
+            .expect("popover rendered on open")
+            .center()
+            .x;
+        let cell_before = h.cell_center_now(0, 8).expect("cell rect recorded").x;
+
+        h.press_key(Key::Num1); // zoom in -> cells widen -> cell 8 shifts right
+
+        let pop_after = h
+            .popover_rect()
+            .expect("popover still rendered")
+            .center()
+            .x;
+        let cell_after = h.cell_center_now(0, 8).expect("cell rect recorded").x;
+
+        assert!(
+            pop_after > pop_before + 50.0,
+            "popover should shift right with the wider cells: {} -> {}",
+            pop_before,
+            pop_after
+        );
+        // The popover is positioned at the cell's center each frame, so its
+        // horizontal delta must equal the cell's — a stale snapshot would not.
+        let pop_delta = pop_after - pop_before;
+        let cell_delta = cell_after - cell_before;
+        assert!(
+            (pop_delta - cell_delta).abs() < 1.0,
+            "popover must track the cell: pop_delta={}, cell_delta={}",
+            pop_delta,
+            cell_delta
         );
     }
 
