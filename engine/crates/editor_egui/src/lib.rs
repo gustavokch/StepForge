@@ -2,6 +2,7 @@
 
 pub mod feel;
 pub mod grid;
+pub mod track_management;
 pub mod transport;
 pub mod ui_state;
 pub use ui_state::UiState;
@@ -32,7 +33,8 @@ pub fn apply_theme(ctx: &Context) {
 
 /// Render the editor: the Phase 1 §T T10c `TransportBar` (play/stop, BPM,
 /// read-only sync badge, zoom toggle), the Phase 1 §T T10d `FeelBar` (swing,
-/// humanize, quantize grain, pattern switcher — Row 2), the engine-error
+/// humanize, quantize grain, pattern switcher — Row 2), the Phase 1 §T T10e
+/// `TrackManagementBar` (track count + add/remove — Row 3), the engine-error
 /// surface, and the Phase 1 §T T10b step grid.
 pub fn render(ctx: &Context, ui_state: &UiState, sink: &impl CommandSink) {
     egui::CentralPanel::default().show(ctx, |ui| {
@@ -41,6 +43,10 @@ pub fn render(ctx: &Context, ui_state: &UiState, sink: &impl CommandSink) {
         ui.separator();
         // Phase 1 §T T10d — FeelBar (Row 2): swing / humanize / grain / patterns.
         feel::render_feel_bar(ui, ui_state, sink);
+
+        ui.separator();
+        // Phase 1 §T T10e — TrackManagementBar (Row 3): track count + add/remove.
+        track_management::render_track_management_bar(ui, ui_state, sink);
 
         // Surface the latest engine error (read-only) — T8.
         if let Some(err) = &ui_state.last_error {

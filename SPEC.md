@@ -69,7 +69,7 @@ T10a|x|expand UiState (port SessionMirror fields: HashMap playheads, HashSet und
 T10b|x|step-grid widget (EditingView TrackList port): pinned track-header col + horizontal step cells, Zoom enum 8/16, StepCell painter (velocity-zone fill, length-window alpha dim cols≥track.length, 2px playhead bar @ playheads[t], ratchet X2/X3/X4), gestures → Command::SetStep/DeleteStep/SetRatchet (tap set Mid / filled cycle Mid→Accent→Low→off / right-click delete / vertical-drag zone). headless gesture tests. Roll/Vary/Cut/Copy/Paste/Trash/Undo = T11 Phase 2|V4
 T10c|x|TransportBar: play/stop (transport_action→Command::Play/Stop, reflect UiState.playing actual NOT optimistic), BPM (snapshot read + edit→Command::SetBpm), sync badge read-only (host=transport), zoom toggle|V4
 T10d|x|FeelBar: swing slider→Command::SetGlobalSwing, humanize→Command::SetHumanize, quantize-grain selector→Command::SetQuantizeGrain, pattern switcher→Command::QueuePattern|V4
-T10e|.|TrackManagementBar: add→Command::AddTrack, remove→Command::RemoveTrack|V4
+T10e|x|TrackManagementBar: add→Command::AddTrack, remove→Command::RemoveTrack|V4
 T10f|.|Phase 1 close: cargo xtask bundle stepforge_clap --release → .clap; Bitwig/Reaper (step-grid edits audible, transport follows, widgets responsive); cargo test -p stepforge_editor_egui + stepforge_clap + workspace; iOS guard cargo check -p sequencer_engine --target aarch64-apple-ios (rustup PATH); flip T10 .→x|V1,V5,V7
 T11|.|Phase 2 ActionDrawer + NotePickerSheet (Roll/Vary/Cut/Copy/Paste/Trash/Undo + strength; GM-drums grid + piano roll)|V4
 T12|.|Phase 3 PerformanceView + PatternOptionsSheet (3×3 pattern grid, track LEDs/mutes, quantize, follow-action)|V4
