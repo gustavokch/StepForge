@@ -95,18 +95,21 @@ build_install_macos.sh # clean build + install the macOS app into ~/Applications
 
 - iOS + macOS standalone apps (shared SwiftUI + `EngineBridge` tree).
 - Full musical-time core with property-tested step algorithms and versioned persistence.
+- **Host-driven rendering** — `engine_render` advances the engine one host audio block on
+  the RT thread (C-ABI export + `HostRenderState` live in `engine/include/sequencer_engine.h`).
+- **AUv3** (macOS) — `StepForgeAU` app-extension, host-driven MIDI effect.
+- **CLAP** (macOS) — pure-Rust `nih-plug` + `egui` plugin; editing view + transport ported.
 - MIDI Clock sync (iOS + macOS) and Ableton Link (macOS).
 
 **In progress / designed**
 
-- **Host-driven rendering.** `Engine::render_host` and the `HostRenderState` types have
-  landed in the core; the C-ABI `engine_render` export and host drivers are pending.
-- **Plugin edition — AUv3 + VST3 + CLAP** (macOS-only, host-driven MIDI effect). Designed,
-  Phase 0 in progress; **not yet shipped.**
+- **VST3 edition** (macOS) — designed, not yet shipped.
+- **CLAP feature parity** with the Swift app — editor surface is landing incrementally.
 
 **Known limits**
 
 - Ableton Link is dormant on iOS.
+- AUv3 is macOS-only (the iOS app target excludes `AudioUnit/`).
 - No CI and no signed release builds.
 
 ## Getting started
