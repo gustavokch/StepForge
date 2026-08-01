@@ -114,12 +114,22 @@ build_install_macos.sh # clean build + install the macOS app into ~/Applications
 
 ## Getting started
 
-One-time setup (requires a rustup-managed toolchain — Homebrew rust cannot cross-compile to
-iOS — plus Xcode and the Command Line Tools):
+StepForge ships as two independent surfaces that build separately. Pick one:
+
+- **Swift app + AUv3 (iOS & macOS)** — SwiftUI/Rust standalone apps plus the
+  AUv3 host-driven MIDI effect. Needs Xcode + XcodeGen + a rustup toolchain with
+  iOS targets. See [Swift app + AUv3](#swift-app--auv3-ios--macos) below.
+- **CLAP plugin (macOS)** — pure-Rust `nih-plug` + `egui`, no Swift, no C ABI.
+  Needs only a rustup toolchain. See [CLAP plugin](#clap-plugin-macos) below.
+
+### Swift app + AUv3 (iOS + macOS)
+
+One-time setup (rustup-managed toolchain required — Homebrew rust can't
+cross-compile to iOS — plus Xcode + Command Line Tools):
 
 ```bash
 brew install xcodegen                 # generates the Xcode project from app/project.yml
-engine/scripts/setup.sh               # rustup stable + iOS targets + cbindgen
+engine/scripts/setup.sh               # rustup stable + iOS/macOS targets + cbindgen
 ```
 
 Build the engine (the app's prebuild script runs this too):
@@ -129,7 +139,7 @@ engine/scripts/build_engine.sh        # -> engine/dist/SequencerEngine.xcframewo
                                       #    engine/include/sequencer_engine.h
 ```
 
-Generate the (gitignored) Xcode project and build either target:
+Generate the (gitignored) Xcode project and build a target:
 
 ```bash
 cd app && xcodegen generate           # -> app/StepForge.xcodeproj
@@ -143,19 +153,44 @@ xcodebuild -project app/StepForge.xcodeproj -scheme StepForge-macOS \
   -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
 ```
 
-Build and test the CLAP plugin (run from `engine/`):
+Install the standalone macOS app into `~/Applications` (clean build + ad-hoc sign
++ quarantine strip):
 
 ```bash
+./build_install_macos.sh              # SKIP_RUST_CLEAN=1 keeps engine/target for fast Swift-only cycles
+```
+
+> **AUv3:** `StepForgeAU` is an app-extension built automatically inside the
+> macOS target — no separate build or install command. The host registers it
+> when the macOS app launches. AUv3 is macOS-only (the iOS target excludes
+> `AudioUnit/`).
+
+### CLAP plugin (macOS)
+
+Pure Rust — no Xcode, xcodegen, cbindgen, or iOS targets. One-time setup is just
+the rustup toolchain + macOS targets:
+
+```bash
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+```
+
+Build and test the editor UI, then bundle the plugin:
+
+```bash
+cd engine
 cargo test -p stepforge_editor_egui                 # editor UI tests (pure-egui, host-free)
 cargo clippy -p stepforge_editor_egui --all-targets -- -D warnings
 cargo xtask bundle -p stepforge_clap --release      # -> engine/target/bundled/stepforge_clap.clap
 ```
 
-Or build + install the standalone macOS app into `~/Applications`:
+Install it into `~/Library/Audio/Plug-Ins/CLAP/` (bundles, copies, strips
+quarantine):
 
 ```bash
-./build_install_macos.sh
+engine/scripts/install_clap.sh        # -> ~/Library/Audio/Plug-Ins/CLAP/stepforge_clap.clap
 ```
+
+Restart or rescan your host to load it.
 
 ## Tests
 
