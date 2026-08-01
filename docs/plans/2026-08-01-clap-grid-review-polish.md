@@ -1,8 +1,8 @@
-# CLAP Grid Review Polish — PR #16 re-review nits (N1–N4)
+# CLAP Grid Review Polish — PR #16 re-review nits (N1–N4) + N5 scroll-zoom drop
 
 - **Date:** 2026-08-01
 - **Branch:** `fix/clap-grid-review-polish` (off `main`, after #16 + #15 merged)
-- **Status:** **EXECUTED** — all four nits addressed; verified independently.
+- **Status:** **EXECUTED** — all four nits + N5 (scroll-zoom drop) addressed; verified independently.
 
 ## Context
 
@@ -67,6 +67,36 @@ and the per-frame NOTE alloc is gone (closes N2). `drum_name` stays a zero-alloc
 Applied unconditionally (not verify-first): strictly an improvement, the note stays reachable on
 hover. In-host eyeball still welcome.
 
+### N5 — scroll-wheel zoom is non-functional in a real DAW → **FIXED** (drop scroll-zoom)
+
+Follow-up to **F2** (the original PR #16 review's scroll-zoom finding), surfaced by in-DAW testing
+rather than the re-review. F2 was addressed in `cd6f73e` by reading `i.zoom_delta()`; the headless
+test `grid_scroll_zoom_requires_command_modifier` passed. A real-DAW test (2026-08-01) proved it
+broken: **Cmd+scroll never flipped the grid 8↔16** — 16 cells in both states, just physically
+scaled, then overflowing the canvas.
+
+Root cause: `zoom_delta()` returns `zoom_factor_delta` (`input_state/mod.rs:345`, fed by
+command-modified `MouseWheel`), which is the *same* signal egui applies to global
+`pixels_per_point`. In-host the grid never flipped ⇒ egui received no zoom event
+(`zoom_delta() == 1.0`) ⇒ the visible scaling was the **DAW scaling the plugin window** (hosts
+claim Cmd+scroll for their own timeline zoom; the plugin sees nothing). The headless test was a
+**false positive** — it injects a synthetic `Event::MouseWheel { modifiers: COMMAND }` the host
+never delivers.
+
+Wheel-zoom is unsalvageable for a plugin editor: no-op (host ate the gesture) or whole-editor
+scale. Resolution = drop it.
+
+Fix in `engine/crates/editor_egui/src/grid.rs` (+ `transport.rs` doc):
+- `apply_zoom_input`: removed the `zoom_delta()` read. Grid zoom now follows only the
+  TransportBar radios + the `1`/`2` keys (keyboard events hosts don't eat).
+- Removed the two false-positive tests (`grid_scroll_zoom_requires_command_modifier`,
+  `grid_scroll_plain_wheel_does_not_zoom`) + their now-dead helpers (`scroll`, `scroll_with`,
+  `Harness::zoom`).
+- Updated doc comments to state the new contract.
+
+Memory corrected: the prior `stepforge-clap-egui-port` note taught "cmd+scroll zoom must read
+`zoom_delta()`" — rewritten to the in-host truth.
+
 ## Verification (run 2026-08-01, this branch)
 
 - `cargo test -p stepforge_editor_egui` → **42 passed; 0 failed**.
@@ -75,11 +105,15 @@ hover. In-host eyeball still welcome.
 - N3 manual (popover follows its cell under horizontal scroll): in-host only — no standalone runner
   exists for `editor_egui`; existing headless tests still cover open/dismiss/commit.
 - N4 manual (header clip): blind-applied; in-host eyeball deferred.
+- N5 (2026-08-01): scroll-zoom dropped → **41 passed; 0 failed** (−2 false-positive scroll tests
+  removed), clippy `-D warnings` clean. In-host `1`/`2`-key zoom re-test pending.
 
 ## Commits
 
 - `4513e3a` — fix(clap): ratchet popover tracks its cell under scroll (N3) [+ documents N2 popover-title alloc]
 - `7f1b71a` — fix(clap): move header NOTE number to hover tooltip (N4) [+ fully closes N2]
+- N5 — fix(clap): drop scroll-wheel grid zoom (this plan-doc commit's companion code change on
+  `fix/clap-grid-review-polish`; lands via PR #18).
 
 ## Sequencing outcome
 
