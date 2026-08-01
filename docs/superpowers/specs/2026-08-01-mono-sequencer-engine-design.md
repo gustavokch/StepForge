@@ -285,7 +285,7 @@ pub struct MonoSeq {
 
 ## 6. `mono_editor_egui` — tabbed single-lane editor
 
-Pure-egui, host-free, testable (mirrors `editor_egui`). Own `MonoUiState` mirror + `apply(EngineEvent)` (drum `UiState` is track-shaped, not reusable). `CommandSink` trait re-cloned from `editor_egui/src/lib.rs:12`.
+Pure-egui, host-free, testable (mirrors `editor_egui`). Own `MonoUiState` mirror + `apply(EngineEvent)` (drum `UiState` is track-shaped, not reusable — PR #20's FeelBar made it more drum-specific). `CommandSink` trait re-cloned from `editor_egui/src/lib.rs:13`.
 
 Layout (M4L view-selector style):
 
