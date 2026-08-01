@@ -1224,11 +1224,7 @@ mod tests {
 
         h.press_key(Key::Num1); // zoom in -> cells widen -> cell 8 shifts right
 
-        let pop_after = h
-            .popover_rect()
-            .expect("popover still rendered")
-            .center()
-            .x;
+        let pop_after = h.popover_rect().expect("popover still rendered").center().x;
         let cell_after = h.cell_center_now(0, 8).expect("cell rect recorded").x;
 
         assert!(

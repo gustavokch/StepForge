@@ -226,9 +226,7 @@ pub fn render_feel_bar(ui: &mut Ui, state: &UiState, sink: &impl CommandSink) {
         if clear_swing_inflight(mirror_swing, inflight) {
             write_feel(&ctx, |f| f.swing_inflight = None);
         }
-        ui.label(
-            RichText::new(format!("{}%", (v * 100.0).round() as i32)).color(TEXT_MUTED),
-        );
+        ui.label(RichText::new(format!("{}%", (v * 100.0).round() as i32)).color(TEXT_MUTED));
 
         ui.separator();
 
@@ -272,7 +270,12 @@ pub fn render_feel_bar(ui: &mut Ui, state: &UiState, sink: &impl CommandSink) {
 
 /// Pattern bank popover (3×3, slots P1..P9). Active slot filled PRIMARY, queued
 /// slot outlined PRIMARY. Click → `QueuePattern{index, NextBar}` + close.
-fn render_patterns_popover(ui: &mut Ui, anchor: &egui::Response, state: &UiState, sink: &impl CommandSink) {
+fn render_patterns_popover(
+    ui: &mut Ui,
+    anchor: &egui::Response,
+    state: &UiState,
+    sink: &impl CommandSink,
+) {
     popup_above_or_below_widget(
         ui,
         patterns_popup_id(),
@@ -410,10 +413,8 @@ fn humanize_button(active: bool) -> Button<'static> {
 }
 
 fn quantize_button(g: QuantizeGrain) -> Button<'static> {
-    Button::new(
-        RichText::new(format!("GRID  {}", grain_label(g))).color(TEXT_PRIMARY),
-    )
-    .fill(SURFACE_HIGH)
+    Button::new(RichText::new(format!("GRID  {}", grain_label(g))).color(TEXT_PRIMARY))
+        .fill(SURFACE_HIGH)
 }
 
 #[cfg(test)]
@@ -523,11 +524,17 @@ mod tests {
     fn humanize_clamps_axes() {
         assert!(matches!(
             humanize_command(2.0, -1.0),
-            Command::SetHumanize { timing: 1.0, velocity: 0.0 }
+            Command::SetHumanize {
+                timing: 1.0,
+                velocity: 0.0
+            }
         ));
         assert!(matches!(
             humanize_command(0.3, 0.7),
-            Command::SetHumanize { timing: 0.3, velocity: 0.7 }
+            Command::SetHumanize {
+                timing: 0.3,
+                velocity: 0.7
+            }
         ));
     }
 
@@ -612,7 +619,10 @@ mod tests {
         h.click(h.center(swing_rect_id()));
         match h.cmds().as_slice() {
             [Command::SetGlobalSwing { pct }] => {
-                assert!(*pct > 0.0 && *pct <= SWING_MAX, "pct in (0, {SWING_MAX}], got {pct}");
+                assert!(
+                    *pct > 0.0 && *pct <= SWING_MAX,
+                    "pct in (0, {SWING_MAX}], got {pct}"
+                );
             }
             other => panic!("expected one SetGlobalSwing, got {other:?}"),
         }
@@ -628,8 +638,12 @@ mod tests {
         assert!(matches!(
             cmds.as_slice(),
             [
-                Command::SetQuantizeGrain { grain: QuantizeGrain::NextBar },
-                Command::SetQuantizeGrain { grain: QuantizeGrain::EndOfPattern }
+                Command::SetQuantizeGrain {
+                    grain: QuantizeGrain::NextBar
+                },
+                Command::SetQuantizeGrain {
+                    grain: QuantizeGrain::EndOfPattern
+                }
             ]
         ));
     }
