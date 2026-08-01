@@ -48,6 +48,12 @@ struct crosses that boundary.
 - **Two-layer split.** `sequencer_engine` is pure Rust and `#![forbid(unsafe_code)]`;
   `sequencer_engine_ffi` is the *only* crate with `unsafe` (the 8 `extern "C"` entry points
   + CoreMIDI bindings). The unsafe boundary is compiler-enforced.
+- **Two plugin surfaces, one core.** The AUv3 edition reuses the SwiftUI editor inside
+  an `AudioUnit` app-extension and crosses the byte-FFI seam host-driven via
+  `engine_render`. The CLAP edition is a separate, pure-Rust surface: `crates/editor_egui`
+  (`stepforge_editor_egui`) is the testable egui editor UI (no `nih_plug` dep), and
+  `crates/clap_plugin` (`stepforge_clap`, `nih_plug` + `nih_plug_egui`) wraps it and calls
+  `core` directly in-process — no Swift, no C ABI.
 - **The FFI seam is bytes, not structs.** Commands and events cross the C ABI as
   postcard-serialized bytes via total codecs (never panic). Every `extern "C"` body is
   wrapped in `catch_unwind` and returns a `#[repr(C)] EngineResult` — malformed bytes yield
@@ -67,14 +73,20 @@ architecture.
 
 ```
 engine/
-  crates/core/    # sequencer_engine  — musical-time logic, state, models (#![forbid(unsafe_code)])
-  crates/ffi/     # sequencer_engine_ffi — the only `unsafe`: C ABI + CoreMIDI
-  include/        # sequencer_engine.h — committed, single source of truth for Swift
-  scripts/        # setup.sh, build_engine.sh
+  crates/core/         # sequencer_engine     — musical-time logic, state, models (#![forbid(unsafe_code)])
+  crates/ffi/          # sequencer_engine_ffi — only `unsafe`: C ABI + CoreMIDI
+  crates/editor_egui/  # stepforge_editor_egui — pure-egui editor UI (no nih_plug dep), host-free tests
+  crates/clap_plugin/  # stepforge_clap        — nih_plug + nih_plug_egui wrapper, calls core in-process
+  crates/xtask/        # nih_plug_xtask bundler -> engine/target/bundled/stepforge_clap.clap
+  include/             # sequencer_engine.h — committed, single source of truth for Swift
+  scripts/             # setup.sh, build_engine.sh
+  dist/                # SequencerEngine.xcframework (built, gitignored)
 app/
-  StepForge/      # SwiftUI shell: Engine/, Features/, Components/, Theme/, Gestures/, Persistence/
-  project.yml     # XcodeGen spec (iOS + macOS targets)
-docs/             # specs/, plans/, superpowers/{specs,plans,audits}/
+  StepForge/           # SwiftUI shell: Engine/, Features/, Components/, Theme/, Gestures/, Persistence/
+    AudioUnit/         # AUv3 app-extension glue (StepForgeAU, macOS-only; excluded from the iOS target)
+  project.yml          # XcodeGen spec: StepForge (iOS), StepForge-macOS, StepForgeAU appex, StepForgeTests
+docs/                  # specs/, plans/, superpowers/{specs,plans,audits}/
+build_install_macos.sh # clean build + install the macOS app into ~/Applications
 ```
 
 ## Status & roadmap
