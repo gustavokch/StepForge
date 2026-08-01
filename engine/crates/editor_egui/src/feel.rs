@@ -92,8 +92,9 @@ pub(crate) fn next_grain(g: QuantizeGrain) -> QuantizeGrain {
 
 /// Swing shown this frame: the in-flight (user-edited, echo-pending) value wins
 /// over the mirror so an active drag/click does not snap back to the stale
-/// mirror each frame; once the engine echo (`GlobalSwingChanged`) lands,
-/// [`clear_swing_inflight`] drops it. Same pattern as the transport BPM inflight
+/// mirror each frame; once the engine echo (a throttled `FullSnapshot` on the
+/// large channel) lands, [`clear_swing_inflight`] drops it. Same pattern as the
+/// transport BPM inflight
 /// (`transport.rs`).
 pub(crate) fn seed_swing(mirror: f32, inflight: Option<f32>) -> f32 {
     inflight.unwrap_or(mirror)
@@ -101,7 +102,8 @@ pub(crate) fn seed_swing(mirror: f32, inflight: Option<f32>) -> f32 {
 
 /// Whether the mirror has caught up to the pending in-flight swing (echo
 /// arrived) → safe to drop the override. Exact f32 eq is sound here: the value
-/// round-trips `SetGlobalSwing { pct } → GlobalSwingChanged { pct }` unchanged.
+/// round-trips `SetGlobalSwing { pct }` to the snapshot's `global_swing_pct`
+/// unchanged (plain `f32` assign in `FullSnapshot`, no rounding/clamp).
 pub(crate) fn clear_swing_inflight(mirror: f32, inflight: Option<f32>) -> bool {
     match inflight {
         Some(pending) => (mirror - pending).abs() < 1e-6,
@@ -158,7 +160,7 @@ struct FeelUiState {
     /// Current quantize grain (cycled by the GRID button). Default `NextBeat`,
     /// matching iOS `@State quantizeGrain = .nextBeat`.
     grain: QuantizeGrain,
-    /// Echo-pending swing value (⊥ snap-back while `GlobalSwingChanged` pending).
+    /// Echo-pending swing value (⊥ snap-back while a `FullSnapshot` echo is pending).
     swing_inflight: Option<f32>,
     /// Humanize popover editing values, seeded from the mirror on open.
     humanize_timing: f32,

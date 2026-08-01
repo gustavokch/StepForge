@@ -249,7 +249,7 @@ impl UiState {
 
     /// Authoritative global swing `[0, 0.5]` (snapshot). `0.0` before the first
     /// snapshot. The FeelBar slider (T10d) reads this; edits become
-    /// `Command::SetGlobalSwing` and the engine echoes `GlobalSwingChanged`.
+    /// `Command::SetGlobalSwing` and the engine echoes a throttled `FullSnapshot`.
     pub fn swing_pct(&self) -> f32 {
         self.session
             .as_ref()
