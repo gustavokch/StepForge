@@ -1,5 +1,6 @@
 //! StepForge egui editor — pure UI, no nih_plug dependency.
 
+pub mod feel;
 pub mod grid;
 pub mod transport;
 pub mod ui_state;
@@ -30,11 +31,16 @@ pub fn apply_theme(ctx: &Context) {
 }
 
 /// Render the editor: the Phase 1 §T T10c `TransportBar` (play/stop, BPM,
-/// read-only sync badge, zoom toggle) + engine-error surface + the Phase 1
-/// §T T10b step grid.
+/// read-only sync badge, zoom toggle), the Phase 1 §T T10d `FeelBar` (swing,
+/// humanize, quantize grain, pattern switcher — Row 2), the engine-error
+/// surface, and the Phase 1 §T T10b step grid.
 pub fn render(ctx: &Context, ui_state: &UiState, sink: &impl CommandSink) {
     egui::CentralPanel::default().show(ctx, |ui| {
         transport::render_transport_bar(ui, ui_state, sink);
+
+        ui.separator();
+        // Phase 1 §T T10d — FeelBar (Row 2): swing / humanize / grain / patterns.
+        feel::render_feel_bar(ui, ui_state, sink);
 
         // Surface the latest engine error (read-only) — T8.
         if let Some(err) = &ui_state.last_error {
