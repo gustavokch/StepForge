@@ -242,6 +242,50 @@ impl UiState {
             .unwrap_or_default()
     }
 
+    // ---- Feel read accessors (T10d FeelBar). Same shape as `bpm()`: snapshot
+    // ground truth, a sane default before the first snapshot, read-only (⊥
+    // optimistic) — edits become `Command`s and the engine echoes back via
+    // `apply`. ----
+
+    /// Authoritative global swing `[0, 0.5]` (snapshot). `0.0` before the first
+    /// snapshot. The FeelBar slider (T10d) reads this; edits become
+    /// `Command::SetGlobalSwing` and the engine echoes a throttled `FullSnapshot`.
+    pub fn swing_pct(&self) -> f32 {
+        self.session
+            .as_ref()
+            .map(|s| s.global_swing_pct)
+            .unwrap_or(0.0)
+    }
+
+    /// Authoritative humanize timing `[0, 1]` (snapshot). `0.0` before the first
+    /// snapshot. Read by the FeelBar humanize popover (T10d); committed via
+    /// `Command::SetHumanize`.
+    pub fn humanize_timing(&self) -> f32 {
+        self.session
+            .as_ref()
+            .map(|s| s.humanize_timing)
+            .unwrap_or(0.0)
+    }
+
+    /// Authoritative humanize velocity `[0, 1]` (snapshot). `0.0` before the
+    /// first snapshot. Read by the FeelBar humanize popover (T10d); committed
+    /// via `Command::SetHumanize`.
+    pub fn humanize_velocity(&self) -> f32 {
+        self.session
+            .as_ref()
+            .map(|s| s.humanize_velocity)
+            .unwrap_or(0.0)
+    }
+
+    /// Active pattern index (snapshot). `0` before the first snapshot. The
+    /// FeelBar pattern switcher (T10d) reads this to mark the active slot.
+    pub fn active_pattern_index(&self) -> usize {
+        self.session
+            .as_ref()
+            .map(|s| s.active_pattern_index)
+            .unwrap_or(0)
+    }
+
     // Nested mutation helpers — `Arc::make_mut` gives COW mutation of the shared
     // snapshot (clone only when refcount > 1, GUI-thread alloc is fine). An
     // out-of-range index from a racy/malformed event is dropped, never panics
