@@ -176,6 +176,7 @@ round-trip through the versioned snapshot format.
   [`amendments.md`](docs/specs/amendments.md) (resolved contradictions + open issues).
 - [`docs/superpowers/specs/`](docs/superpowers/specs/) — design docs (foundation,
   engine-plan; macOS-target and plugin-port designs land with their feature branches).
+- [`SPEC.md`](SPEC.md) — the spec-driven-development spec for the in-progress work.
 - [`CLAUDE.md`](CLAUDE.md) — the engineering guide for contributors.
 
 ## Contributing
