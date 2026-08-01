@@ -2,8 +2,10 @@
 
 StepForge is a MIDI step sequencer built on a hard two-layer boundary: a Rust
 musical-time core (`sequencer_engine`) wrapped by a SwiftUI shell. It ships as a
-standalone app on **iOS and macOS**; an audio-plugin edition
-(**AUv3 / VST3 / CLAP**) is in design.
+standalone app on **iOS and macOS**, and as **AUv3** and **CLAP** plugin editions on
+macOS; a **VST3** edition is in design. AUv3 crosses the byte-FFI seam (host-driven
+via `engine_render`); CLAP is a separate pure-Rust surface that consumes the core
+in-process — no Swift, no C ABI.
 
 ## What it is
 
@@ -33,10 +35,13 @@ struct crosses that boundary.
 | --- | --- |
 | iOS 17 (iPhone + iPad) | Standalone app |
 | macOS 14 | Standalone app (`StepForge-macOS`) |
-| AUv3 / VST3 / CLAP (macOS) | In design — not yet shipped |
+| AUv3 (macOS) | Shipped — `StepForgeAU` app-extension, host-driven MIDI effect |
+| CLAP (macOS) | Shipped — pure-Rust `nih-plug` + `egui` plugin |
+| VST3 (macOS) | In design — not yet shipped |
 
 > **Sync note:** MIDI Clock works on iOS and macOS. Ableton Link is real on macOS and
 > intentionally dormant on iOS today (the Link runtime is `cfg(not(target_os = "ios"))`).
+> AUv3 is macOS-only: the iOS app target excludes the `AudioUnit/` sources.
 
 ## Architecture
 
