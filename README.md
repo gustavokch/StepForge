@@ -2,8 +2,10 @@
 
 StepForge is a MIDI step sequencer built on a hard two-layer boundary: a Rust
 musical-time core (`sequencer_engine`) wrapped by a SwiftUI shell. It ships as a
-standalone app on **iOS and macOS**; an audio-plugin edition
-(**AUv3 / VST3 / CLAP**) is in design.
+standalone app on **iOS and macOS**, and as **AUv3** and **CLAP** plugin editions on
+macOS; a **VST3** edition is in design. AUv3 crosses the byte-FFI seam (host-driven
+via `engine_render`); CLAP is a separate pure-Rust surface that consumes the core
+in-process — no Swift, no C ABI.
 
 ## What it is
 
@@ -33,16 +35,25 @@ struct crosses that boundary.
 | --- | --- |
 | iOS 17 (iPhone + iPad) | Standalone app |
 | macOS 14 | Standalone app (`StepForge-macOS`) |
-| AUv3 / VST3 / CLAP (macOS) | In design — not yet shipped |
+| AUv3 (macOS) | Shipped — `StepForgeAU` app-extension, host-driven MIDI effect |
+| CLAP (macOS) | Shipped — pure-Rust `nih-plug` + `egui` plugin |
+| VST3 (macOS) | In design — not yet shipped |
 
 > **Sync note:** MIDI Clock works on iOS and macOS. Ableton Link is real on macOS and
 > intentionally dormant on iOS today (the Link runtime is `cfg(not(target_os = "ios"))`).
+> AUv3 is macOS-only: the iOS app target excludes the `AudioUnit/` sources.
 
 ## Architecture
 
 - **Two-layer split.** `sequencer_engine` is pure Rust and `#![forbid(unsafe_code)]`;
   `sequencer_engine_ffi` is the *only* crate with `unsafe` (the 8 `extern "C"` entry points
   + CoreMIDI bindings). The unsafe boundary is compiler-enforced.
+- **Two plugin surfaces, one core.** The AUv3 edition reuses the SwiftUI editor inside
+  an `AudioUnit` app-extension and crosses the byte-FFI seam host-driven via
+  `engine_render`. The CLAP edition is a separate, pure-Rust surface: `crates/editor_egui`
+  (`stepforge_editor_egui`) is the testable egui editor UI (no `nih_plug` dep), and
+  `crates/clap_plugin` (`stepforge_clap`, `nih_plug` + `nih_plug_egui`) wraps it and calls
+  `core` directly in-process — no Swift, no C ABI.
 - **The FFI seam is bytes, not structs.** Commands and events cross the C ABI as
   postcard-serialized bytes via total codecs (never panic). Every `extern "C"` body is
   wrapped in `catch_unwind` and returns a `#[repr(C)] EngineResult` — malformed bytes yield
@@ -62,14 +73,20 @@ architecture.
 
 ```
 engine/
-  crates/core/    # sequencer_engine  — musical-time logic, state, models (#![forbid(unsafe_code)])
-  crates/ffi/     # sequencer_engine_ffi — the only `unsafe`: C ABI + CoreMIDI
-  include/        # sequencer_engine.h — committed, single source of truth for Swift
-  scripts/        # setup.sh, build_engine.sh
+  crates/core/         # sequencer_engine     — musical-time logic, state, models (#![forbid(unsafe_code)])
+  crates/ffi/          # sequencer_engine_ffi — only `unsafe`: C ABI + CoreMIDI
+  crates/editor_egui/  # stepforge_editor_egui — pure-egui editor UI (no nih_plug dep), host-free tests
+  crates/clap_plugin/  # stepforge_clap        — nih_plug + nih_plug_egui wrapper, calls core in-process
+  crates/xtask/        # nih_plug_xtask bundler -> engine/target/bundled/stepforge_clap.clap
+  include/             # sequencer_engine.h — committed, single source of truth for Swift
+  scripts/             # setup.sh, build_engine.sh
+  dist/                # SequencerEngine.xcframework (built, gitignored)
 app/
-  StepForge/      # SwiftUI shell: Engine/, Features/, Components/, Theme/, Gestures/, Persistence/
-  project.yml     # XcodeGen spec (iOS + macOS targets)
-docs/             # specs/, plans/, superpowers/{specs,plans,audits}/
+  StepForge/           # SwiftUI shell: Engine/, Features/, Components/, Theme/, Gestures/, Persistence/
+    AudioUnit/         # AUv3 app-extension glue (StepForgeAU, macOS-only; excluded from the iOS target)
+  project.yml          # XcodeGen spec: StepForge (iOS), StepForge-macOS, StepForgeAU appex, StepForgeTests
+docs/                  # specs/, plans/, superpowers/{specs,plans,audits}/
+build_install_macos.sh # clean build + install the macOS app into ~/Applications
 ```
 
 ## Status & roadmap
@@ -78,18 +95,21 @@ docs/             # specs/, plans/, superpowers/{specs,plans,audits}/
 
 - iOS + macOS standalone apps (shared SwiftUI + `EngineBridge` tree).
 - Full musical-time core with property-tested step algorithms and versioned persistence.
+- **Host-driven rendering** — `engine_render` advances the engine one host audio block on
+  the RT thread (C-ABI export + `HostRenderState` live in `engine/include/sequencer_engine.h`).
+- **AUv3** (macOS) — `StepForgeAU` app-extension, host-driven MIDI effect.
+- **CLAP** (macOS) — pure-Rust `nih-plug` + `egui` plugin; editing view + transport ported.
 - MIDI Clock sync (iOS + macOS) and Ableton Link (macOS).
 
 **In progress / designed**
 
-- **Host-driven rendering.** `Engine::render_host` and the `HostRenderState` types have
-  landed in the core; the C-ABI `engine_render` export and host drivers are pending.
-- **Plugin edition — AUv3 + VST3 + CLAP** (macOS-only, host-driven MIDI effect). Designed,
-  Phase 0 in progress; **not yet shipped.**
+- **VST3 edition** (macOS) — designed, not yet shipped.
+- **CLAP feature parity** with the Swift app — editor surface is landing incrementally.
 
 **Known limits**
 
 - Ableton Link is dormant on iOS.
+- AUv3 is macOS-only (the iOS app target excludes `AudioUnit/`).
 - No CI and no signed release builds.
 
 ## Getting started
@@ -123,12 +143,27 @@ xcodebuild -project app/StepForge.xcodeproj -scheme StepForge-macOS \
   -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
 ```
 
+Build and test the CLAP plugin (run from `engine/`):
+
+```bash
+cargo test -p stepforge_editor_egui                 # editor UI tests (pure-egui, host-free)
+cargo clippy -p stepforge_editor_egui --all-targets -- -D warnings
+cargo xtask bundle -p stepforge_clap --release      # -> engine/target/bundled/stepforge_clap.clap
+```
+
+Or build + install the standalone macOS app into `~/Applications`:
+
+```bash
+./build_install_macos.sh
+```
+
 ## Tests
 
 ```bash
 cd engine
 cargo test                                            # core + FFI (incl. C-ABI garbage-bytes safety)
 cargo test -p sequencer_engine_ffi --test ffi_api     # the FFI integration test
+cargo test -p stepforge_editor_egui                   # the CLAP editor UI (pure-egui, host-free)
 cargo fmt && cargo clippy --all-targets -- -D warnings
 ```
 
@@ -141,6 +176,7 @@ round-trip through the versioned snapshot format.
   [`amendments.md`](docs/specs/amendments.md) (resolved contradictions + open issues).
 - [`docs/superpowers/specs/`](docs/superpowers/specs/) — design docs (foundation,
   engine-plan; macOS-target and plugin-port designs land with their feature branches).
+- [`SPEC.md`](SPEC.md) — the spec-driven-development spec for the in-progress work.
 - [`CLAUDE.md`](CLAUDE.md) — the engineering guide for contributors.
 
 ## Contributing
