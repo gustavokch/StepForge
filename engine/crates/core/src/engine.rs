@@ -1313,10 +1313,29 @@ pub fn process(
                 );
                 let mt = micro_timing_offset_micros(step.micro_timing_offset, step_period_micros);
                 let offset = (swings + mt).max(0) as u32;
-                for _ in 0..ratchet_count(step.ratchet) {
+                // Spec §6 ratchet: repeat `r` fires at the step's base offset +
+                // `r * (step_period / repeats)`, spreading the N hits evenly across
+                // the step window (×4 = a 4-hit roll, not 4 note-ons on one sample).
+                // `ratchet_count >= 1`, so the divide is safe; Off (repeats=1) emits
+                // a single note at `offset`, unchanged from the non-ratcheted path.
+                //
+                // TODO(T11): `ratchet_interval` uses the GLOBAL step period, like
+                // swing + micro_timing above. A non-1.0 `track.speed_ratio` rescales
+                // the track-step window, so repeats land too dense (half-speed) or
+                // too sparse (double-speed) until this is scaled by speed_ratio when
+                // Phase-2 controls land. Latent now — no editor UI sets speed_ratio.
+                let repeats = ratchet_count(step.ratchet);
+                let ratchet_interval = (step_period_micros / repeats as u64) as u32;
+                for r in 0..repeats {
                     let _ = crate::midi_out::push_drop_oldest(
                         midi,
-                        build_note_on(endpoint, channel, track.midi_note, vel, offset),
+                        build_note_on(
+                            endpoint,
+                            channel,
+                            track.midi_note,
+                            vel,
+                            offset + r * ratchet_interval,
+                        ),
                     );
                     outcome.notes_pushed += 1;
                 }
@@ -1478,6 +1497,119 @@ mod tests {
             16,
             "1 bar (4 beats) = 16"
         );
+    }
+
+    /// Ratchet repeats must spread evenly across the step period — spec
+    /// `architecture-spec.md` §6 (ratchet dispatch): repeat `r` fires at
+    /// `time + r * (step_period / repeats)`. Before this fix all N repeats shared
+    /// one `send_at_offset_micros`, so ×2/×3/×4 stacked on a single sample and
+    /// were audibly indistinguishable from Off. Surfaced by the T10f in-DAW smoke
+    /// — headless tests only asserted the *count*, not the timing spread.
+    #[test]
+    fn ratchet_repeats_spread_across_step_period() {
+        use crate::models::Ratchet;
+
+        // One active step on track 0, ratcheted ×4. bpm 120 -> step_period
+        // = 60/120/4 * 1_000_000 = 125_000 µs, so the ×4 interval is 31_250 µs.
+        let mut session = Session {
+            bpm: 120.0,
+            ..Default::default()
+        };
+        {
+            let step = &mut session.patterns[0].as_mut().unwrap().tracks[0].steps[0];
+            step.active = true;
+            step.ratchet = Ratchet::X4;
+        }
+
+        let mut rt = RtState::new(1);
+        rt.per_track[0].step_idx = 0; // fire step 0
+        rt.per_track[0].speed_acc = 0; // ratio 1.0 -> advance yields exactly 1 step
+
+        let midi = crate::midi_out::midi_out_ring();
+        let events = crate::midi_out::hot_event_channel();
+
+        let outcome = process(&mut rt, &session, true, 0, &midi, &events);
+        assert_eq!(outcome.notes_pushed, 4, "X4 must push 4 note-ons");
+
+        let mut offsets: Vec<u32> = Vec::new();
+        while let Some(m) = midi.dequeue() {
+            offsets.push(m.send_at_offset_micros);
+        }
+        assert_eq!(offsets.len(), 4, "4 MidiMsgs drained from the ring");
+
+        // Repeats must NOT coincide, and must be evenly spaced by step_period /
+        // repeats = 125_000 / 4 = 31_250 µs (the spec-mandated ratchet interval).
+        offsets.sort_unstable();
+        for w in offsets.windows(2) {
+            assert_ne!(w[0], w[1], "ratchet repeats must not coincide: {offsets:?}");
+            assert_eq!(w[1] - w[0], 31_250, "even ratchet spacing: {offsets:?}");
+        }
+    }
+
+    /// X2/X3 pin the truncation the integer divide introduces (X3 at bpm 120:
+    /// `125_000 / 3 = 41_666`, not 41_667) and that the spacing tracks
+    /// `repeats` — not just the X4 case above. Same setup; `step_period` stays
+    /// 125_000 µs at bpm 120.
+    #[test]
+    fn ratchet_spacing_tracks_repeat_count() {
+        use crate::models::Ratchet;
+
+        // (ratchet, repeats, expected_interval µs = step_period / repeats).
+        let cases: [(Ratchet, u32, u32); 2] = [
+            (Ratchet::X2, 2, 62_500), // 125_000 / 2
+            (Ratchet::X3, 3, 41_666), // 125_000 / 3 — truncated, pins integer divide
+        ];
+
+        let midi = crate::midi_out::midi_out_ring();
+        let events = crate::midi_out::hot_event_channel();
+
+        for (ratchet, repeats, expected_interval) in cases {
+            // Fresh session + RT state per case; drain any stale notes first so
+            // the ring is empty before this case pushes.
+            let mut session = Session {
+                bpm: 120.0,
+                ..Default::default()
+            };
+            {
+                let step = &mut session.patterns[0].as_mut().unwrap().tracks[0].steps[0];
+                step.active = true;
+                step.ratchet = ratchet;
+            }
+            let mut rt = RtState::new(1);
+            rt.per_track[0].step_idx = 0; // fire step 0
+            rt.per_track[0].speed_acc = 0; // ratio 1.0 -> advance yields exactly 1 step
+
+            while midi.dequeue().is_some() {}
+
+            let outcome = process(&mut rt, &session, true, 0, &midi, &events);
+            assert_eq!(
+                outcome.notes_pushed, repeats,
+                "{ratchet:?}: must push {repeats} note-ons",
+            );
+
+            let mut offsets: Vec<u32> = Vec::new();
+            while let Some(m) = midi.dequeue() {
+                offsets.push(m.send_at_offset_micros);
+            }
+            assert_eq!(
+                offsets.len(),
+                repeats as usize,
+                "{ratchet:?}: drained MidiMsg count",
+            );
+
+            offsets.sort_unstable();
+            for w in offsets.windows(2) {
+                assert_ne!(
+                    w[0], w[1],
+                    "{ratchet:?}: repeats must not coincide: {offsets:?}",
+                );
+                assert_eq!(
+                    w[1] - w[0],
+                    expected_interval,
+                    "{ratchet:?}: even ratchet spacing: {offsets:?}",
+                );
+            }
+        }
     }
 
     /// Defect 3 fix: selecting Link as the sync source must enable the Link
