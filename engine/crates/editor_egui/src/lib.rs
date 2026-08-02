@@ -1,18 +1,45 @@
 //! StepForge egui editor — pure UI, no nih_plug dependency.
 
+pub mod action_drawer;
 pub mod feel;
 pub mod grid;
+pub mod note_picker;
+pub mod overlay;
+#[cfg(test)]
+mod test_support;
 pub mod track_management;
 pub mod transport;
 pub mod ui_state;
 pub use ui_state::UiState;
 
-use egui::{Color32, Context};
+use egui::{Color32, Context, Id};
 use sequencer_engine::command::Command;
 
 /// Sink for commands emitted by UI interactions.
 pub trait CommandSink {
     fn push(&self, cmd: Command);
+}
+
+// ---- Editor frame counter (open-frame guard for the T11 overlays) ----
+//
+// egui 0.31 exposes no frame number on `Context`, so the editor keeps its own
+// monotonically-increasing counter in `ctx.data` temp storage, ticked once at
+// the top of [`render`]. The ActionDrawer + NotePickerSheet record the counter
+// value in their state on `open`, then suppress the outside-click dismiss on
+// that same frame: `pointer.primary_clicked()` is global and not
+// consumption-aware, so the header click that opened the overlay is still
+// "primary_clicked" when the overlay renders one statement later this same
+// frame — without the guard it self-dismisses for any track whose header lands
+// outside the overlay rect. (The ratchet popover avoids this with `!alt`; a
+// plain-click open has no modifier.)
+pub(crate) fn frame_id() -> Id {
+    Id::new("stepforge.frame")
+}
+pub(crate) fn tick_frame(ctx: &Context) {
+    ctx.data_mut(|d| *d.get_temp_mut_or_default::<u64>(frame_id()) += 1);
+}
+pub(crate) fn frame_nr(ctx: &Context) -> u64 {
+    ctx.data(|d| d.get_temp::<u64>(frame_id()).unwrap_or(0))
 }
 
 /// Pure: which transport command a play/stop toggle emits given current state.
@@ -37,6 +64,7 @@ pub fn apply_theme(ctx: &Context) {
 /// `TrackManagementBar` (track count + add/remove — Row 3), the engine-error
 /// surface, and the Phase 1 §T T10b step grid.
 pub fn render(ctx: &Context, ui_state: &UiState, sink: &impl CommandSink) {
+    tick_frame(ctx); // advance the editor frame counter (overlay open-frame guard)
     egui::CentralPanel::default().show(ctx, |ui| {
         transport::render_transport_bar(ui, ui_state, sink);
 
@@ -60,6 +88,15 @@ pub fn render(ctx: &Context, ui_state: &UiState, sink: &impl CommandSink) {
         ui.separator();
         // Phase 1 §T T10b — step grid (pinned headers + step cells + gestures).
         grid::render_step_grid(ui, ui_state, sink);
+
+        // Phase 2 §T T11 — track-level overlays. Rendered last as floating
+        // `egui::Area`s so they float above the whole editor (not just the
+        // grid). Each is a no-op unless its widget-local target is set; the two
+        // are mutually exclusive (opening one clears the other's target). The
+        // grid header drum-name tap opens the NotePicker; the `…` button opens
+        // the ActionDrawer.
+        note_picker::render_note_picker(ui.ctx(), ui_state, sink);
+        action_drawer::render_action_drawer(ui.ctx(), ui_state, sink);
     });
 }
 
