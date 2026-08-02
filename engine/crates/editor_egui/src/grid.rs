@@ -50,11 +50,13 @@ pub(crate) const TEXT_MUTED: Color32 = Color32::from_rgb(0x8A, 0x8A, 0x8A);
 pub(crate) const BORDER_WEAK: Color32 = Color32::from_rgb(0x33, 0x33, 0x33);
 
 // ---- Layout (desktop; iOS `GridMetrics` port, fixed size-classes) ----
-// 140 fits the longest drum name ("Closed Hat"/"Side Stick") + the mute + `…`
-// header buttons without the name label overflowing into the step grid (was 120,
-// which "Closed Hat" spilled past — T11 smoke). The drum_name table is fixed
-// (9 names), so this needs no per-name truncation.
-const HEADER_WIDTH: f32 = 140.0;
+// Fits the longest drum name ("Closed Hat"/"Side Stick") + mute + `…` buttons.
+// The name label is `.truncate()`d into a bounded slot (see `header`), so even
+// a longer name clips inside the column instead of overflowing the grid — but
+// 160 keeps the current names un-truncated. (egui `Label` defaults to
+// `TextWrapMode::Extend`, which GROWS the parent Ui to fit the text — that was
+// the overflow: "Closed Hat" expanded the header past its column.)
+const HEADER_WIDTH: f32 = 160.0;
 const CELL_W_16: f32 = 26.0;
 const CELL_W_8: f32 = 52.0; // zoom = 8 doubles width
 const CELL_H: f32 = 34.0;
@@ -581,35 +583,38 @@ fn header(ui: &mut Ui, track_idx: usize, track: &Track, sink: &impl CommandSink)
                     muted: !track.muted,
                 });
             }
-            ui.vertical(|ui| {
-                // T11 — the drum name is the NotePickerSheet trigger (iOS
-                // TrackHeader drum-name tap). Clickable label: `Sense::click`
-                // so the same `Response` reports `.clicked()` AND keeps the
-                // lazy NOTE hover tooltip (the `format!` runs only while the
-                // pointer is over the name, not per frame — closes N2).
-                let name_resp = ui
-                    .add(
-                        egui::Label::new(
-                            egui::RichText::new(drum_name(track.midi_note))
-                                .color(if track.muted {
-                                    TEXT_MUTED
-                                } else {
-                                    TEXT_PRIMARY
-                                })
-                                .strong(),
-                        )
-                        .sense(Sense::click()),
+            // T11 — the drum name is the NotePickerSheet trigger (iOS
+            // TrackHeader drum-name tap). Bounded to a fixed slot + `.truncate()`
+            // so a long name clips INSIDE the header column instead of expanding
+            // it into the step grid (egui `Label` defaults to `TextWrapMode::Extend`,
+            // which grows the parent Ui — that was the "Closed Hat" overflow).
+            // `…` space is reserved out of `available_width` first so the name
+            // can't steal it. `Sense::click` keeps the lazy NOTE hover tooltip.
+            let name_w = (ui.available_width() - 36.0 - ui.spacing().item_spacing.x).max(40.0);
+            let name_resp = ui
+                .add_sized(
+                    Vec2::new(name_w, CELL_H),
+                    egui::Label::new(
+                        egui::RichText::new(drum_name(track.midi_note))
+                            .color(if track.muted {
+                                TEXT_MUTED
+                            } else {
+                                TEXT_PRIMARY
+                            })
+                            .strong(),
                     )
-                    .on_hover_text(format!("NOTE {}", track.midi_note));
-                #[cfg(test)]
-                ui.ctx().data_mut(|d| {
-                    d.get_temp_mut_or_default::<Vec<(usize, Rect)>>(note_btn_rects_id())
-                        .push((track_idx, name_resp.rect));
-                });
-                if name_resp.clicked() {
-                    crate::note_picker::open(ui.ctx(), track_idx);
-                }
+                    .truncate()
+                    .sense(Sense::click()),
+                )
+                .on_hover_text(format!("NOTE {}", track.midi_note));
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| {
+                d.get_temp_mut_or_default::<Vec<(usize, Rect)>>(note_btn_rects_id())
+                    .push((track_idx, name_resp.rect));
             });
+            if name_resp.clicked() {
+                crate::note_picker::open(ui.ctx(), track_idx);
+            }
             // T11 — "…" opens the ActionDrawer for this track (iOS ellipsis).
             let more_resp = ui.add(egui::Button::new("…").fill(SURFACE_HIGH));
             #[cfg(test)]
