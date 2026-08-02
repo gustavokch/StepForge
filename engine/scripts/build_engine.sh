@@ -21,11 +21,15 @@ echo "[build] generating C header (cbindgen) ..."
 cbindgen --crate sequencer_engine_ffi --config cbindgen.toml --output "$HEADER" --lang c
 
 echo "[build] compiling iOS & macOS slices (release) ..."
-cargo build --release --target aarch64-apple-ios
-cargo build --release --target aarch64-apple-ios-sim
-cargo build --release --target x86_64-apple-ios
-cargo build --release --target aarch64-apple-darwin
-cargo build --release --target x86_64-apple-darwin
+# Build ONLY the ffi crate (`-p sequencer_engine_ffi`): other workspace
+# members (clap_plugin → nih_plug) pull baseview, which has no iOS/tvOS
+# backend and fails to compile for iOS targets. The xcframework only needs
+# libsequencer_engine_ffi.a per target.
+cargo build --release -p sequencer_engine_ffi --target aarch64-apple-ios
+cargo build --release -p sequencer_engine_ffi --target aarch64-apple-ios-sim
+cargo build --release -p sequencer_engine_ffi --target x86_64-apple-ios
+cargo build --release -p sequencer_engine_ffi --target aarch64-apple-darwin
+cargo build --release -p sequencer_engine_ffi --target x86_64-apple-darwin
 
 LIB_DEVICE="target/aarch64-apple-ios/release/libsequencer_engine_ffi.a"
 LIB_SIM_ARM="target/aarch64-apple-ios-sim/release/libsequencer_engine_ffi.a"
