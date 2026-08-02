@@ -132,7 +132,14 @@ struct SessionMirror: Equatable {
             queuedPatternIndex = nil; queuedPatternQuantize = nil
             patternLoopCount = 0
             playheads.removeAll(keepingCapacity: true)
-            undoAvailable.removeAll(keepingCapacity: true)   // fresh session → no stale undo
+            // undoAvailable is NOT cleared here. Two sources drive it:
+            // `.undoAvailable` (set/clear per track) and `.patternSwitched`
+            // (clear on switch — undo is pattern-scoped). Only the algorithm/
+            // clipboard/undo command arm co-emits `.fullSnapshot` +
+            // `.undoAvailable`; clearing here would wipe the just-emitted undo
+            // flag for that command and Undo could never enable. Other mutating
+            // commands (setGlobalSwing, setTrackNote, …) emit `.fullSnapshot`
+            // alone; they don't push undo, so there is nothing to wipe either way.
             lastError = nil
             lastOverflow = nil
         case .serialized:
