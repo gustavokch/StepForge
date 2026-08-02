@@ -172,7 +172,16 @@ impl UiState {
                 self.queued_pattern_quantize = None;
                 self.pattern_loop_count = 0;
                 self.playheads.clear();
-                self.undo_available.clear();
+                // NOTE: `undo_available` is intentionally NOT cleared here. It
+                // mirrors the engine's per-track undo slots, which a session
+                // snapshot does not change. The engine emits `UndoAvailable`
+                // (hot channel) as the authoritative per-track signal after
+                // every mutating op; clearing on `FullSnapshot` fought that —
+                // the editor drains hot (UndoAvailable) before large
+                // (FullSnapshot), so the clear ran AFTER the insert and left
+                // `undo_available` perpetually empty (Undo button always grey,
+                // T11 DAW smoke). `PatternSwitched` still clears it (correct:
+                // a new pattern's undo history is separate).
                 self.last_error = None;
                 self.last_overflow = None;
             }
@@ -481,7 +490,10 @@ mod tests {
         assert_eq!(st.queued_pattern_quantize, None);
         assert_eq!(st.pattern_loop_count, 0);
         assert!(st.playheads.is_empty());
-        assert!(st.undo_available.is_empty());
+        // undo_available is NOT cleared by FullSnapshot — it mirrors the
+        // engine's undo slots (governed by UndoAvailable), which a session
+        // snapshot doesn't change. See the FullSnapshot arm comment.
+        assert!(st.undo_available.contains(&1));
         assert!(st.last_error.is_none());
         assert!(st.last_overflow.is_none());
     }
