@@ -19,7 +19,9 @@
 //! title-bar absorbs the first click to acquire focus), rendered last from
 //! [`crate::render`].
 
-use egui::{Context, Id, Key, Pos2, Rect, Response, RichText, Vec2};
+#[cfg(test)]
+use egui::Rect;
+use egui::{Context, Id, Pos2, Response, RichText, Vec2};
 use sequencer_engine::command::Command;
 
 use crate::grid::{drum_name, TEXT_MUTED, TEXT_PRIMARY};
@@ -40,14 +42,6 @@ fn undo_rect_id() -> Id {
 #[cfg(test)]
 fn keep_rect_id() -> Id {
     Id::new("stepforge.action_drawer.keep")
-}
-#[cfg(test)]
-fn vary_rect_id() -> Id {
-    Id::new("stepforge.action_drawer.vary")
-}
-#[cfg(test)]
-fn roll_rect_id() -> Id {
-    Id::new("stepforge.action_drawer.roll")
 }
 #[cfg(test)]
 fn window_rect_id() -> Id {
@@ -127,6 +121,13 @@ pub(crate) fn render_action_drawer(ctx: &Context, ui_state: &UiState, sink: &imp
     let Some(track_idx) = st.target else {
         return;
     };
+    // Stale-target guard: `RemoveTrack` can shrink the session under an open
+    // drawer, leaving `target` past the end. Close instead of rendering a
+    // dangling "Actions · Track" whose buttons emit out-of-range `track_idx`.
+    if track_idx >= ui_state.tracks().len() {
+        close(ctx);
+        return;
+    }
     let drum = ui_state
         .tracks()
         .get(track_idx)
@@ -151,27 +152,8 @@ pub(crate) fn render_action_drawer(ctx: &Context, ui_state: &UiState, sink: &imp
                     ui.label(RichText::new(title).strong());
                     ui.separator();
                     // Strength sliders with a live % readout (iOS parity).
-                    // The slider [`Response`] is only needed for the `cfg(test)`
-                    // rect probe, so the binding is test-only — release builds
-                    // call the slider without capturing the response.
-                    #[cfg(test)]
-                    {
-                        let vary_resp = strength_slider(ui, "VARY", &mut st.vary);
-                        ctx.data_mut(|d| {
-                            *d.get_temp_mut_or_default::<Option<Rect>>(vary_rect_id()) =
-                                Some(vary_resp.rect);
-                        });
-                        let roll_resp = strength_slider(ui, "ROLL", &mut st.roll);
-                        ctx.data_mut(|d| {
-                            *d.get_temp_mut_or_default::<Option<Rect>>(roll_rect_id()) =
-                                Some(roll_resp.rect);
-                        });
-                    }
-                    #[cfg(not(test))]
-                    {
-                        strength_slider(ui, "VARY", &mut st.vary);
-                        strength_slider(ui, "ROLL", &mut st.roll);
-                    }
+                    strength_slider(ui, "VARY", &mut st.vary);
+                    strength_slider(ui, "ROLL", &mut st.roll);
                     ui.separator();
                     // Six action buttons (iOS HStack order/labels).
                     ui.horizontal(|ui| {
@@ -281,35 +263,18 @@ pub(crate) fn render_action_drawer(ctx: &Context, ui_state: &UiState, sink: &imp
     // that opened the drawer is still "primary_clicked" then, so skip the
     // outside-click dismiss branch that frame (Esc still dismisses).
     let is_open_frame = crate::frame_nr(ctx) == st.opened_at;
-    dismiss_outside_or_esc(ctx, rect, is_open_frame);
-}
-
-/// Esc (any frame) or a primary click outside the drawer rect (any frame EXCEPT
-/// the opening one) closes it without emitting — mirrors the ratchet-popover
-/// dismiss (`grid.rs`), with the open-frame guard standing in for the ratchet's
-/// `!alt` modifier (a plain-click open has no modifier).
-fn dismiss_outside_or_esc(ctx: &Context, rect: Rect, is_open_frame: bool) {
-    let dismiss = ctx.input(|i| i.key_pressed(Key::Escape))
-        || (!is_open_frame
-            && ctx.input(|i| {
-                i.pointer.primary_clicked()
-                    && i.pointer.latest_pos().is_none_or(|p| !rect.contains(p))
-            }));
-    if dismiss {
+    if crate::overlay::should_dismiss(ctx, rect, is_open_frame) {
         close(ctx);
     }
 }
 
-/// A strength slider with a leading label and trailing `%` readout. Returns
-/// the slider's [`Response`] (so the caller records its rect under `cfg(test)`).
-fn strength_slider(ui: &mut egui::Ui, label: &str, val: &mut f32) -> Response {
+/// A strength slider with a leading label and trailing `%` readout (iOS parity).
+fn strength_slider(ui: &mut egui::Ui, label: &str, val: &mut f32) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(label).color(TEXT_MUTED).strong());
-        let resp = ui.add(egui::Slider::new(val, 0.0..=1.0).show_value(false));
+        ui.add(egui::Slider::new(val, 0.0..=1.0).show_value(false));
         ui.label(RichText::new(format!("{}%", (*val * 100.0).round() as i32)).color(TEXT_PRIMARY));
-        resp
-    })
-    .inner
+    });
 }
 
 /// A fixed-width action button. Returns its [`Response`] — the caller records
@@ -322,91 +287,10 @@ fn action_btn(ui: &mut egui::Ui, label: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui::{Modifiers, PointerButton, Pos2};
+    use crate::test_support::Harness;
+    use egui::{Key, Pos2};
     use sequencer_engine::models::Session;
-    use std::sync::{Arc, Mutex};
-
-    #[derive(Default, Clone)]
-    struct Rec(Arc<Mutex<Vec<Command>>>);
-    impl CommandSink for Rec {
-        fn push(&self, c: Command) {
-            self.0.lock().unwrap().push(c);
-        }
-    }
-
-    fn raw_input() -> egui::RawInput {
-        egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(
-                Pos2::new(0.0, 0.0),
-                Vec2::new(1400.0, 800.0),
-            )),
-            ..Default::default()
-        }
-    }
-
-    struct Harness {
-        ctx: egui::Context,
-        state: UiState,
-        sink: Rec,
-    }
-    impl Harness {
-        fn new(state: UiState) -> Self {
-            Self {
-                ctx: egui::Context::default(),
-                state,
-                sink: Rec::default(),
-            }
-        }
-        fn frame(&self, raw: egui::RawInput) {
-            let _ = self
-                .ctx
-                .run(raw, |ctx| crate::render(ctx, &self.state, &self.sink));
-        }
-        fn idle(&self) {
-            self.frame(raw_input());
-        }
-        /// Settle the floating `egui::Area` before clicking its buttons — see
-        /// `note_picker::tests::Harness::settle` for why (an Area's widgets
-        /// don't receive clicks until its rect has aged into `memory.areas`).
-        fn settle(&self) {
-            for _ in 0..4 {
-                self.idle();
-            }
-        }
-        fn click_primary(&self, pos: Pos2) {
-            let mods = Modifiers::default();
-            let mut a = raw_input();
-            a.events.push(egui::Event::PointerButton {
-                pos,
-                button: PointerButton::Primary,
-                pressed: true,
-                modifiers: mods,
-            });
-            self.frame(a);
-            let mut b = raw_input();
-            b.events.push(egui::Event::PointerButton {
-                pos,
-                button: PointerButton::Primary,
-                pressed: false,
-                modifiers: mods,
-            });
-            self.frame(b);
-        }
-        fn press_key(&self, key: Key) {
-            let mut r = raw_input();
-            r.events.push(egui::Event::Key {
-                key,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: Default::default(),
-            });
-            self.frame(r);
-        }
-        fn cmds(&self) -> Vec<Command> {
-            self.sink.0.lock().unwrap().clone()
-        }
-    }
+    use std::sync::Arc;
 
     /// Track 0 = Snare (midi 38) with a couple of active steps; no undo slot.
     fn fixture() -> UiState {
@@ -625,6 +509,19 @@ mod tests {
         h.idle(); // target None → no drawer
         assert!(read(&h.ctx).target.is_none());
         assert!(h.cmds().is_empty());
+    }
+
+    #[test]
+    fn auto_closes_when_target_track_out_of_range() {
+        // Stale-target edge: `RemoveTrack` can shrink the session while the
+        // drawer is open, leaving `target` past the end. Buttons would then
+        // emit an out-of-range `track_idx` (engine bounds-checks → no panic,
+        // but the drawer dangles as "Actions · Track"). render must auto-close.
+        // (Default session has 4 tracks → idx 4 is just past the end.)
+        let h = Harness::new(fixture());
+        write(&h.ctx, |s| s.target = Some(4)); // OOB (valid idx 0..=3)
+        h.idle();
+        assert_eq!(read(&h.ctx).target, None, "OOB target must auto-close");
     }
 
     #[test]

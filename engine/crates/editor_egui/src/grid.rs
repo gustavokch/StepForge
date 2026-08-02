@@ -704,7 +704,8 @@ fn render_ratchet_popover(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use crate::test_support::{raw_input, Rec};
+    use std::sync::Arc;
 
     // ---- Pure oracle tests (no egui layout) ----
 
@@ -770,16 +771,6 @@ mod tests {
         assert_eq!(drum_name(12), "Note"); // unknown → static fallback (number shown on hover)
     }
 
-    // ---- Headless render harness (e2e wiring via real cell rects) ----
-
-    #[derive(Default, Clone)]
-    struct Rec(Arc<Mutex<Vec<Command>>>);
-    impl CommandSink for Rec {
-        fn push(&self, c: Command) {
-            self.0.lock().unwrap().push(c);
-        }
-    }
-
     fn fixture() -> UiState {
         // 4 default tracks; track 0 step 0 = Mid (active), step 1 = Accent (active).
         use sequencer_engine::models::{Session, Step};
@@ -824,16 +815,6 @@ mod tests {
             };
         }
         st
-    }
-
-    fn raw_input() -> egui::RawInput {
-        egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(
-                Pos2::new(0.0, 0.0),
-                Vec2::new(1400.0, 800.0),
-            )),
-            ..Default::default()
-        }
     }
 
     struct Harness {
@@ -1000,7 +981,7 @@ mod tests {
                 .expect("more (…) button rect recorded")
         }
         fn cmds(&self) -> Vec<Command> {
-            self.sink.0.lock().unwrap().clone()
+            self.sink.cmds()
         }
     }
 

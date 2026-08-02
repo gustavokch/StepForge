@@ -4,6 +4,9 @@ pub mod action_drawer;
 pub mod feel;
 pub mod grid;
 pub mod note_picker;
+pub mod overlay;
+#[cfg(test)]
+mod test_support;
 pub mod track_management;
 pub mod transport;
 pub mod ui_state;
@@ -87,7 +90,7 @@ pub fn render(ctx: &Context, ui_state: &UiState, sink: &impl CommandSink) {
         grid::render_step_grid(ui, ui_state, sink);
 
         // Phase 2 §T T11 — track-level overlays. Rendered last as floating
-        // `egui::Window`s so they float above the whole editor (not just the
+        // `egui::Area`s so they float above the whole editor (not just the
         // grid). Each is a no-op unless its widget-local target is set; the two
         // are mutually exclusive (opening one clears the other's target). The
         // grid header drum-name tap opens the NotePicker; the `…` button opens

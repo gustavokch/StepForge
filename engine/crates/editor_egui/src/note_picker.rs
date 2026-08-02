@@ -14,8 +14,11 @@
 //! focus, which breaks single-click selection both headlessly and in a host),
 //! rendered last from [`crate::render`] so it floats above the whole editor.
 
-use egui::{Color32, Context, Id, Key, Pos2, Rect, RichText, Vec2};
+#[cfg(test)]
+use egui::Rect;
+use egui::{Color32, Context, Id, Pos2, RichText, Vec2};
 use sequencer_engine::command::Command;
+use std::sync::LazyLock;
 
 use crate::grid::{drum_name, BORDER_WEAK, PRIMARY, SURFACE_HIGH};
 use crate::{CommandSink, UiState};
@@ -113,6 +116,16 @@ const GM_DRUMS: [(u8, &str); 16] = [
     (50, "High Tom"),
 ];
 
+/// Precomputed `"{name}  ({midi})"` cell labels. `render_gm` would otherwise
+/// `format!` 16 of these every frame; the GM set is a `const` table, so format
+/// once at first use (UI thread, not RT). Indexed in lockstep with [`GM_DRUMS`].
+static GM_CELL_LABELS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    GM_DRUMS
+        .iter()
+        .map(|&(midi, name)| format!("{}  ({})", name, midi))
+        .collect()
+});
+
 /// Pitch classes (note % 12) that are black keys: C#/D#/F#/G#/A#.
 const BLACK_PC: [u8; 5] = [1, 3, 6, 8, 10];
 
@@ -123,6 +136,12 @@ pub(crate) fn render_note_picker(ctx: &Context, ui_state: &UiState, sink: &impl 
     let Some(track_idx) = st.target else {
         return;
     };
+    // Stale-target guard: `RemoveTrack` can shrink the session under an open
+    // sheet, leaving `target` past the end (no track to select). Close instead.
+    if track_idx >= ui_state.tracks().len() {
+        close(ctx);
+        return;
+    }
     let current = ui_state.tracks().get(track_idx).map(|t| t.midi_note);
 
     // Reset test probes each frame (a frame after a select-and-close must not
@@ -187,7 +206,9 @@ pub(crate) fn render_note_picker(ctx: &Context, ui_state: &UiState, sink: &impl 
     // header click is still "primary_clicked" this frame, so skip the
     // outside-click dismiss branch then (Esc still dismisses).
     let is_open_frame = crate::frame_nr(ctx) == st.opened_at;
-    dismiss_outside_or_esc(ctx, rect, is_open_frame);
+    if crate::overlay::should_dismiss(ctx, rect, is_open_frame) {
+        close(ctx);
+    }
 }
 
 fn render_gm(
@@ -200,9 +221,9 @@ fn render_gm(
     egui::Grid::new("stepforge.note_picker.gm")
         .num_columns(2)
         .show(ui, |ui| {
-            for &(midi, name) in GM_DRUMS.iter() {
+            for (i, &(midi, _name)) in GM_DRUMS.iter().enumerate() {
                 let sel = Some(midi) == current;
-                let btn = egui::Button::new(format!("{}  ({})", name, midi))
+                let btn = egui::Button::new(GM_CELL_LABELS[i].as_str())
                     .min_size(Vec2::new(150.0, 0.0))
                     .fill(if sel { PRIMARY } else { SURFACE_HIGH })
                     .stroke(if sel {
@@ -274,115 +295,13 @@ fn render_piano(
     });
 }
 
-/// Esc (any frame) or a primary click outside the sheet rect (any frame EXCEPT
-/// the opening one) closes the sheet without emitting — mirrors the
-/// ratchet-popover dismiss (`grid.rs`), with the open-frame guard standing in
-/// for the ratchet's `!alt` modifier (a plain-click open has no modifier).
-fn dismiss_outside_or_esc(ctx: &Context, rect: Rect, is_open_frame: bool) {
-    let dismiss = ctx.input(|i| i.key_pressed(Key::Escape))
-        || (!is_open_frame
-            && ctx.input(|i| {
-                i.pointer.primary_clicked()
-                    && i.pointer.latest_pos().is_none_or(|p| !rect.contains(p))
-            }));
-    if dismiss {
-        close(ctx);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use egui::{Modifiers, PointerButton, Pos2};
+    use crate::test_support::Harness;
+    use egui::{Key, Pos2};
     use sequencer_engine::models::Session;
-    use std::sync::{Arc, Mutex};
-
-    #[derive(Default, Clone)]
-    struct Rec(Arc<Mutex<Vec<Command>>>);
-    impl CommandSink for Rec {
-        fn push(&self, c: Command) {
-            self.0.lock().unwrap().push(c);
-        }
-    }
-
-    fn raw_input() -> egui::RawInput {
-        egui::RawInput {
-            screen_rect: Some(Rect::from_min_size(
-                Pos2::new(0.0, 0.0),
-                Vec2::new(1400.0, 800.0),
-            )),
-            ..Default::default()
-        }
-    }
-
-    struct Harness {
-        ctx: egui::Context,
-        state: UiState,
-        sink: Rec,
-    }
-    impl Harness {
-        fn new(state: UiState) -> Self {
-            Self {
-                ctx: egui::Context::default(),
-                state,
-                sink: Rec::default(),
-            }
-        }
-        fn frame(&self, raw: egui::RawInput) {
-            let _ = self
-                .ctx
-                .run(raw, |ctx| crate::render(ctx, &self.state, &self.sink));
-        }
-        fn idle(&self) {
-            self.frame(raw_input());
-        }
-        /// A floating `egui::Area`'s widgets don't receive clicks until the
-        /// Area's interaction state has settled across a few frames (its rect
-        /// must age into `memory.areas` so the press-target lookup resolves to
-        /// the Area's layer). At 60 fps this is ~50 ms — invisible in a host —
-        /// but a headless harness drives one frame per call, so an overlay just
-        /// opened via `write` needs a few idle frames before its buttons click.
-        /// The grid's ratchet gets this for free (its Alt+click open gesture is
-        /// already two frames); a cold-open does not, so we settle explicitly.
-        fn settle(&self) {
-            for _ in 0..4 {
-                self.idle();
-            }
-        }
-        fn click_primary(&self, pos: Pos2) {
-            let mods = Modifiers::default();
-            let mut a = raw_input();
-            a.events.push(egui::Event::PointerButton {
-                pos,
-                button: PointerButton::Primary,
-                pressed: true,
-                modifiers: mods,
-            });
-            self.frame(a);
-            let mut b = raw_input();
-            b.events.push(egui::Event::PointerButton {
-                pos,
-                button: PointerButton::Primary,
-                pressed: false,
-                modifiers: mods,
-            });
-            self.frame(b);
-        }
-        fn press_key(&self, key: Key) {
-            let mut r = raw_input();
-            r.events.push(egui::Event::Key {
-                key,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers: Default::default(),
-            });
-            self.frame(r);
-        }
-        fn cmds(&self) -> Vec<Command> {
-            self.sink.0.lock().unwrap().clone()
-        }
-    }
+    use std::sync::Arc;
 
     /// Track 0 = Snare (midi 38) so the highlight probe is a known value and
     /// the GM cell for 38 is the current-note cell.
@@ -535,6 +454,18 @@ mod tests {
         h.settle();
         // No crash; track absent → nothing to select, no emit.
         assert!(h.cmds().is_empty());
+    }
+
+    #[test]
+    fn auto_closes_when_target_track_out_of_range() {
+        // Stale-target edge: `RemoveTrack` can shrink the session while the
+        // sheet is open, leaving `target` past the end (no track to select,
+        // buttons would emit OOB `track_idx`). render must auto-close.
+        // (Default session has 4 tracks → idx 4 is just past the end.)
+        let h = Harness::new(fixture());
+        write(&h.ctx, |s| s.target = Some(4)); // OOB (valid idx 0..=3)
+        h.idle();
+        assert_eq!(read(&h.ctx).target, None, "OOB target must auto-close");
     }
 
     #[test]
