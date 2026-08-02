@@ -71,7 +71,7 @@ T10c|x|TransportBar: play/stop (transport_action→Command::Play/Stop, reflect U
 T10d|x|FeelBar: swing slider→Command::SetGlobalSwing, humanize→Command::SetHumanize, quantize-grain selector→Command::SetQuantizeGrain, pattern switcher→Command::QueuePattern|V4
 T10e|x|TrackManagementBar: add→Command::AddTrack, remove→Command::RemoveTrack|V4
 T10f|x|Phase 1 close: cargo xtask bundle stepforge_clap --release → .clap; Bitwig/Reaper (step-grid edits audible, transport follows, widgets responsive); cargo test -p stepforge_editor_egui + stepforge_clap + workspace; iOS guard cargo check -p sequencer_engine --target aarch64-apple-ios (rustup PATH); flip T10 .→x|V1,V5,V7
-T11|.|Phase 2 ActionDrawer + NotePickerSheet (Roll/Vary/Cut/Copy/Paste/Trash/Undo + strength; GM-drums grid + piano roll)|V4
+T11|x|Phase 2 ActionDrawer + NotePickerSheet (Roll/Vary/Cut/Copy/Paste/Trash/Undo + strength; GM-drums grid + piano roll); DAW smoke GO (Bitwig); review cleanup @1674ccc (shared overlay::should_dismiss + test_support harness merge, stale-target OOB close guard, GM-label LazyLock precompute, dead slider-probe drop); cargo test + clippy -D warnings + iOS guard|V1,V4,V5
 T12|.|Phase 3 PerformanceView + PatternOptionsSheet (3×3 pattern grid, track LEDs/mutes, quantize, follow-action)|V4
 T13|.|Phase 4 SettingsSheet + theme/typography polish + VST3 (clap-wrapper) + codesign/notarization + CI + Live dummy 2×2 audio bus|V7
 
