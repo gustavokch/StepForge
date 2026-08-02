@@ -50,7 +50,11 @@ pub(crate) const TEXT_MUTED: Color32 = Color32::from_rgb(0x8A, 0x8A, 0x8A);
 pub(crate) const BORDER_WEAK: Color32 = Color32::from_rgb(0x33, 0x33, 0x33);
 
 // ---- Layout (desktop; iOS `GridMetrics` port, fixed size-classes) ----
-const HEADER_WIDTH: f32 = 120.0;
+// 140 fits the longest drum name ("Closed Hat"/"Side Stick") + the mute + `…`
+// header buttons without the name label overflowing into the step grid (was 120,
+// which "Closed Hat" spilled past — T11 smoke). The drum_name table is fixed
+// (9 names), so this needs no per-name truncation.
+const HEADER_WIDTH: f32 = 140.0;
 const CELL_W_16: f32 = 26.0;
 const CELL_W_8: f32 = 52.0; // zoom = 8 doubles width
 const CELL_H: f32 = 34.0;
