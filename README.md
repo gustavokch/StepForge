@@ -116,7 +116,7 @@ build_install_macos.sh # clean build + install the macOS app into ~/Applications
 
 StepForge ships as two independent surfaces that build separately. Pick one:
 
-- **Swift app + AUv3 (iOS & macOS)** — SwiftUI/Rust standalone apps plus the
+- **Swift app + AUv3 (iOS + macOS)** — SwiftUI/Rust standalone apps plus the
   AUv3 host-driven MIDI effect. Needs Xcode + XcodeGen + a rustup toolchain with
   iOS targets. See [Swift app + AUv3](#swift-app--auv3-ios--macos) below.
 - **CLAP plugin (macOS)** — pure-Rust `nih-plug` + `egui`, no Swift, no C ABI.
@@ -129,7 +129,7 @@ cross-compile to iOS — plus Xcode + Command Line Tools):
 
 ```bash
 brew install xcodegen                 # generates the Xcode project from app/project.yml
-engine/scripts/setup.sh               # rustup stable + iOS/macOS targets + cbindgen
+engine/scripts/setup.sh               # rustup stable + iOS targets + cbindgen
 ```
 
 Build the engine (the app's prebuild script runs this too):
