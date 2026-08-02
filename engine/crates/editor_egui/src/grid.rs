@@ -83,6 +83,14 @@ fn mute_btn_rects_id() -> Id {
 fn popover_rect_id() -> Id {
     Id::new("stepforge.grid.popover_rect")
 }
+#[cfg(test)]
+pub(crate) fn note_btn_rects_id() -> Id {
+    Id::new("stepforge.grid.note_btns")
+}
+#[cfg(test)]
+pub(crate) fn more_btn_rects_id() -> Id {
+    Id::new("stepforge.grid.more_btns")
+}
 
 /// Visible-columns zoom. `Eight` = zoomed in (doubled cell width); `Sixteen` = default.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -201,8 +209,10 @@ fn ratchet_label(r: Ratchet) -> &'static str {
 /// GM drum name (minimal port of iOS `DrumNames`; full table is T11 NotePicker).
 /// Returns a `&'static str` so the mapped path allocates nothing per frame;
 /// unmapped notes return `"Note"`; the raw number is shown as a hover
-/// tooltip on the header name.
-fn drum_name(note: u8) -> &'static str {
+/// tooltip on the header name. `pub(crate)`: the T11 ActionDrawer title and the
+/// NotePickerSheet current-note label both reuse this short map (the long GM
+/// table lives in `note_picker::GM_DRUMS`).
+pub(crate) fn drum_name(note: u8) -> &'static str {
     match note {
         35 | 36 => "Kick",
         37 => "Side Stick",
@@ -568,21 +578,44 @@ fn header(ui: &mut Ui, track_idx: usize, track: &Track, sink: &impl CommandSink)
                 });
             }
             ui.vertical(|ui| {
-                let name_resp = ui.label(
-                    egui::RichText::new(drum_name(track.midi_note))
-                        .color(if track.muted {
-                            TEXT_MUTED
-                        } else {
-                            TEXT_PRIMARY
-                        })
-                        .strong(),
-                );
-                // Raw MIDI note number as a hover tooltip on the name (lazy:
-                // the `format!` runs only while the pointer is over the name,
-                // not per frame). One line in the 34px header → no clip, and
-                // drops the per-frame NOTE alloc (closes N2).
-                name_resp.on_hover_text(format!("NOTE {}", track.midi_note));
+                // T11 — the drum name is the NotePickerSheet trigger (iOS
+                // TrackHeader drum-name tap). Clickable label: `Sense::click`
+                // so the same `Response` reports `.clicked()` AND keeps the
+                // lazy NOTE hover tooltip (the `format!` runs only while the
+                // pointer is over the name, not per frame — closes N2).
+                let name_resp = ui
+                    .add(
+                        egui::Label::new(
+                            egui::RichText::new(drum_name(track.midi_note))
+                                .color(if track.muted {
+                                    TEXT_MUTED
+                                } else {
+                                    TEXT_PRIMARY
+                                })
+                                .strong(),
+                        )
+                        .sense(Sense::click()),
+                    )
+                    .on_hover_text(format!("NOTE {}", track.midi_note));
+                #[cfg(test)]
+                ui.ctx().data_mut(|d| {
+                    d.get_temp_mut_or_default::<Vec<(usize, Rect)>>(note_btn_rects_id())
+                        .push((track_idx, name_resp.rect));
+                });
+                if name_resp.clicked() {
+                    crate::note_picker::open(ui.ctx(), track_idx);
+                }
             });
+            // T11 — "…" opens the ActionDrawer for this track (iOS ellipsis).
+            let more_resp = ui.add(egui::Button::new("…").fill(SURFACE_HIGH));
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| {
+                d.get_temp_mut_or_default::<Vec<(usize, Rect)>>(more_btn_rects_id())
+                    .push((track_idx, more_resp.rect));
+            });
+            if more_resp.clicked() {
+                crate::action_drawer::open(ui.ctx(), track_idx);
+            }
         },
     );
 }
@@ -937,6 +970,26 @@ mod tests {
                 .map(|(_, r)| r.center())
                 .expect("mute button rect recorded")
         }
+        fn note_btn_center(&self, t: usize) -> Pos2 {
+            self.idle();
+            self.ctx
+                .data(|d| d.get_temp::<Vec<(usize, Rect)>>(note_btn_rects_id()))
+                .unwrap_or_default()
+                .into_iter()
+                .find(|(tt, _)| *tt == t)
+                .map(|(_, r)| r.center())
+                .expect("note button rect recorded")
+        }
+        fn more_btn_center(&self, t: usize) -> Pos2 {
+            self.idle();
+            self.ctx
+                .data(|d| d.get_temp::<Vec<(usize, Rect)>>(more_btn_rects_id()))
+                .unwrap_or_default()
+                .into_iter()
+                .find(|(tt, _)| *tt == t)
+                .map(|(_, r)| r.center())
+                .expect("more (…) button rect recorded")
+        }
         fn cmds(&self) -> Vec<Command> {
             self.sink.0.lock().unwrap().clone()
         }
@@ -1261,5 +1314,39 @@ mod tests {
                 muted: true
             }
         ));
+    }
+
+    // ---- T11: header trigger points (NotePicker + ActionDrawer open) ----
+
+    #[test]
+    fn grid_header_drum_name_click_opens_note_picker() {
+        let h = Harness::new(fixture());
+        let pos = h.note_btn_center(0);
+        h.click_primary(pos, egui::Modifiers::default());
+        // Drum-name tap opens the NotePickerSheet for track 0…
+        assert_eq!(
+            crate::note_picker::read(&h.ctx).target,
+            Some(0),
+            "drum-name click should open the NotePickerSheet"
+        );
+        // …and closes the ActionDrawer (mutual exclusion — one overlay at a time).
+        assert_eq!(crate::action_drawer::read(&h.ctx).target, None);
+        // Opening is UI-only state — no command emitted.
+        assert!(h.cmds().is_empty());
+    }
+
+    #[test]
+    fn grid_header_dots_click_opens_action_drawer() {
+        let h = Harness::new(fixture());
+        let pos = h.more_btn_center(0);
+        h.click_primary(pos, egui::Modifiers::default());
+        assert_eq!(
+            crate::action_drawer::read(&h.ctx).target,
+            Some(0),
+            "… click should open the ActionDrawer"
+        );
+        // Mutual exclusion: NotePicker closed.
+        assert_eq!(crate::note_picker::read(&h.ctx).target, None);
+        assert!(h.cmds().is_empty());
     }
 }
