@@ -79,10 +79,12 @@ impl Clipboard {
         }
     }
     /// Copy pattern `idx` to the clipboard, then clear its steps (slot stays
-    /// `Some`). Equivalent to track `cut` generalized to every track.
-    pub fn cut_pattern(&mut self, s: &mut Session, idx: usize) {
+    /// `Some`). Equivalent to track `cut` generalized to every track. Returns
+    /// `true` iff the slot was `Some` and the cut mutated it (clear_pattern
+    /// bool); a `None`/out-of-range slot is a silent no-op returning `false`.
+    pub fn cut_pattern(&mut self, s: &mut Session, idx: usize) -> bool {
         self.copy_pattern(s, idx);
-        Self::clear_pattern(s, idx);
+        Self::clear_pattern(s, idx)
     }
     /// Paste the pattern clipboard into slot `idx`: overwrites tracks +
     /// follow_action, preserves the target's `id`. Returns `false` (no-op) if the
@@ -101,12 +103,17 @@ impl Clipboard {
     }
     /// Clear every track's steps in pattern `idx` (all inactive). The slot stays
     /// `Some` — re-editable + RT-safe (no `None` active-pattern risk). Associated
-    /// fn: touches no clipboard state.
-    pub fn clear_pattern(s: &mut Session, idx: usize) {
+    /// fn: touches no clipboard state. Returns `true` iff the slot was `Some`
+    /// (and steps were reset); `None`/out-of-range returns `false` so the engine
+    /// can gate publish on actual mutation.
+    pub fn clear_pattern(s: &mut Session, idx: usize) -> bool {
         if let Some(p) = s.patterns.get_mut(idx).and_then(|opt| opt.as_mut()) {
             for t in p.tracks.iter_mut() {
                 t.steps = [Step::default(); STEP_COUNT];
             }
+            true
+        } else {
+            false
         }
     }
 }
@@ -181,7 +188,10 @@ mod tests {
             velocity_zone: VelocityZone::Accent,
             ..Default::default()
         };
-        Clipboard::clear_pattern(&mut s, 3);
+        assert!(
+            Clipboard::clear_pattern(&mut s, 3),
+            "clear on a Some slot must return true"
+        );
         let p = s.patterns[3].as_ref().unwrap();
         assert!(p.tracks.iter().all(|t| t.steps.iter().all(|st| !st.active)));
         // Slot + tracks + midi_notes survive.

@@ -908,6 +908,9 @@ impl Engine {
                             && validate_session(&env.session) =>
                     {
                         self.publish(env.session);
+                        // Cancel any queue pending from the previous session so a
+                        // stale `PatternSwitched` can't fire into the reloaded one.
+                        self.scheduler.cancel();
                         self.reload_generation.fetch_add(1, Ordering::AcqRel);
                         let snap = self.snapshot.load_full();
                         push_large_event(
@@ -998,15 +1001,15 @@ impl Engine {
             // one) for Cut/Paste/Clear; Copy is clipboard-only (session
             // unchanged). Only the mutating variants publish + emit a
             // FullSnapshot — Copy must not (the mirror learns nothing from a
-            // Copy; see `Command::CopyPattern`'s contract), and Paste honors the
-            // bool so an empty clipboard / out-of-range target is a no-op without
-            // a spurious snapshot. No per-track undo (undo is track-scoped) —
-            // pattern ops are not undoable. Clear = reset all steps in the
-            // pattern (slot stays `Some` — re-editable + RT-safe, no `None`
-            // active-pattern risk; mirrors track `Trash` generalized to all
-            // tracks). Emits no new event: FullSnapshot carries the change.
-            // (`PatternCleared` stays unused — it would mean slot=None, which
-            // this never produces.)
+            // Copy; see `Command::CopyPattern`'s contract), and Paste/Cut/Clear
+            // honor the bool so an empty clipboard / out-of-range / `None` slot
+            // is a no-op without a spurious snapshot. No per-track undo (undo is
+            // track-scoped) — pattern ops are not undoable. Clear = reset all
+            // steps in the pattern (slot stays `Some` — re-editable + RT-safe,
+            // no `None` active-pattern risk; mirrors track `Trash` generalized
+            // to all tracks). Emits no new event: FullSnapshot carries the
+            // change. (`PatternCleared` stays unused — it would mean slot=None,
+            // which this never produces.)
             CutPattern { ref index }
             | CopyPattern { ref index }
             | PastePattern { ref index }
@@ -1014,10 +1017,15 @@ impl Engine {
                 let index = *index;
                 if index < crate::models::PATTERN_SLOTS {
                     let mut s = (*self.snapshot.load_full()).clone();
+                    // Inner match is exhaustive over the four variants the outer
+                    // guard admits at runtime. Rust's outer `|` guard does not
+                    // narrow `cmd`'s type for exhaustiveness checking, so the
+                    // fallback uses `unreachable!` (loud panic) instead of a
+                    // silent `false` — a stray variant here is a logic bug that
+                    // must not silently drop the publish.
                     let mutated = match cmd {
                         CutPattern { .. } => {
-                            self.clipboard.lock().unwrap().cut_pattern(&mut s, index);
-                            true
+                            self.clipboard.lock().unwrap().cut_pattern(&mut s, index)
                         }
                         CopyPattern { .. } => {
                             // Clipboard-only — session unchanged: no publish.
@@ -1028,10 +1036,11 @@ impl Engine {
                             self.clipboard.lock().unwrap().paste_pattern(&mut s, index)
                         }
                         ClearPattern { .. } => {
-                            crate::clipboard::Clipboard::clear_pattern(&mut s, index);
-                            true
+                            crate::clipboard::Clipboard::clear_pattern(&mut s, index)
                         }
-                        _ => false,
+                        _ => unreachable!(
+                            "inner match constrained to Cut/Copy/Paste/Clear by outer guard"
+                        ),
                     };
                     if mutated {
                         self.publish(s);
@@ -1910,6 +1919,37 @@ mod tests {
         assert!(
             e.hot_events.dequeue().is_none(),
             "rejected LoadSession must not emit a hot event"
+        );
+    }
+
+    /// LoadSession cancels a pending scheduler queue: a `QueuePattern` from the
+    /// old session must NOT survive into the reloaded one (no stale
+    /// `PatternSwitched`). The cancel is a silent atomic store — no event is
+    /// emitted (existing tests assert exactly one FullSnapshot per LoadSession).
+    #[test]
+    fn load_session_cancels_pending_scheduler_queue() {
+        use crate::scheduler::NO_PATTERN;
+        use crate::serde_ext::SessionEnvelope;
+        let e = Engine::new();
+        // Queue a pattern on the old session.
+        e.apply_command(Command::QueuePattern {
+            index: 4,
+            quantize: crate::models::QuantizeGrain::NextBar,
+        });
+        assert_eq!(
+            e.scheduler.queued_pattern_for_test(),
+            4,
+            "precondition: a pattern must be queued"
+        );
+        // LoadSession of a valid envelope.
+        let env = SessionEnvelope::wrap(Session::default());
+        let bytes = postcard::to_allocvec(&env).unwrap();
+        e.apply_command(Command::LoadSession { bytes });
+        // Pending queue is gone — no stale `PatternSwitched` can fire.
+        assert_eq!(
+            e.scheduler.queued_pattern_for_test(),
+            NO_PATTERN,
+            "LoadSession must cancel any queue pending from the previous session"
         );
     }
 

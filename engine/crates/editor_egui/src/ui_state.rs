@@ -168,20 +168,34 @@ impl UiState {
             }
             EngineEvent::FullSnapshot { session } => {
                 self.session = Some(Arc::new(session.clone()));
-                self.queued_pattern = None;
-                self.queued_pattern_quantize = None;
-                self.pattern_loop_count = 0;
-                self.playheads.clear();
-                // NOTE: `undo_available` is intentionally NOT cleared here. It
-                // mirrors the engine's per-track undo slots, which a session
-                // snapshot does not change. The engine emits `UndoAvailable`
-                // (hot channel) as the authoritative per-track signal after
-                // every mutating op; clearing on `FullSnapshot` fought that —
-                // the editor drains hot (UndoAvailable) before large
-                // (FullSnapshot), so the clear ran AFTER the insert and left
-                // `undo_available` perpetually empty (Undo button always grey,
-                // T11 DAW smoke). `PatternSwitched` still clears it (correct:
-                // a new pattern's undo history is separate).
+                // NOTE: liveness fields (`undo_available`, `queued_pattern`,
+                // `queued_pattern_quantize`, `pattern_loop_count`, `playheads`)
+                // are intentionally NOT cleared here. None of them are part of
+                // `Session` — they are scheduler / transport / playhead state
+                // driven by separate hot events + the engine's SchedulerClock:
+                //   - `queued_pattern` / `queued_pattern_quantize` ← the
+                //     SchedulerClock's pending queue (`PatternQueued` inserts,
+                //     `PatternSwitched` consumes);
+                //   - `pattern_loop_count` ← `PatternLoopCountChanged`;
+                //   - `playheads` ← coalesced `Playhead` events;
+                //   - `undo_available` ← `UndoAvailable`.
+                // A `FullSnapshot` only replaces the musical ground truth
+                // (tracks, steps, lengths, notes, bpm, …); it does NOT reseed
+                // the scheduler's pending queue or the playhead positions. This
+                // is the same bug class as the T11 Undo wipe (PR #29): the
+                // editor drains hot (PatternQueued / UndoAvailable / …) before
+                // large (FullSnapshot), so a clear here runs AFTER the hot
+                // inserts and wipes live state the engine still honors. Concrete
+                // T12 failure: in Performance mode, queue P4 then Clear another
+                // pattern → Clear mutates steps → engine emits `FullSnapshot`;
+                // the mirror wipe made the QUEUED glow vanish even though the
+                // scheduler still has P4 pending and will fire
+                // `PatternSwitched{4}`. `PatternSwitched` still clears all of
+                // these (correct: a switch is a clean scheduler/transport start,
+                // and a new pattern's undo history is separate). Reload
+                // (`LoadSession`) now cancels the scheduler queue at the source
+                // on the engine side, so reload still clears the pending queue —
+                // just not via this mirror wipe.
                 self.last_error = None;
                 self.last_overflow = None;
             }
@@ -468,10 +482,11 @@ mod tests {
     }
 
     #[test]
-    fn apply_full_snapshot_replaces_and_resets() {
+    fn apply_full_snapshot_replaces_session_preserves_liveness() {
         let mut st = state_with_session();
         st.queued_pattern = Some(3);
-        st.pattern_loop_count = 9;
+        st.queued_pattern_quantize = Some(QuantizeGrain::NextBar);
+        st.pattern_loop_count = 5;
         st.playheads.insert(0, 4);
         st.undo_available.insert(1);
         st.last_error = Some(EngineError {
@@ -486,14 +501,23 @@ mod tests {
         };
         st.apply(&EngineEvent::FullSnapshot { session: snap });
         assert_eq!(st.session.as_ref().unwrap().bpm, 99.0); // replaced wholesale
-        assert_eq!(st.queued_pattern, None);
-        assert_eq!(st.queued_pattern_quantize, None);
-        assert_eq!(st.pattern_loop_count, 0);
-        assert!(st.playheads.is_empty());
-        // undo_available is NOT cleared by FullSnapshot — it mirrors the
-        // engine's undo slots (governed by UndoAvailable), which a session
-        // snapshot doesn't change. See the FullSnapshot arm comment.
+
+        // Liveness fields SURVIVE a FullSnapshot — they are NOT part of
+        // `Session` (driven by PatternQueued / PatternSwitched /
+        // PatternLoopCountChanged / Playhead / UndoAvailable hot events + the
+        // engine SchedulerClock). Same reasoning as the undo_available
+        // exception (T11 DAW smoke, PR #29): the editor drains hot before
+        // large, so a clear here would run AFTER the hot inserts and wipe live
+        // state the scheduler still honors. Locks the T12 fix — see the
+        // FullSnapshot arm comment for the full rationale.
+        assert_eq!(st.queued_pattern, Some(3));
+        assert_eq!(st.queued_pattern_quantize, Some(QuantizeGrain::NextBar));
+        assert_eq!(st.pattern_loop_count, 5);
+        assert_eq!(st.playheads.get(&0).copied(), Some(4));
+        assert!(!st.playheads.is_empty());
         assert!(st.undo_available.contains(&1));
+
+        // Reasonable to reset on a fresh snapshot.
         assert!(st.last_error.is_none());
         assert!(st.last_overflow.is_none());
     }
