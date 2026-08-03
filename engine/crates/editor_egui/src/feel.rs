@@ -10,9 +10,11 @@
 //! The single exception is the **quantize grain**: the engine stores it on the
 //! scheduler (T16) and does not echo it to the mirror yet, so the FeelBar holds
 //! the current grain as widget-local [`FeelUiState`] here, cycled on click —
-//! matching the iOS `@State quantizeGrain`. The pattern switcher hardcodes
-//! `NextBar` (faithful to `FeelBar.swift:136`), so the grain stays display-only
-//! for now; the mirror echo + a live-grain `QueuePattern` land with T16.
+//! matching the iOS `@State quantizeGrain`. The grain slot is exposed
+//! editor-wide via [`read_grain`]/[`write_grain`] so the PerformanceView (T12)
+//! quantize selector + pattern-queue share ONE grain with the FeelBar GRID
+//! cycle; the pattern-bank `QueuePattern` reads it back at emit-time via
+//! [`queue_pattern_command`], so both surfaces honor the user-selected grain.
 
 use egui::{
     popup::popup_above_or_below_widget, AboveOrBelow, Button, Context, CornerRadius, Id, Layout,
@@ -57,13 +59,18 @@ pub(crate) fn humanize_command(timing: f32, velocity: f32) -> Command {
     }
 }
 
-/// Pattern-queue command. iOS hardcodes `.nextBar` at the `PatternPickerPopover`
-/// call site (`FeelBar.swift:136`) — the picker does NOT use the live quantize
-/// grain, so neither do we (faithful port; revisit if a later spec ties them).
-pub(crate) fn queue_pattern_command(index: usize) -> Command {
+/// Pattern-queue command. The grain comes from the live shared slot
+/// ([`read_grain`]) — the SAME source the PerformanceView (T12) uses for its
+/// `QueuePattern` emit. Without this, the two surfaces would silently disagree
+/// (FeelBar always `NextBar`, PerformanceView the user-selected grain) while
+/// displaying the same grain label, so a user who sets GRID to e.g. "Pat",
+/// switches to Editing, and queues from the pattern bank would get `NextBar`
+/// instead of "Pat". `ctx` is taken so the read happens at emit-time, not
+/// call-time (matches PerformanceView's `read_grain(&ctx)` site).
+pub(crate) fn queue_pattern_command(ctx: &Context, index: usize) -> Command {
     Command::QueuePattern {
         index,
-        quantize: QuantizeGrain::NextBar,
+        quantize: read_grain(ctx),
     }
 }
 
@@ -266,7 +273,7 @@ pub fn render_feel_bar(ui: &mut Ui, state: &UiState, sink: &impl CommandSink) {
 
         // ---- quantize cycle (right-aligned): GRID {label} → SetQuantizeGrain ----
         ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-            let g = read_feel(ui.ctx()).grain;
+            let g = read_grain(ui.ctx());
             let q_resp = ui.add(quantize_button(g));
             #[cfg(test)]
             ui.ctx()
@@ -274,7 +281,7 @@ pub fn render_feel_bar(ui: &mut Ui, state: &UiState, sink: &impl CommandSink) {
             if q_resp.clicked() {
                 let ng = next_grain(g);
                 sink.push(Command::SetQuantizeGrain { grain: ng });
-                write_feel(ui.ctx(), |f| f.grain = ng);
+                write_grain(ui.ctx(), ng);
             }
         });
     });
@@ -283,7 +290,7 @@ pub fn render_feel_bar(ui: &mut Ui, state: &UiState, sink: &impl CommandSink) {
 // ---- Popovers ----
 
 /// Pattern bank popover (3×3, slots P1..P9). Active slot filled PRIMARY, queued
-/// slot outlined PRIMARY. Click → `QueuePattern{index, NextBar}` + close.
+/// slot outlined PRIMARY. Click → `QueuePattern{index, <live grain>}` + close.
 fn render_patterns_popover(
     ui: &mut Ui,
     anchor: &egui::Response,
@@ -335,7 +342,7 @@ fn render_patterns_popover(
                                 );
                             }
                             if resp.clicked() {
-                                sink.push(queue_pattern_command(idx));
+                                sink.push(queue_pattern_command(ui.ctx(), idx));
                                 ui.memory_mut(|m| m.close_popup());
                             }
                             if (idx + 1) % 3 == 0 {
@@ -553,14 +560,42 @@ mod tests {
     }
 
     #[test]
-    fn queue_pattern_hardcodes_next_bar() {
-        // iOS call site hardcodes .nextBar (FeelBar.swift:136) — faithful port.
+    fn queue_pattern_uses_live_shared_grain() {
+        // FeelBar's pattern-bank QueuePattern must use the SAME shared grain as
+        // the PerformanceView (T12) — both read via `read_grain`. Default
+        // FeelUiState grain is `NextBeat`, so without an explicit set the emit
+        // is `NextBeat` (NOT the legacy `NextBar`). Setting the grain via
+        // `write_grain` flips the emit, proving the cross-surface parity fix.
+        let ctx = egui::Context::default();
         for idx in 0..PATTERN_SLOTS {
             assert!(matches!(
-                queue_pattern_command(idx),
-                Command::QueuePattern { index, quantize: QuantizeGrain::NextBar } if index == idx
+                queue_pattern_command(&ctx, idx),
+                Command::QueuePattern { index, quantize: QuantizeGrain::NextBeat } if index == idx
             ));
         }
+        write_grain(&ctx, QuantizeGrain::EndOfPattern);
+        for idx in 0..PATTERN_SLOTS {
+            assert!(matches!(
+                queue_pattern_command(&ctx, idx),
+                Command::QueuePattern { index, quantize: QuantizeGrain::EndOfPattern } if index == idx
+            ));
+        }
+    }
+
+    #[test]
+    fn queue_pattern_honors_write_grain() {
+        // Locks the cross-surface parity fix: set grain=EndOfPattern via the
+        // editor-wide wrapper, then assert queue_pattern_command emits that
+        // grain (the bug was FeelBar always emitting NextBar regardless).
+        let ctx = egui::Context::default();
+        write_grain(&ctx, QuantizeGrain::EndOfPattern);
+        assert!(matches!(
+            queue_pattern_command(&ctx, 4),
+            Command::QueuePattern {
+                index: 4,
+                quantize: QuantizeGrain::EndOfPattern
+            }
+        ));
     }
 
     #[test]
@@ -678,8 +713,13 @@ mod tests {
     }
 
     #[test]
-    fn patterns_slot_emits_queuepattern_next_bar() {
+    fn patterns_slot_emits_queuepattern_with_shared_grain() {
+        // The popover emit must read the live shared grain (the same slot
+        // PerformanceView reads). Default FeelUiState grain is `NextBeat`, so
+        // we set it to `NextBar` via the editor-wide wrapper to prove the
+        // popover honors it end-to-end (⊥ the legacy silent `NextBar` hardcode).
         let h = Harness::new(UiState::default());
+        write_grain(&h.ctx, QuantizeGrain::NextBar);
         h.click(h.center(patterns_btn_rect_id())); // open bank
         h.click(h.slot_center(2)); // queue slot P3 (idx 2)
         match h.cmds().as_slice() {
