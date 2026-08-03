@@ -186,6 +186,20 @@ fn write_feel(ctx: &Context, f: impl FnOnce(&mut FeelUiState)) {
     ctx.data_mut(|d| f(d.get_temp_mut_or_default(feel_id())));
 }
 
+/// Editor-wide quantize-grain accessors. The grain lives in [`FeelUiState`]
+/// (T10d) because the engine stores it on the scheduler and does not echo it to
+/// the mirror yet (T16). Exposed `pub(crate)` so the Phase 3 PerformanceView
+/// (T12) quantize selector + pattern-queue share ONE grain with the FeelBar GRID
+/// cycle — without this, two widget-local copies would drift across modes (both
+/// emit `SetQuantizeGrain` to the same scheduler slot, but neither reads it
+/// back), so the display would lie after a mode switch.
+pub(crate) fn read_grain(ctx: &Context) -> QuantizeGrain {
+    read_feel(ctx).grain
+}
+pub(crate) fn write_grain(ctx: &Context, g: QuantizeGrain) {
+    write_feel(ctx, |f| f.grain = g);
+}
+
 // ---- The bar ----
 
 /// Render the FeelBar (Row 2). `state` is the live mirror; gestures emit via

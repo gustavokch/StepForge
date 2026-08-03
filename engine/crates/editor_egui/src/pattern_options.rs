@@ -1,0 +1,535 @@
+//! Phase 3 §T T12 — PatternOptionsSheet overlay. Port of the iOS
+//! `app/StepForge/Features/Performance/PatternOptionsSheet.swift`.
+//!
+//! Pure UI (V4): edits a per-pattern [`FollowAction`] draft and emits a single
+//! [`Command::SetFollowAction`] on Save (the WHOLE struct — `after_loops` +
+//! `action` — atomically, matching the command shape). Cancel/Esc/outside-click
+//! dismiss without emit. Like the T11 overlays it is a floating `egui::Area` +
+//! `Frame::popup` (NOT `egui::Window`: a Window's title-bar absorbs the first
+//! click), with the shared [`crate::overlay::should_dismiss`] + open-frame guard.
+//!
+//! iOS parity + the requested editor enhancement: the action picker exposes ALL
+//! six `FollowActionType` variants incl. `PlaySpecific` (iOS omits it). The
+//! draft carries a Copy [`ActionDraft`] (no `Uuid` — the model's
+//! `PlaySpecific(Uuid)` is never named or constructed here); for `PlaySpecific`
+//! a target-pattern picker resolves the chosen slot's `Pattern.id` to a `Uuid`
+//! on Save via [`resolve_action`].
+
+use egui::{ComboBox, Context, Id, Pos2, RichText, Slider};
+use sequencer_engine::command::Command;
+use sequencer_engine::models::{FollowAction, FollowActionType, Pattern, PATTERN_SLOTS};
+
+#[cfg(test)]
+use egui::Rect;
+
+use crate::grid::{PRIMARY, SURFACE_HIGH, TEXT_MUTED, TEXT_PRIMARY};
+use crate::{CommandSink, UiState};
+
+fn pattern_options_id() -> Id {
+    Id::new("stepforge.pattern_options")
+}
+#[cfg(test)]
+fn save_rect_id() -> Id {
+    Id::new("stepforge.pattern_options.save")
+}
+#[cfg(test)]
+fn cancel_rect_id() -> Id {
+    Id::new("stepforge.pattern_options.cancel")
+}
+#[cfg(test)]
+fn window_rect_id() -> Id {
+    Id::new("stepforge.pattern_options.window")
+}
+
+/// Copy mirror of [`FollowActionType`] for the draft state (the model variant is
+/// not `Copy` — `PlaySpecific(Uuid)` — and `Uuid` is not re-exported from
+/// `models`, so this enum never names or constructs one). Mapped to the real
+/// variant on Save by [`resolve_action`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum ActionDraft {
+    #[default]
+    None,
+    PlayNext,
+    PlaySpecific,
+    PlayPrevious,
+    Stop,
+    PlayRandom,
+}
+
+const ACTION_OPTIONS: [(ActionDraft, &str); 6] = [
+    (ActionDraft::None, "None"),
+    (ActionDraft::PlayNext, "Play Next"),
+    (ActionDraft::PlaySpecific, "Play Specific"),
+    (ActionDraft::PlayPrevious, "Play Previous"),
+    (ActionDraft::Stop, "Stop"),
+    (ActionDraft::PlayRandom, "Play Random"),
+];
+
+fn draft_label(d: ActionDraft) -> &'static str {
+    ACTION_OPTIONS
+        .iter()
+        .find(|(v, _)| *v == d)
+        .map(|(_, l)| *l)
+        .unwrap_or("None")
+}
+
+/// Resolve the draft to a real [`FollowActionType`]. `PlaySpecific` reads the
+/// target slot's `Pattern.id` (a `Uuid`) — `unwrap_or_default` covers an
+/// out-of-range/empty target without naming the type.
+fn resolve_action(
+    draft: ActionDraft,
+    specific_target: usize,
+    patterns: &[Option<Pattern>; PATTERN_SLOTS],
+) -> FollowActionType {
+    match draft {
+        ActionDraft::None => FollowActionType::None,
+        ActionDraft::PlayNext => FollowActionType::PlayNext,
+        ActionDraft::PlaySpecific => FollowActionType::PlaySpecific(
+            patterns
+                .get(specific_target)
+                .and_then(|p| p.as_ref())
+                .map(|p| p.id)
+                .unwrap_or_default(),
+        ),
+        ActionDraft::PlayPrevious => FollowActionType::PlayPrevious,
+        ActionDraft::Stop => FollowActionType::Stop,
+        ActionDraft::PlayRandom => FollowActionType::PlayRandom,
+    }
+}
+
+/// Map a real action back to the draft + seed the `PlaySpecific` target index.
+fn action_to_draft(
+    action: &FollowActionType,
+    patterns: &[Option<Pattern>; PATTERN_SLOTS],
+) -> (ActionDraft, usize) {
+    match action {
+        FollowActionType::None => (ActionDraft::None, 0),
+        FollowActionType::PlayNext => (ActionDraft::PlayNext, 0),
+        FollowActionType::PlayPrevious => (ActionDraft::PlayPrevious, 0),
+        FollowActionType::Stop => (ActionDraft::Stop, 0),
+        FollowActionType::PlayRandom => (ActionDraft::PlayRandom, 0),
+        FollowActionType::PlaySpecific(id) => {
+            let target = (0..PATTERN_SLOTS)
+                .find(|&i| patterns[i].as_ref().is_some_and(|p| p.id == *id))
+                .unwrap_or(0);
+            (ActionDraft::PlaySpecific, target)
+        }
+    }
+}
+
+/// Widget-local draft state. `Clone + Copy` (all fields are `Copy` — the `Uuid`
+/// is NOT carried here, only an [`ActionDraft`] + a target slot index). Seeded
+/// from the target pattern's current follow_action on [`open`].
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PatternOptionsState {
+    pub(crate) target: Option<usize>,
+    pub(crate) opened_at: u64,
+    after_loops: u32,
+    action: ActionDraft,
+    /// For `PlaySpecific`: the chosen target slot. Resolved to its `Pattern.id`
+    /// on Save by [`resolve_action`].
+    specific_target: usize,
+}
+
+pub(crate) fn read(ctx: &Context) -> PatternOptionsState {
+    ctx.data(|d| {
+        d.get_temp::<PatternOptionsState>(pattern_options_id())
+            .unwrap_or_default()
+    })
+}
+fn write(ctx: &Context, f: impl FnOnce(&mut PatternOptionsState)) {
+    ctx.data_mut(|d| f(d.get_temp_mut_or_default(pattern_options_id())));
+}
+
+/// Open the sheet for `pattern_idx`, seeding the draft from that pattern's
+/// current follow_action (V4: read-only over `state` here).
+pub(crate) fn open(ctx: &Context, pattern_idx: usize, state: &UiState) {
+    let frame = crate::frame_nr(ctx);
+    let (after_loops, action, specific_target) = match state.session.as_deref() {
+        Some(s) => match s.patterns.get(pattern_idx).and_then(Option::as_ref) {
+            Some(p) => {
+                let (draft, tgt) = action_to_draft(&p.follow_action.action, &s.patterns);
+                (p.follow_action.after_loops, draft, tgt)
+            }
+            None => (1, ActionDraft::None, 0),
+        },
+        None => (1, ActionDraft::None, 0),
+    };
+    write(ctx, |s| {
+        s.target = Some(pattern_idx);
+        s.opened_at = frame;
+        s.after_loops = after_loops;
+        s.action = action;
+        s.specific_target = specific_target;
+    });
+}
+
+pub(crate) fn close(ctx: &Context) {
+    write(ctx, |s| s.target = None);
+}
+
+/// Render the sheet if open. No-op (no panic) when closed, no session, or the
+/// target slot was cleared under an open sheet (stale-target auto-close).
+pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &impl CommandSink) {
+    let mut st = read(ctx);
+    let Some(pattern_idx) = st.target else {
+        return;
+    };
+    let patterns = match ui_state.session.as_deref() {
+        Some(s) => &s.patterns,
+        None => {
+            close(ctx);
+            return;
+        }
+    };
+    if pattern_idx >= PATTERN_SLOTS || patterns[pattern_idx].is_none() {
+        close(ctx);
+        return;
+    }
+
+    #[cfg(test)]
+    ctx.data_mut(|d| {
+        *d.get_temp_mut_or_default::<Option<Rect>>(window_rect_id()) = None;
+        *d.get_temp_mut_or_default::<Option<Rect>>(save_rect_id()) = None;
+        *d.get_temp_mut_or_default::<Option<Rect>>(cancel_rect_id()) = None;
+    });
+
+    let area = egui::Area::new(Id::new("stepforge.pattern_options"))
+        .order(egui::Order::Foreground)
+        .current_pos(Pos2::new(40.0, 60.0))
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_min_width(320.0);
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new(format!("Pattern P{} · Follow Action", pattern_idx + 1))
+                            .strong(),
+                    );
+                    ui.separator();
+
+                    // After Loops (1..=16, iOS Stepper parity).
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("After Loops").color(TEXT_MUTED));
+                        let mut v = st.after_loops as i32;
+                        // Range-bounded; `changed()` clamps to 1..=16 on edit.
+                        let sr = ui.add(Slider::new(&mut v, 1..=16).text("loops"));
+                        if sr.changed() {
+                            st.after_loops = v.clamp(1, 16) as u32;
+                        }
+                        let _ = sr;
+                        ui.label(RichText::new(format!("{}", st.after_loops)).color(TEXT_PRIMARY));
+                    });
+
+                    // Action type — all six variants (incl PlaySpecific; editor enhancement).
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Action").color(TEXT_MUTED));
+                        ComboBox::from_id_salt("stepforge.pattern_options.action")
+                            .selected_text(draft_label(st.action))
+                            .show_ui(ui, |ui| {
+                                for (variant, label) in ACTION_OPTIONS {
+                                    ui.selectable_value(&mut st.action, variant, label);
+                                }
+                            });
+                    });
+
+                    // PlaySpecific target picker (only when PlaySpecific selected).
+                    if st.action == ActionDraft::PlaySpecific {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Target").color(TEXT_MUTED));
+                            let mut tgt = st.specific_target;
+                            ComboBox::from_id_salt("stepforge.pattern_options.target")
+                                .selected_text(format!("P{}", tgt + 1))
+                                .show_ui(ui, |ui| {
+                                    for (i, opt) in patterns.iter().enumerate() {
+                                        if opt.is_some() {
+                                            ui.selectable_value(&mut tgt, i, format!("P{}", i + 1));
+                                        }
+                                    }
+                                });
+                            st.specific_target = tgt.min(PATTERN_SLOTS - 1);
+                        });
+                    }
+
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        let save = ui.add(
+                            egui::Button::new(RichText::new("Save").strong().color(PRIMARY))
+                                .fill(SURFACE_HIGH)
+                                .min_size(egui::Vec2::new(80.0, 0.0)),
+                        );
+                        #[cfg(test)]
+                        ctx.data_mut(|d| {
+                            *d.get_temp_mut_or_default::<Option<Rect>>(save_rect_id()) =
+                                Some(save.rect)
+                        });
+                        if save.clicked() {
+                            let action = resolve_action(st.action, st.specific_target, patterns);
+                            sink.push(Command::SetFollowAction {
+                                pattern_idx,
+                                action: FollowAction {
+                                    after_loops: st.after_loops,
+                                    action,
+                                },
+                            });
+                            close(ctx);
+                        }
+                        let cancel = ui.button("Cancel");
+                        #[cfg(test)]
+                        ctx.data_mut(|d| {
+                            *d.get_temp_mut_or_default::<Option<Rect>>(cancel_rect_id()) =
+                                Some(cancel.rect)
+                        });
+                        if cancel.clicked() {
+                            close(ctx);
+                        }
+                    });
+                });
+            });
+        });
+
+    // Persist the draft back (slider/combobox edits survive to next frame).
+    write(ctx, |s| {
+        s.after_loops = st.after_loops;
+        s.action = st.action;
+        s.specific_target = st.specific_target;
+    });
+
+    let rect = area.response.rect;
+    #[cfg(test)]
+    ctx.data_mut(|d| *d.get_temp_mut_or_default::<Option<Rect>>(window_rect_id()) = Some(rect));
+    // `opened_at == frame_nr` only on the opening frame; the gear `…` click that
+    // opened the sheet is still "primary_clicked" then, so skip the outside-click
+    // dismiss branch that frame (Esc still dismisses). Same guard as the T11
+    // overlays.
+    let is_open_frame = crate::frame_nr(ctx) == st.opened_at;
+    if crate::overlay::should_dismiss(ctx, rect, is_open_frame) {
+        close(ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::Harness;
+    use sequencer_engine::models::{FollowAction, FollowActionType, Session};
+    use std::sync::Arc;
+
+    /// A session whose pattern 1 already carries a seeded follow_action so the
+    /// sheet's draft-seed path is exercised.
+    fn fixture_with_follow(idx: usize, fa: FollowAction) -> UiState {
+        let mut st = UiState {
+            session: Some(Arc::new(Session::default())),
+            ..Default::default()
+        };
+        {
+            let s = Arc::make_mut(st.session.as_mut().unwrap());
+            if let Some(Some(p)) = s.patterns.get_mut(idx) {
+                p.follow_action = fa;
+            }
+        }
+        st
+    }
+
+    fn open_for(idx: usize, state: UiState) -> Harness {
+        let h = Harness::new(state);
+        crate::write_mode(&h.ctx, crate::AppMode::Performance);
+        // open() seeds the draft from the live mirror.
+        crate::pattern_options::open(&h.ctx, idx, &h.state);
+        h
+    }
+
+    fn save_center(ctx: &Context) -> egui::Pos2 {
+        ctx.data(|d| d.get_temp::<Option<Rect>>(save_rect_id()))
+            .unwrap_or_default()
+            .map(|r| r.center())
+            .expect("save rect recorded")
+    }
+    fn cancel_center(ctx: &Context) -> egui::Pos2 {
+        ctx.data(|d| d.get_temp::<Option<Rect>>(cancel_rect_id()))
+            .unwrap_or_default()
+            .map(|r| r.center())
+            .expect("cancel rect recorded")
+    }
+    fn window_rect(ctx: &Context) -> Option<Rect> {
+        ctx.data(|d| d.get_temp::<Option<Rect>>(window_rect_id()))
+            .unwrap_or_default()
+    }
+
+    // ---- pure oracle tests ----
+
+    #[test]
+    fn resolve_action_all_drafts() {
+        let p: [Option<Pattern>; PATTERN_SLOTS] = std::array::from_fn(|_| Some(Pattern::default()));
+        assert!(matches!(
+            resolve_action(ActionDraft::None, 0, &p),
+            FollowActionType::None
+        ));
+        assert!(matches!(
+            resolve_action(ActionDraft::PlayNext, 0, &p),
+            FollowActionType::PlayNext
+        ));
+        assert!(matches!(
+            resolve_action(ActionDraft::PlayPrevious, 0, &p),
+            FollowActionType::PlayPrevious
+        ));
+        assert!(matches!(
+            resolve_action(ActionDraft::Stop, 0, &p),
+            FollowActionType::Stop
+        ));
+        assert!(matches!(
+            resolve_action(ActionDraft::PlayRandom, 0, &p),
+            FollowActionType::PlayRandom
+        ));
+        // PlaySpecific carries the chosen slot's id.
+        let target_id = p[5].as_ref().unwrap().id;
+        match resolve_action(ActionDraft::PlaySpecific, 5, &p) {
+            FollowActionType::PlaySpecific(id) => assert_eq!(id, target_id),
+            other => panic!("expected PlaySpecific, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn action_to_draft_round_trip_play_specific() {
+        let mut p: [Option<Pattern>; PATTERN_SLOTS] =
+            std::array::from_fn(|_| Some(Pattern::default()));
+        let id3 = p[3].as_ref().unwrap().id;
+        let (draft, tgt) = action_to_draft(&FollowActionType::PlaySpecific(id3), &p);
+        assert_eq!(draft, ActionDraft::PlaySpecific);
+        assert_eq!(tgt, 3);
+        // A cleared target slot → falls back to index 0.
+        p[3] = None;
+        let (draft, tgt) = action_to_draft(&FollowActionType::PlaySpecific(id3), &p);
+        assert_eq!(draft, ActionDraft::PlaySpecific);
+        assert_eq!(tgt, 0); // not found → 0
+    }
+
+    // ---- headless harness tests (e2e wiring) ----
+
+    #[test]
+    fn save_emits_set_follow_action_and_closes() {
+        // Pattern 1 starts with default follow_action (after_loops=1, None).
+        let h = open_for(
+            1,
+            UiState {
+                session: Some(Arc::new(Session::default())),
+                ..Default::default()
+            },
+        );
+        h.settle();
+        h.click_primary(save_center(&h.ctx));
+        let cmds = h.cmds();
+        assert_eq!(cmds.len(), 1);
+        assert!(matches!(
+            cmds[0],
+            Command::SetFollowAction {
+                pattern_idx: 1,
+                action: FollowAction {
+                    after_loops: 1,
+                    action: FollowActionType::None,
+                },
+            }
+        ));
+        assert_eq!(read(&h.ctx).target, None); // closed on save
+    }
+
+    #[test]
+    fn seeded_draft_round_trips_existing_follow_action() {
+        // Pattern 2 already has after_loops=4, PlayNext → draft seeds from it.
+        let st = fixture_with_follow(
+            2,
+            FollowAction {
+                after_loops: 4,
+                action: FollowActionType::PlayNext,
+            },
+        );
+        let h = open_for(2, st);
+        h.settle();
+        h.click_primary(save_center(&h.ctx));
+        assert!(matches!(
+            h.cmds().as_slice(),
+            [Command::SetFollowAction {
+                pattern_idx: 2,
+                action: FollowAction {
+                    after_loops: 4,
+                    action: FollowActionType::PlayNext,
+                },
+            }]
+        ));
+    }
+
+    #[test]
+    fn cancel_dismisses_without_emit() {
+        let h = open_for(
+            0,
+            UiState {
+                session: Some(Arc::new(Session::default())),
+                ..Default::default()
+            },
+        );
+        h.settle();
+        h.click_primary(cancel_center(&h.ctx));
+        assert_eq!(read(&h.ctx).target, None);
+        assert!(h.cmds().is_empty());
+    }
+
+    #[test]
+    fn esc_dismisses_without_emit() {
+        let h = open_for(
+            0,
+            UiState {
+                session: Some(Arc::new(Session::default())),
+                ..Default::default()
+            },
+        );
+        h.settle();
+        h.press_key(egui::Key::Escape);
+        assert_eq!(read(&h.ctx).target, None);
+        assert!(h.cmds().is_empty());
+    }
+
+    #[test]
+    fn outside_click_dismisses() {
+        let h = open_for(
+            0,
+            UiState {
+                session: Some(Arc::new(Session::default())),
+                ..Default::default()
+            },
+        );
+        h.settle();
+        let outside = window_rect(&h.ctx)
+            .map(|r| egui::Pos2::new(r.max.x + 25.0, r.center().y))
+            .expect("window rect recorded");
+        h.click_primary(outside);
+        assert_eq!(read(&h.ctx).target, None);
+    }
+
+    #[test]
+    fn closed_renders_no_panic() {
+        let h = Harness::new(UiState {
+            session: Some(Arc::new(Session::default())),
+            ..Default::default()
+        });
+        h.idle(); // target None → no sheet
+        assert!(read(&h.ctx).target.is_none());
+        assert!(h.cmds().is_empty());
+    }
+
+    #[test]
+    fn auto_closes_when_target_slot_cleared() {
+        // Stale-target: the slot under an open sheet can be nulled (engine
+        // PatternCleared). render must auto-close rather than read a None pattern.
+        let mut st = UiState {
+            session: Some(Arc::new(Session::default())),
+            ..Default::default()
+        };
+        {
+            let s = Arc::make_mut(st.session.as_mut().unwrap());
+            s.patterns[2] = None;
+        }
+        let h = Harness::new(st);
+        write(&h.ctx, |s| s.target = Some(2)); // open on a now-empty slot
+        h.idle();
+        assert_eq!(read(&h.ctx).target, None, "cleared target must auto-close");
+    }
+}

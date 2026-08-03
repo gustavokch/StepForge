@@ -91,6 +91,10 @@ fn bpm_rect_id() -> Id {
 fn zoom_rects_id() -> Id {
     Id::new("stepforge.transport.zoom_rects")
 }
+#[cfg(test)]
+fn mode_rect_id() -> Id {
+    Id::new("stepforge.transport.mode_rect")
+}
 
 /// Render the transport bar. `state` is the live mirror; gestures emit via
 /// `sink`. Read-only over session ground truth except for the explicit emits
@@ -160,6 +164,35 @@ pub fn render_transport_bar(ui: &mut Ui, state: &UiState, sink: &impl CommandSin
         });
         if z != before {
             write_grid(&ctx, |g| g.zoom = z);
+        }
+
+        ui.separator();
+
+        // Phase 3 §T T12 — AppMode toggle (Editing ↔ Performance). Widget-local
+        // (`stepforge.mode`); no engine command on switch (iOS `@State mode`).
+        // The button label names the mode it switches TO. Switching mode closes
+        // the other mode's track-level overlays so nothing dangles over the
+        // newly-shown view (a drawer opened in Editing would otherwise float
+        // over the PerformanceView, and vice-versa for the PatternOptionsSheet).
+        let mode = crate::read_mode(&ctx);
+        let (next_mode, label) = match mode {
+            crate::AppMode::Editing => (crate::AppMode::Performance, "Performance"),
+            crate::AppMode::Performance => (crate::AppMode::Editing, "Editing"),
+        };
+        let m_resp = ui.button(RichText::new(label).color(TEXT_PRIMARY).strong());
+        #[cfg(test)]
+        ctx.data_mut(|d| d.insert_temp(mode_rect_id(), m_resp.rect));
+        if m_resp.clicked() {
+            crate::write_mode(&ctx, next_mode);
+            match next_mode {
+                crate::AppMode::Performance => {
+                    crate::note_picker::close(&ctx);
+                    crate::action_drawer::close(&ctx);
+                }
+                crate::AppMode::Editing => {
+                    crate::pattern_options::close(&ctx);
+                }
+            }
         }
     });
 }
