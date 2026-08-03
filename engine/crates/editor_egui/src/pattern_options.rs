@@ -15,7 +15,7 @@
 //! a target-pattern picker resolves the chosen slot's `Pattern.id` to a `Uuid`
 //! on Save via [`resolve_action`].
 
-use egui::{ComboBox, Context, Id, Pos2, RichText, Slider};
+use egui::{ComboBox, Context, Id, Pos2, RichText, Slider, Ui};
 use sequencer_engine::command::Command;
 use sequencer_engine::models::{FollowAction, FollowActionType, Pattern, PATTERN_SLOTS};
 
@@ -39,6 +39,21 @@ fn cancel_rect_id() -> Id {
 #[cfg(test)]
 fn window_rect_id() -> Id {
     Id::new("stepforge.pattern_options.window")
+}
+#[cfg(test)]
+fn clip_rect_id() -> Id {
+    // Vec<(ActionClip, Rect)> — the four whole-pattern clipboard buttons.
+    Id::new("stepforge.pattern_options.clip")
+}
+
+/// Test-facing tag for the four whole-pattern clipboard buttons (rect-lookup key).
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ActionClip {
+    Cut,
+    Copy,
+    Paste,
+    Clear,
 }
 
 /// Copy mirror of [`FollowActionType`] for the draft state (the model variant is
@@ -71,6 +86,17 @@ fn draft_label(d: ActionDraft) -> &'static str {
         .find(|(v, _)| *v == d)
         .map(|(_, l)| *l)
         .unwrap_or("None")
+}
+
+/// A fixed-width whole-pattern clipboard button. Returns its [`egui::Response`]
+/// — the caller records the (tagged) rect + dispatches the command, so this
+/// helper carries no `cfg(test)`-only params (mirrors `action_drawer::action_btn`).
+fn clip_btn(ui: &mut Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new(RichText::new(label).color(TEXT_PRIMARY))
+            .fill(SURFACE_HIGH)
+            .min_size(egui::Vec2::new(60.0, 0.0)),
+    )
 }
 
 /// Resolve the draft to a real [`FollowActionType`]. `PlaySpecific` reads the
@@ -201,13 +227,65 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_min_width(320.0);
                 ui.vertical(|ui| {
-                    ui.label(
-                        RichText::new(format!("Pattern P{} · Follow Action", pattern_idx + 1))
-                            .strong(),
-                    );
+                    ui.label(RichText::new(format!("Pattern P{}", pattern_idx + 1)).strong());
                     ui.separator();
 
-                    // After Loops (1..=16, iOS Stepper parity).
+                    // Whole-pattern clipboard: Cut/Copy/Paste/Clear. Each emits
+                    // its command then closes the sheet — Paste overwrites
+                    // follow_action, so the draft would go stale if it stayed
+                    // open; a fresh open re-seeds. The clipboard is engine-side
+                    // (the editor cannot see whether it is empty), so Paste is
+                    // always enabled and no-ops when the clipboard is empty.
+                    #[cfg(test)]
+                    ctx.data_mut(|d| {
+                        d.get_temp_mut_or_default::<Vec<(ActionClip, Rect)>>(clip_rect_id())
+                            .clear();
+                    });
+                    ui.horizontal(|ui| {
+                        let cut = clip_btn(ui, "Cut");
+                        #[cfg(test)]
+                        ctx.data_mut(|d| {
+                            d.get_temp_mut_or_default::<Vec<(ActionClip, Rect)>>(clip_rect_id())
+                                .push((ActionClip::Cut, cut.rect))
+                        });
+                        if cut.clicked() {
+                            sink.push(Command::CutPattern { index: pattern_idx });
+                            close(ctx);
+                        }
+                        let copy = clip_btn(ui, "Copy");
+                        #[cfg(test)]
+                        ctx.data_mut(|d| {
+                            d.get_temp_mut_or_default::<Vec<(ActionClip, Rect)>>(clip_rect_id())
+                                .push((ActionClip::Copy, copy.rect))
+                        });
+                        if copy.clicked() {
+                            sink.push(Command::CopyPattern { index: pattern_idx });
+                            close(ctx);
+                        }
+                        let paste = clip_btn(ui, "Paste");
+                        #[cfg(test)]
+                        ctx.data_mut(|d| {
+                            d.get_temp_mut_or_default::<Vec<(ActionClip, Rect)>>(clip_rect_id())
+                                .push((ActionClip::Paste, paste.rect))
+                        });
+                        if paste.clicked() {
+                            sink.push(Command::PastePattern { index: pattern_idx });
+                            close(ctx);
+                        }
+                        let clear = clip_btn(ui, "Clear");
+                        #[cfg(test)]
+                        ctx.data_mut(|d| {
+                            d.get_temp_mut_or_default::<Vec<(ActionClip, Rect)>>(clip_rect_id())
+                                .push((ActionClip::Clear, clear.rect))
+                        });
+                        if clear.clicked() {
+                            sink.push(Command::ClearPattern { index: pattern_idx });
+                            close(ctx);
+                        }
+                    });
+                    ui.separator();
+
+                    // Follow Action — After Loops (1..=16, iOS Stepper parity).
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("After Loops").color(TEXT_MUTED));
                         let mut v = st.after_loops as i32;
@@ -531,5 +609,56 @@ mod tests {
         write(&h.ctx, |s| s.target = Some(2)); // open on a now-empty slot
         h.idle();
         assert_eq!(read(&h.ctx).target, None, "cleared target must auto-close");
+    }
+
+    fn clip_center(ctx: &Context, want: ActionClip) -> egui::Pos2 {
+        ctx.data(|d| d.get_temp::<Vec<(ActionClip, Rect)>>(clip_rect_id()))
+            .unwrap_or_default()
+            .into_iter()
+            .find(|(c, _)| *c == want)
+            .map(|(_, r)| r.center())
+            .unwrap_or_else(|| panic!("clip {want:?} rect recorded"))
+    }
+
+    #[test]
+    fn clipboard_buttons_emit_expected_commands_and_close() {
+        // Each whole-pattern clipboard button emits its command carrying the
+        // open pattern's index, then closes the sheet (Paste overwrites
+        // follow_action → a stale draft would result if it stayed open). The
+        // paste/clear EFFECT is covered by the core clipboard tests; here we
+        // assert the editor emits the right command.
+        let st = || UiState {
+            session: Some(Arc::new(Session::default())),
+            ..Default::default()
+        };
+        for clip in [
+            ActionClip::Cut,
+            ActionClip::Copy,
+            ActionClip::Paste,
+            ActionClip::Clear,
+        ] {
+            let h = open_for(2, st());
+            h.settle();
+            h.click_primary(clip_center(&h.ctx, clip));
+            let cmds = h.cmds();
+            assert_eq!(
+                cmds.len(),
+                1,
+                "{clip:?}: expected one command, got {cmds:?}"
+            );
+            let ok = match (clip, &cmds[0]) {
+                (ActionClip::Cut, Command::CutPattern { index }) => *index == 2,
+                (ActionClip::Copy, Command::CopyPattern { index }) => *index == 2,
+                (ActionClip::Paste, Command::PastePattern { index }) => *index == 2,
+                (ActionClip::Clear, Command::ClearPattern { index }) => *index == 2,
+                _ => false,
+            };
+            assert!(ok, "{clip:?}: wrong command {:?}", cmds[0]);
+            assert_eq!(
+                read(&h.ctx).target,
+                None,
+                "{clip:?}: sheet must close after emit"
+            );
+        }
     }
 }

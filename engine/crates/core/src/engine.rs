@@ -993,6 +993,47 @@ impl Engine {
                     },
                 );
             }
+            // Pattern clipboard arm (T12 extension): Cut/Copy/Paste/Clear whole
+            // patterns. Mirrors the track-op arm: clone the snapshot, mutate
+            // `patterns[index]` (any slot, not just the active one), publish + a
+            // FullSnapshot. No per-track undo (undo is track-scoped) — pattern
+            // ops are not undoable. Clear = reset all steps in the pattern (slot
+            // stays `Some` — re-editable + RT-safe, no `None` active-pattern risk;
+            // mirrors track `Trash` generalized to all tracks). Emits no new
+            // event: FullSnapshot carries the change. (`PatternCleared` stays
+            // unused — it would mean slot=None, which this never produces.)
+            CutPattern { ref index }
+            | CopyPattern { ref index }
+            | PastePattern { ref index }
+            | ClearPattern { ref index } => {
+                let index = *index;
+                if index < crate::models::PATTERN_SLOTS {
+                    let mut s = (*self.snapshot.load_full()).clone();
+                    match cmd {
+                        CutPattern { .. } => {
+                            self.clipboard.lock().unwrap().cut_pattern(&mut s, index)
+                        }
+                        CopyPattern { .. } => {
+                            self.clipboard.lock().unwrap().copy_pattern(&s, index)
+                        }
+                        PastePattern { .. } => {
+                            self.clipboard.lock().unwrap().paste_pattern(&mut s, index);
+                        }
+                        ClearPattern { .. } => {
+                            crate::clipboard::Clipboard::clear_pattern(&mut s, index)
+                        }
+                        _ => {}
+                    }
+                    self.publish(s);
+                    let snap = self.snapshot.load_full();
+                    crate::midi_out::push_large_event(
+                        &self.large_events,
+                        EngineEvent::FullSnapshot {
+                            session: (*snap).clone(),
+                        },
+                    );
+                }
+            }
             // Scheduler (Task 16 module, wired here): the worker records the
             // request in atomics; the RT loop fires it at the quantize boundary
             // (`check_scheduler`); the worker then publishes the switch.
