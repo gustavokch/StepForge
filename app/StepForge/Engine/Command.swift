@@ -50,6 +50,11 @@ enum Command {
     // shifts tag 33 and breaks the C-ABI wire format + golden fixtures — don't remove.
     case setLinkEnabled(enabled: Bool)                                     // 33
     case midiClockTick                                                     // 34
+    // -- whole-pattern clipboard (CLAP parity — issue #33) --
+    case copyPattern(index: Int)                                           // 35
+    case cutPattern(index: Int)                                            // 36
+    case pastePattern(index: Int)                                          // 37
+    case clearPattern(index: Int)                                          // 38
 
     /// Postcard variant index (Rust declaration order). Asserted in `PostcardTests`.
     var tag: UInt {
@@ -63,6 +68,7 @@ enum Command {
         case .setQuantizeGrain: 24; case .setFollowAction: 25; case .setMidiDestinations: 26
         case .setGlobalMidiChannel: 27; case .play: 28; case .stop: 29; case .requestFullSnapshot: 30
         case .serialize: 31; case .loadSession: 32; case .setLinkEnabled: 33; case .midiClockTick: 34
+        case .copyPattern: 35; case .cutPattern: 36; case .pastePattern: 37; case .clearPattern: 38
         }
     }
 
@@ -94,6 +100,8 @@ enum Command {
             w.writeUInt(UInt(t)); w.writeF32(strength)
         case .cut(let t), .copy(let t), .paste(let t), .trash(let t), .undo(let t):
             w.writeUInt(UInt(t))
+        case .copyPattern(let i), .cutPattern(let i), .pastePattern(let i), .clearPattern(let i):
+            w.writeUInt(UInt(i))
         case .queuePattern(let i, let q):
             w.writeUInt(UInt(i)); q.encode(to: &w)
         case .retriggerPattern(let q):

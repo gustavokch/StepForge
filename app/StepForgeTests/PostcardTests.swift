@@ -51,6 +51,14 @@ final class PostcardTests: XCTestCase {
         XCTAssertEqual(Command.loadSession(bytes: [9, 9]).encode(), load("cmd_loadsession_9_9"))
     }
 
+    // Whole-pattern clipboard (CLAP parity — issue #33).
+    func testCommandPatternClipboard() {
+        XCTAssertEqual(Command.copyPattern(index: 2).encode(),   load("cmd_copypattern_2"))
+        XCTAssertEqual(Command.cutPattern(index: 3).encode(),    load("cmd_cutpattern_3"))
+        XCTAssertEqual(Command.pastePattern(index: 4).encode(),  load("cmd_pastepattern_4"))
+        XCTAssertEqual(Command.clearPattern(index: 5).encode(),  load("cmd_clearpattern_5"))
+    }
+
     func testCommandSetLinkEnabled() {
         XCTAssertEqual(Command.setLinkEnabled(enabled: true).tag, 33)
     }
@@ -144,6 +152,10 @@ final class PostcardTests: XCTestCase {
         XCTAssertEqual(Command.play.tag, 28)
         XCTAssertEqual(Command.stop.tag, 29)
         XCTAssertEqual(Command.midiClockTick.tag, 34)
+        XCTAssertEqual(Command.copyPattern(index: 0).tag,  35)
+        XCTAssertEqual(Command.cutPattern(index: 0).tag,   36)
+        XCTAssertEqual(Command.pastePattern(index: 0).tag, 37)
+        XCTAssertEqual(Command.clearPattern(index: 0).tag, 38)
     }
 
     // MARK: - Robustness (Hard Rule 3: never panic across FFI)
