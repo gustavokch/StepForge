@@ -994,14 +994,19 @@ impl Engine {
                 );
             }
             // Pattern clipboard arm (T12 extension): Cut/Copy/Paste/Clear whole
-            // patterns. Mirrors the track-op arm: clone the snapshot, mutate
-            // `patterns[index]` (any slot, not just the active one), publish + a
-            // FullSnapshot. No per-track undo (undo is track-scoped) — pattern
-            // ops are not undoable. Clear = reset all steps in the pattern (slot
-            // stays `Some` — re-editable + RT-safe, no `None` active-pattern risk;
-            // mirrors track `Trash` generalized to all tracks). Emits no new
-            // event: FullSnapshot carries the change. (`PatternCleared` stays
-            // unused — it would mean slot=None, which this never produces.)
+            // patterns. Mutates `patterns[index]` (any slot, not just the active
+            // one) for Cut/Paste/Clear; Copy is clipboard-only (session
+            // unchanged). Only the mutating variants publish + emit a
+            // FullSnapshot — Copy must not (the mirror learns nothing from a
+            // Copy; see `Command::CopyPattern`'s contract), and Paste honors the
+            // bool so an empty clipboard / out-of-range target is a no-op without
+            // a spurious snapshot. No per-track undo (undo is track-scoped) —
+            // pattern ops are not undoable. Clear = reset all steps in the
+            // pattern (slot stays `Some` — re-editable + RT-safe, no `None`
+            // active-pattern risk; mirrors track `Trash` generalized to all
+            // tracks). Emits no new event: FullSnapshot carries the change.
+            // (`PatternCleared` stays unused — it would mean slot=None, which
+            // this never produces.)
             CutPattern { ref index }
             | CopyPattern { ref index }
             | PastePattern { ref index }
@@ -1009,29 +1014,35 @@ impl Engine {
                 let index = *index;
                 if index < crate::models::PATTERN_SLOTS {
                     let mut s = (*self.snapshot.load_full()).clone();
-                    match cmd {
+                    let mutated = match cmd {
                         CutPattern { .. } => {
-                            self.clipboard.lock().unwrap().cut_pattern(&mut s, index)
+                            self.clipboard.lock().unwrap().cut_pattern(&mut s, index);
+                            true
                         }
                         CopyPattern { .. } => {
-                            self.clipboard.lock().unwrap().copy_pattern(&s, index)
+                            // Clipboard-only — session unchanged: no publish.
+                            self.clipboard.lock().unwrap().copy_pattern(&s, index);
+                            false
                         }
                         PastePattern { .. } => {
-                            self.clipboard.lock().unwrap().paste_pattern(&mut s, index);
+                            self.clipboard.lock().unwrap().paste_pattern(&mut s, index)
                         }
                         ClearPattern { .. } => {
-                            crate::clipboard::Clipboard::clear_pattern(&mut s, index)
+                            crate::clipboard::Clipboard::clear_pattern(&mut s, index);
+                            true
                         }
-                        _ => {}
+                        _ => false,
+                    };
+                    if mutated {
+                        self.publish(s);
+                        let snap = self.snapshot.load_full();
+                        crate::midi_out::push_large_event(
+                            &self.large_events,
+                            EngineEvent::FullSnapshot {
+                                session: (*snap).clone(),
+                            },
+                        );
                     }
-                    self.publish(s);
-                    let snap = self.snapshot.load_full();
-                    crate::midi_out::push_large_event(
-                        &self.large_events,
-                        EngineEvent::FullSnapshot {
-                            session: (*snap).clone(),
-                        },
-                    );
                 }
             }
             // Scheduler (Task 16 module, wired here): the worker records the
