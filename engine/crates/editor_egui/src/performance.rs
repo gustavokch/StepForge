@@ -106,37 +106,27 @@ pub(crate) fn cell_state(
 }
 
 /// The pattern index the active pattern's follow-action will transition to, for
-/// the next-destination glow. Pure port of `SessionMirror.nextPatternIndex(from:)`
-/// (`SessionMirror.swift:58-78`). `None`/`Stop`/`PlayRandom` → `None`;
-/// `PlayNext`/`PlayPrevious` → the next/prev FILLED slot wrapping (nil if fewer
-/// than two filled, or if `active` is not itself filled); `PlaySpecific(id)` →
-/// the slot whose `Pattern.id` matches, else `None`.
+/// the next-destination glow. Aligned to the engine's RT follow-action
+/// (`engine.rs:~714-728`) — NOT the iOS `SessionMirror.nextPatternIndex(from:)`
+/// port the previous version claimed (the iOS mirror filters to FILLED slots;
+/// the engine does not). `None`/`Stop`/`PlayRandom` → `None`; `PlayNext` →
+/// `(active + 1) % PATTERN_SLOTS`; `PlayPrevious` →
+/// `(active + PATTERN_SLOTS - 1) % PATTERN_SLOTS` — both wrap over ALL slots, so
+/// the glow may land on an empty cell (the engine's `PlayNext` can likewise
+/// switch to a `None` slot — a separate latent engine-side concern, out of
+/// scope here; the glow now honestly reflects that). `PlaySpecific(id)` → the
+/// slot whose `Pattern.id` matches, else `None` (matches the engine's
+/// `.position(...).unwrap_or(active)` resolution, but returns `None` so the UI
+/// doesn't glow on the active cell itself when the target is missing).
 pub(crate) fn next_pattern_index(
     patterns: &[Option<Pattern>; PATTERN_SLOTS],
     active: usize,
     action: &FollowActionType,
 ) -> Option<usize> {
-    let filled: Vec<usize> = (0..PATTERN_SLOTS)
-        .filter(|&i| patterns[i].is_some())
-        .collect();
     match action {
         FollowActionType::None | FollowActionType::Stop | FollowActionType::PlayRandom => None,
-        FollowActionType::PlayNext => {
-            let n = filled.len();
-            if n < 2 {
-                return None;
-            }
-            let pos = filled.iter().position(|&i| i == active)?;
-            Some(filled[(pos + 1) % n])
-        }
-        FollowActionType::PlayPrevious => {
-            let n = filled.len();
-            if n < 2 {
-                return None;
-            }
-            let pos = filled.iter().position(|&i| i == active)?;
-            Some(filled[(pos + n - 1) % n])
-        }
+        FollowActionType::PlayNext => Some((active + 1) % PATTERN_SLOTS),
+        FollowActionType::PlayPrevious => Some((active + PATTERN_SLOTS - 1) % PATTERN_SLOTS),
         FollowActionType::PlaySpecific(id) => {
             (0..PATTERN_SLOTS).find(|&i| patterns[i].as_ref().is_some_and(|p| p.id == *id))
         }
@@ -186,10 +176,13 @@ fn cell_fill(st: CellState, pulse: f32) -> Color32 {
     }
 }
 
-/// Cell stroke. PLAYING/QUEUED get a PRIMARY ring (PLAYING width pulses); the
-/// next-destination glow overrides with a solid 3px PRIMARY ring.
+/// Cell stroke. PLAYING/QUEUED get a PRIMARY ring (PLAYING width pulses). A
+/// next-destination glow overrides with a solid 3px PRIMARY ring — EXCEPT on a
+/// Playing cell: if the active pattern's follow-action targets itself
+/// (`PlaySpecific(own_id)`), the PLAYING pulse must win, otherwise the cell
+/// collapses to a flat 3px ring and the "currently playing" signal is lost.
 fn cell_stroke(st: CellState, is_next: bool, pulse: f32) -> Stroke {
-    if is_next {
+    if is_next && st != CellState::Playing {
         return Stroke::new(3.0_f32, PRIMARY);
     }
     let (base_w, base_c) = match st {
@@ -556,7 +549,8 @@ mod tests {
             next_pattern_index(&p, 0, &FollowActionType::PlayRandom),
             None
         );
-        // PlayNext / PlayPrevious wrap over all 9 filled.
+        // PlayNext / PlayPrevious wrap over ALL 9 slots (engine-aligned: simple
+        // `(active ± 1) % PATTERN_SLOTS` over the full array, no filled filter).
         assert_eq!(
             next_pattern_index(&p, 0, &FollowActionType::PlayNext),
             Some(1)
@@ -593,27 +587,81 @@ mod tests {
     }
 
     #[test]
-    fn next_pattern_index_skips_empty_and_needs_two() {
-        // 3 filled [0,1,2]; PlayNext from 2 wraps to 0 (skips the empty 3..8).
-        let p = make_patterns(3);
+    fn next_pattern_index_wraps_over_all_slots_engine_aligned() {
+        // Engine parity with `engine.rs:~715-720`: PlayNext/PlayPrevious wrap
+        // over ALL slots — no filled filter, no <2-filled gate. Empty slots
+        // are valid destinations (the engine can switch to a None slot — a
+        // latent engine-side concern, out of scope here; the glow now honestly
+        // reflects that).
+        let p = make_patterns(3); // slots 0,1,2 filled; 3..8 empty
+                                  // Adjacent empty slot is a valid next destination (NOT skipped).
         assert_eq!(
             next_pattern_index(&p, 2, &FollowActionType::PlayNext),
+            Some(3)
+        );
+        // Wrap forward across the empty tail to slot 0.
+        assert_eq!(
+            next_pattern_index(&p, 8, &FollowActionType::PlayNext),
             Some(0)
         );
+        // PlayPrevious from 0 wraps to the last slot (8) even though it's empty.
         assert_eq!(
             next_pattern_index(&p, 0, &FollowActionType::PlayPrevious),
-            Some(2)
+            Some(8)
         );
-        // <2 filled → None (can't advance).
+        // PlayPrevious with an empty neighbor steps into it (NOT skipped).
+        assert_eq!(
+            next_pattern_index(&p, 4, &FollowActionType::PlayPrevious),
+            Some(3)
+        );
+        // A single filled slot still advances — the old <2-filled gate is gone.
         let one = make_patterns(1);
         assert_eq!(
             next_pattern_index(&one, 0, &FollowActionType::PlayNext),
-            None
+            Some(1)
         );
         assert_eq!(
             next_pattern_index(&one, 0, &FollowActionType::PlayPrevious),
-            None
+            Some(8)
         );
+    }
+
+    #[test]
+    fn cell_stroke_playing_self_target_keeps_pulse() {
+        // Self-targeting PlaySpecific: `is_next && Playing` — must keep the
+        // pulsing PLAYING stroke (2.0 + 1.5*pulse), NOT collapse to a flat 3.0
+        // next-destination ring. The "currently playing" signal must survive.
+        for pulse in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+            let s = cell_stroke(CellState::Playing, true, pulse);
+            assert!(
+                (s.width - (2.0 + 1.5 * pulse)).abs() < 1e-6,
+                "Playing cell must pulse even when is_next: pulse={pulse}, width={}",
+                s.width
+            );
+            assert_eq!(
+                s.color, PRIMARY,
+                "Playing cell keeps PRIMARY color even when is_next"
+            );
+        }
+        // Sanity: at peak pulse the PLAYING width (3.5) is distinct from the
+        // flat 3.0 destination ring.
+        let s_peak = cell_stroke(CellState::Playing, true, 1.0);
+        assert!((s_peak.width - 3.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cell_stroke_next_destination_non_playing_is_3px() {
+        // Non-playing next-destination cells get the solid 3px PRIMARY glow
+        // (unchanged behavior for the glow itself).
+        for pulse in [0.0_f32, 0.5, 1.0] {
+            assert_eq!(cell_stroke(CellState::Filled, true, pulse).width, 3.0);
+            assert_eq!(cell_stroke(CellState::Queued, true, pulse).width, 3.0);
+            assert_eq!(cell_stroke(CellState::Empty, true, pulse).width, 3.0);
+            // All destination rings are PRIMARY.
+            assert_eq!(cell_stroke(CellState::Filled, true, pulse).color, PRIMARY);
+        }
+        // Without is_next, no 3px glow on non-playing cells.
+        assert_eq!(cell_stroke(CellState::Filled, false, 0.5).width, 1.0);
     }
 
     #[test]
