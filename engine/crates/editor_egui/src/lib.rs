@@ -5,6 +5,8 @@ pub mod feel;
 pub mod grid;
 pub mod note_picker;
 pub mod overlay;
+pub mod pattern_options;
+pub mod performance;
 #[cfg(test)]
 mod test_support;
 pub mod track_management;
@@ -40,6 +42,32 @@ pub(crate) fn tick_frame(ctx: &Context) {
 }
 pub(crate) fn frame_nr(ctx: &Context) -> u64 {
     ctx.data(|d| d.get_temp::<u64>(frame_id()).unwrap_or(0))
+}
+
+// ---- Editor AppMode (T12): Editing ↔ Performance ----
+//
+// Port of the iOS `AppMode` enum (`app/StepForge/Features/AppMode.swift:7`).
+// Widget-local state in `ctx.data` temp storage (same idiom as `grid::Zoom`):
+// `render` branches on it — Editing renders the step grid, Performance renders
+// `performance::render_performance_view`. No engine command on switch (iOS
+// `@State mode`); the toggle lives in the TransportBar (the persistent top bar
+// across both modes, mirroring the iOS `appBar`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AppMode {
+    #[default]
+    Editing,
+    Performance,
+}
+
+fn mode_id() -> Id {
+    Id::new("stepforge.mode")
+}
+/// `pub(crate)` so the TransportBar toggle (T10c) + tests read/write the same slot.
+pub(crate) fn read_mode(ctx: &Context) -> AppMode {
+    ctx.data(|d| d.get_temp::<AppMode>(mode_id()).unwrap_or_default())
+}
+pub(crate) fn write_mode(ctx: &Context, m: AppMode) {
+    ctx.data_mut(|d| d.insert_temp(mode_id(), m));
 }
 
 /// Pure: which transport command a play/stop toggle emits given current state.
@@ -86,17 +114,36 @@ pub fn render(ctx: &Context, ui_state: &UiState, sink: &impl CommandSink) {
         }
 
         ui.separator();
-        // Phase 1 §T T10b — step grid (pinned headers + step cells + gestures).
-        grid::render_step_grid(ui, ui_state, sink);
+        // Phase 3 §T T12 — AppMode branch: Editing renders the step grid,
+        // Performance renders the PerformanceView (iOS `AppMode` parity — the
+        // view is fully replaced; only the persistent top bars stay). Default
+        // is Editing, so all existing grid/overlay tests see the grid unchanged.
+        match read_mode(ui.ctx()) {
+            AppMode::Editing => {
+                // Phase 1 §T T10b — step grid (pinned headers + step cells + gestures).
+                grid::render_step_grid(ui, ui_state, sink);
+            }
+            AppMode::Performance => {
+                // Phase 3 §T T12 — PerformanceView: large play/stop, 3×3 pattern
+                // grid, track LEDs/mutes, quantize selector.
+                performance::render_performance_view(ui, ui_state, sink);
+            }
+        }
 
         // Phase 2 §T T11 — track-level overlays. Rendered last as floating
         // `egui::Area`s so they float above the whole editor (not just the
         // grid). Each is a no-op unless its widget-local target is set; the two
         // are mutually exclusive (opening one clears the other's target). The
         // grid header drum-name tap opens the NotePicker; the `…` button opens
-        // the ActionDrawer.
+        // the ActionDrawer. (Editing-only by nature — their targets are set only
+        // from grid header gestures; the AppMode toggle closes them on the
+        // switch to Performance so nothing dangles over the PerformanceView.)
         note_picker::render_note_picker(ui.ctx(), ui_state, sink);
         action_drawer::render_action_drawer(ui.ctx(), ui_state, sink);
+        // Phase 3 §T T12 — PatternOptionsSheet overlay (Performance-only trigger:
+        // a pattern cell's `…` gear). Floating `egui::Area`; no-op when its
+        // target is None. The AppMode toggle closes it on the switch to Editing.
+        pattern_options::render_pattern_options(ui.ctx(), ui_state, sink);
     });
 }
 

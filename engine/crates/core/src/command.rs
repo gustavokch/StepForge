@@ -119,6 +119,29 @@ pub enum Command {
     },
     /// Inbound MIDI Clock tick — drives step advance when sync = MidiClock (§9.3; E6).
     MidiClockTick,
+    /// Copy a whole pattern (tracks + follow_action) to the pattern clipboard.
+    /// CLAP-only surface (no iOS UI yet). The clipboard is engine-internal; no
+    /// event is emitted (the mirror learns nothing changed from a Copy).
+    CopyPattern {
+        index: usize,
+    },
+    /// Copy a whole pattern to the clipboard, then clear its steps. The slot
+    /// stays `Some` (re-editable, RT-safe) — mirrors track `Trash` generalized to
+    /// all tracks; it is NOT a `PatternCleared` (slot=None).
+    CutPattern {
+        index: usize,
+    },
+    /// Paste the pattern clipboard into a slot: overwrites tracks + follow_action
+    /// wholesale, preserves the target's `id` (avoids `PlaySpecific` Uuid
+    /// collisions — mirrors how track paste spares `midi_note`). No-op if the
+    /// clipboard is empty.
+    PastePattern {
+        index: usize,
+    },
+    /// Clear every track's steps in a pattern (all inactive). Slot stays `Some`.
+    ClearPattern {
+        index: usize,
+    },
 }
 
 #[cfg(test)]
@@ -138,6 +161,10 @@ mod tests {
             Command::LoadSession { bytes: vec![9, 9] },
             Command::SetLinkEnabled { enabled: true },
             Command::MidiClockTick,
+            Command::CopyPattern { index: 2 },
+            Command::CutPattern { index: 3 },
+            Command::PastePattern { index: 4 },
+            Command::ClearPattern { index: 5 },
         ];
         for c in cmds {
             let bytes = postcard::to_allocvec(&c).expect("serialize");

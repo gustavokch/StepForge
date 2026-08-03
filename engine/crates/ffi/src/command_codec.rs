@@ -31,6 +31,11 @@ mod tests {
                 zone: VelocityZone::Accent,
             },
             Command::LoadSession { bytes: vec![9, 9] },
+            // T12 extension — whole-pattern clipboard commands.
+            Command::CopyPattern { index: 2 },
+            Command::CutPattern { index: 3 },
+            Command::PastePattern { index: 4 },
+            Command::ClearPattern { index: 5 },
         ];
         for c in cmds {
             let bytes = encode_command(&c).unwrap();

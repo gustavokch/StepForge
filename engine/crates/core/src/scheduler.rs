@@ -111,6 +111,13 @@ impl SchedulerClock {
     pub fn take_retrigger(&self) -> bool {
         self.retrigger_request.swap(false, Ordering::AcqRel)
     }
+    /// Test-only peek at the pending queue (non-consuming). Mirrors the
+    /// `Engine::load_session_for_test` pattern — production code never reads
+    /// `queued_pattern` outside `take_if_due`/`cancel`.
+    #[cfg(test)]
+    pub fn queued_pattern_for_test(&self) -> usize {
+        self.queued_pattern.load(Ordering::Acquire)
+    }
     /// RT → worker: request an `active_pattern_index` switch.
     pub fn request_switch(&self, index: usize) {
         self.switch_request.store(index, Ordering::Release);

@@ -36,6 +36,33 @@ fn well_formed_command_is_accepted() {
 }
 
 #[test]
+fn pattern_clipboard_commands_are_accepted_over_c_abi() {
+    // T12 extension: the four whole-pattern clipboard commands (CopyPattern /
+    // CutPattern / PastePattern / ClearPattern) round-trip the postcard codec +
+    // the C-ABI submit path — each is accepted (Ok), never a fatal decode error
+    // (Hard Rule 3). Proves the new variants cross the FFI seam as bytes.
+    use sequencer_engine::command::Command;
+    let cmds = [
+        Command::CopyPattern { index: 0 },
+        Command::CutPattern { index: 1 },
+        Command::PastePattern { index: 2 },
+        Command::ClearPattern { index: 3 },
+    ];
+    let h = sequencer_engine_ffi::engine_new();
+    for c in cmds {
+        let bytes = command_codec::encode_command(&c).unwrap();
+        let res =
+            unsafe { sequencer_engine_ffi::engine_submit_command(h, bytes.as_ptr(), bytes.len()) };
+        assert_eq!(
+            res,
+            EngineResult::Ok,
+            "{c:?} must be accepted over the C ABI"
+        );
+    }
+    unsafe { sequencer_engine_ffi::engine_free(h) };
+}
+
+#[test]
 fn drain_returns_empty_when_no_events() {
     let h = sequencer_engine_ffi::engine_new();
     let mut ptr = std::ptr::null_mut();
