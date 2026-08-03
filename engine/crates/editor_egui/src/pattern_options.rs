@@ -99,9 +99,15 @@ fn clip_btn(ui: &mut Ui, label: &str) -> egui::Response {
     )
 }
 
-/// Resolve the draft to a real [`FollowActionType`]. `PlaySpecific` reads the
-/// target slot's `Pattern.id` (a `Uuid`) — `unwrap_or_default` covers an
-/// out-of-range/empty target without naming the type.
+/// Resolve the draft to a real [`FollowActionType`].
+///
+/// `PlaySpecific` reads the chosen target slot's `Pattern.id` (a `Uuid`).
+/// `specific_target` uses [`PATTERN_SLOTS`] as a sentinel meaning "no target
+/// chosen"; a sentinel, out-of-range, or empty slot cannot yield a valid id,
+/// so the action collapses to [`FollowActionType::None`]. This never emits
+/// `PlaySpecific(Uuid::nil())` — the engine searches for a nil-id slot, finds
+/// none, and falls back to active, which would make the saved action a silent
+/// no-op.
 fn resolve_action(
     draft: ActionDraft,
     specific_target: usize,
@@ -110,13 +116,16 @@ fn resolve_action(
     match draft {
         ActionDraft::None => FollowActionType::None,
         ActionDraft::PlayNext => FollowActionType::PlayNext,
-        ActionDraft::PlaySpecific => FollowActionType::PlaySpecific(
-            patterns
-                .get(specific_target)
-                .and_then(|p| p.as_ref())
-                .map(|p| p.id)
-                .unwrap_or_default(),
-        ),
+        ActionDraft::PlaySpecific => match patterns
+            .get(specific_target)
+            .and_then(|p| p.as_ref())
+            .map(|p| p.id)
+        {
+            Some(id) => FollowActionType::PlaySpecific(id),
+            // Sentinel / out-of-range / empty slot → no resolvable target.
+            // Emit None rather than PlaySpecific(nil) (silent engine no-op).
+            None => FollowActionType::None,
+        },
         ActionDraft::PlayPrevious => FollowActionType::PlayPrevious,
         ActionDraft::Stop => FollowActionType::Stop,
         ActionDraft::PlayRandom => FollowActionType::PlayRandom,
@@ -124,6 +133,13 @@ fn resolve_action(
 }
 
 /// Map a real action back to the draft + seed the `PlaySpecific` target index.
+///
+/// For `PlaySpecific(id)`, returns the slot index whose `Pattern.id` matches
+/// `id`. If no slot matches (the slot was cleared or the id never existed),
+/// returns [`PATTERN_SLOTS`] — the sentinel "no target" value — rather than
+/// silently seeding slot 0 (which would redirect a Save to P1 with no warning).
+/// The sentinel renders as a placeholder in the target ComboBox and resolves
+/// to [`FollowActionType::None`] on Save via [`resolve_action`].
 fn action_to_draft(
     action: &FollowActionType,
     patterns: &[Option<Pattern>; PATTERN_SLOTS],
@@ -137,7 +153,7 @@ fn action_to_draft(
         FollowActionType::PlaySpecific(id) => {
             let target = (0..PATTERN_SLOTS)
                 .find(|&i| patterns[i].as_ref().is_some_and(|p| p.id == *id))
-                .unwrap_or(0);
+                .unwrap_or(PATTERN_SLOTS); // sentinel: no resolvable target
             (ActionDraft::PlaySpecific, target)
         }
     }
@@ -152,8 +168,10 @@ pub(crate) struct PatternOptionsState {
     pub(crate) opened_at: u64,
     after_loops: u32,
     action: ActionDraft,
-    /// For `PlaySpecific`: the chosen target slot. Resolved to its `Pattern.id`
-    /// on Save by [`resolve_action`].
+    /// For `PlaySpecific`: the chosen target slot index, or [`PATTERN_SLOTS`]
+    /// as a sentinel meaning "no target chosen / target unresolvable." Resolved
+    /// to its `Pattern.id` on Save by [`resolve_action`] (sentinel →
+    /// [`FollowActionType::None`], never `PlaySpecific(nil)`).
     specific_target: usize,
 }
 
@@ -311,12 +329,25 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
                     });
 
                     // PlaySpecific target picker (only when PlaySpecific selected).
+                    // `specific_target == PATTERN_SLOTS` is the sentinel "no
+                    // target" value; an empty slot is also not a valid pick, so
+                    // either renders the "Select target…" placeholder. The
+                    // dropdown lists only filled slots; egui's `selectable_value`
+                    // writes `tgt` only on a real selection, so assigning back
+                    // unconditionally preserves the sentinel when the user
+                    // hasn't picked — do NOT clamp (`.min(PATTERN_SLOTS - 1)`
+                    // would silently turn the sentinel into the last valid slot).
                     if st.action == ActionDraft::PlaySpecific {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("Target").color(TEXT_MUTED));
                             let mut tgt = st.specific_target;
+                            let selected_text = patterns
+                                .get(tgt)
+                                .and_then(|p| p.as_ref())
+                                .map(|_| format!("P{}", tgt + 1))
+                                .unwrap_or_else(|| "Select target…".to_string());
                             ComboBox::from_id_salt("stepforge.pattern_options.target")
-                                .selected_text(format!("P{}", tgt + 1))
+                                .selected_text(selected_text)
                                 .show_ui(ui, |ui| {
                                     for (i, opt) in patterns.iter().enumerate() {
                                         if opt.is_some() {
@@ -324,7 +355,7 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
                                         }
                                     }
                                 });
-                            st.specific_target = tgt.min(PATTERN_SLOTS - 1);
+                            st.specific_target = tgt;
                         });
                     }
 
@@ -474,11 +505,47 @@ mod tests {
         let (draft, tgt) = action_to_draft(&FollowActionType::PlaySpecific(id3), &p);
         assert_eq!(draft, ActionDraft::PlaySpecific);
         assert_eq!(tgt, 3);
-        // A cleared target slot → falls back to index 0.
+        // A cleared target slot → id no longer found → sentinel (not slot 0,
+        // which would silently redirect a Save to P1).
         p[3] = None;
         let (draft, tgt) = action_to_draft(&FollowActionType::PlaySpecific(id3), &p);
         assert_eq!(draft, ActionDraft::PlaySpecific);
-        assert_eq!(tgt, 0); // not found → 0
+        assert_eq!(tgt, PATTERN_SLOTS); // sentinel: not found
+    }
+
+    #[test]
+    fn action_to_draft_play_specific_unknown_id_is_sentinel() {
+        // An id that matches no slot → sentinel (PATTERN_SLOTS), never slot 0.
+        let p: [Option<Pattern>; PATTERN_SLOTS] = std::array::from_fn(|_| Some(Pattern::default()));
+        let foreign_id = Pattern::default().id; // fresh id not in any slot
+        let (draft, tgt) = action_to_draft(&FollowActionType::PlaySpecific(foreign_id), &p);
+        assert_eq!(draft, ActionDraft::PlaySpecific);
+        assert_eq!(tgt, PATTERN_SLOTS);
+    }
+
+    #[test]
+    fn resolve_action_play_specific_sentinel_is_none() {
+        // Sentinel specific_target (PATTERN_SLOTS) must resolve to None, never
+        // to PlaySpecific(Uuid::nil()) — the engine treats nil as "not found"
+        // and falls back to active, making the saved action a silent no-op.
+        let p: [Option<Pattern>; PATTERN_SLOTS] = std::array::from_fn(|_| Some(Pattern::default()));
+        assert!(matches!(
+            resolve_action(ActionDraft::PlaySpecific, PATTERN_SLOTS, &p),
+            FollowActionType::None
+        ));
+    }
+
+    #[test]
+    fn resolve_action_play_specific_empty_slot_is_none() {
+        // A real slot index whose pattern is None must also resolve to None —
+        // no nil Uuid is ever emitted across this boundary.
+        let mut p: [Option<Pattern>; PATTERN_SLOTS] =
+            std::array::from_fn(|_| Some(Pattern::default()));
+        p[4] = None;
+        assert!(matches!(
+            resolve_action(ActionDraft::PlaySpecific, 4, &p),
+            FollowActionType::None
+        ));
     }
 
     // ---- headless harness tests (e2e wiring) ----
