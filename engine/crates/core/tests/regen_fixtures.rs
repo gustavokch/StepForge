@@ -112,7 +112,7 @@ fn command_fixtures() -> Vec<(&'static str, Command)> {
             },
         ),
         // -- whole-pattern clipboard (CLAP parity — issue #33); indices mirror
-        //    the Rust round-trip test in command.rs (2..5) and PostcardTests.swift --
+        //    the Rust round-trip test in command.rs (2..=5) and PostcardTests.swift --
         ("cmd_copypattern_2", Command::CopyPattern { index: 2 }),
         ("cmd_cutpattern_3", Command::CutPattern { index: 3 }),
         ("cmd_pastepattern_4", Command::PastePattern { index: 4 }),
