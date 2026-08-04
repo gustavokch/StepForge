@@ -291,9 +291,10 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
                     ui.separator();
 
                     // Whole-pattern clipboard: Cut/Copy/Paste/Clear. Each emits
-                    // its command then closes the sheet — Paste overwrites
-                    // follow_action, so the draft would go stale if it stayed
-                    // open; a fresh open re-seeds. The clipboard is engine-side
+                    // its command; the sheet STAYS OPEN — the per-frame re-seed
+                    // (#42) repairs the draft next frame, so close-on-emit is no
+                    // longer needed (and was the cause of #39: an empty Paste
+                    // silently dismissed the sheet). The clipboard is engine-side
                     // (the editor cannot see whether it is empty), so Paste is
                     // always enabled and no-ops when the clipboard is empty.
                     #[cfg(test)]
@@ -310,7 +311,6 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
                         });
                         if cut.clicked() {
                             sink.push(Command::CutPattern { index: pattern_idx });
-                            close(ctx);
                         }
                         let copy = clip_btn(ui, "Copy");
                         #[cfg(test)]
@@ -320,7 +320,6 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
                         });
                         if copy.clicked() {
                             sink.push(Command::CopyPattern { index: pattern_idx });
-                            close(ctx);
                         }
                         let paste = clip_btn(ui, "Paste");
                         #[cfg(test)]
@@ -330,7 +329,6 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
                         });
                         if paste.clicked() {
                             sink.push(Command::PastePattern { index: pattern_idx });
-                            close(ctx);
                         }
                         let clear = clip_btn(ui, "Clear");
                         #[cfg(test)]
@@ -340,7 +338,6 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
                         });
                         if clear.clicked() {
                             sink.push(Command::ClearPattern { index: pattern_idx });
-                            close(ctx);
                         }
                     });
                     ui.separator();
@@ -796,12 +793,11 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_buttons_emit_expected_commands_and_close() {
-        // Each whole-pattern clipboard button emits its command carrying the
-        // open pattern's index, then closes the sheet (Paste overwrites
-        // follow_action → a stale draft would result if it stayed open). The
-        // paste/clear EFFECT is covered by the core clipboard tests; here we
-        // assert the editor emits the right command.
+    fn clipboard_buttons_emit_expected_commands_and_stay_open() {
+        // #39: with per-frame re-seed (#42), clipboard buttons no longer need to
+        // close(ctx) — the draft self-heals next frame. Staying open fixes the
+        // empty-paste silent-dismiss and enables Copy → Paste without reopening.
+        // (Diverges from iOS, which dismisses — accepted in design review.)
         let st = || UiState {
             session: Some(Arc::new(Session::default())),
             ..Default::default()
@@ -831,8 +827,8 @@ mod tests {
             assert!(ok, "{clip:?}: wrong command {:?}", cmds[0]);
             assert_eq!(
                 read(&h.ctx).target,
-                None,
-                "{clip:?}: sheet must close after emit"
+                Some(2),
+                "{clip:?}: sheet must STAY OPEN after emit (no close-on-emit)"
             );
         }
     }
