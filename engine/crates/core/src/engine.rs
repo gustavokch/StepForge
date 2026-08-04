@@ -912,6 +912,23 @@ impl Engine {
                         // stale `PatternSwitched` can't fire into the reloaded one.
                         self.scheduler.cancel();
                         self.reload_generation.fetch_add(1, Ordering::AcqRel);
+                        // #30: a wholesale reload invalidates the previous session's
+                        // per-track undo snapshots — a later Undo would restore an
+                        // old-session track onto the new one. Drain the slots and
+                        // tell the mirror each previously-occupied track is no
+                        // longer undoable. Bounded by MAX_TRACKS. #29 made the
+                        // mirror order-independent for undo, so this UndoAvailable
+                        // burst may surround the FullSnapshot freely.
+                        let occupied = self.undo.lock().unwrap().take_occupied();
+                        for track_idx in occupied {
+                            crate::midi_out::push_event(
+                                &self.hot_events,
+                                &EngineEvent::UndoAvailable {
+                                    track_idx,
+                                    available: false,
+                                },
+                            );
+                        }
                         let snap = self.snapshot.load_full();
                         push_large_event(
                             &self.large_events,
@@ -1950,6 +1967,56 @@ mod tests {
             e.scheduler.queued_pattern_for_test(),
             NO_PATTERN,
             "LoadSession must cancel any queue pending from the previous session"
+        );
+    }
+
+    /// #30: a mid-session LoadSession must clear the previous session's undo
+    /// snapshots and tell the mirror each previously-occupied track is no longer
+    /// undoable. Exposed by #29 (which made FullSnapshot stop clearing
+    /// undo_available, removing the only prior reset).
+    #[test]
+    fn load_session_clears_stale_undo_and_emits_unavailable() {
+        use crate::serde_ext::SessionEnvelope;
+        let e = Engine::new();
+        // Session A: push an undo snapshot for track 0 via Roll.
+        e.apply_command(Command::Roll { track_idx: 0, strength: 0.5 });
+        assert!(
+            e.undo.lock().unwrap().available(0),
+            "Roll must push an undo snapshot for track 0"
+        );
+        // Load session B (a valid envelope).
+        let env = SessionEnvelope::wrap(Session::default());
+        let bytes = postcard::to_allocvec(&env).unwrap();
+        e.apply_command(Command::LoadSession { bytes });
+        // Undo slots cleared (engine state — the source of truth).
+        assert!(
+            !e.undo.lock().unwrap().available(0),
+            "LoadSession must clear stale undo slots"
+        );
+        // The mirror is told track 0 is no longer undoable (UndoAvailable{false}
+        // rides the hot channel). Roll's prior {0,true} may still be queued
+        // ahead of it, so drain and look for the false one. hot_events slots are
+        // postcard-encoded HotEventSlots (not EngineEvent) — decode each before
+        // matching, mirroring the SetSyncSource test pattern at engine.rs:1761.
+        let mut saw_false = false;
+        while let Some(slot) = e.hot_events.dequeue() {
+            let ev: EngineEvent =
+                postcard::from_bytes(&slot.bytes[..slot.len as usize]).unwrap();
+            if let EngineEvent::UndoAvailable { track_idx: 0, available: false } = ev {
+                saw_false = true;
+            }
+        }
+        assert!(
+            saw_false,
+            "LoadSession must emit UndoAvailable{{0,false}} so the mirror disables Undo"
+        );
+        // Undo on track 0 is now a no-op — does not mutate the new session.
+        let before = e.snapshot_arc().patterns[0].clone();
+        e.apply_command(Command::Undo { track_idx: 0 });
+        assert_eq!(
+            e.snapshot_arc().patterns[0],
+            before,
+            "Undo after LoadSession must not restore an old-session track"
         );
     }
 
