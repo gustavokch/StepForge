@@ -72,30 +72,16 @@ struct ActionDrawer: View {
             }
 
             HStack(spacing: 6) {
-                action("Vary", "wand.and.stars") { bridge.submit(.vary(trackIdx: trackIdx, strength: varyStrength)) }
-                action("Roll", "dice") { bridge.submit(.roll(trackIdx: trackIdx, strength: rollStrength)) }
-                action("Copy", "doc.on.doc") { bridge.submit(.copy(trackIdx: trackIdx)) }
-                action("Cut", "scissors") { bridge.submit(.cut(trackIdx: trackIdx)) }
-                action("Paste", "doc.on.clipboard") { bridge.submit(.paste(trackIdx: trackIdx)) }
-                action("Clear", "trash") { bridge.submit(.trash(trackIdx: trackIdx)); Haptics.confirm() }
+                TileButton("Vary", "wand.and.stars") { bridge.submit(.vary(trackIdx: trackIdx, strength: varyStrength)) }
+                TileButton("Roll", "dice") { bridge.submit(.roll(trackIdx: trackIdx, strength: rollStrength)) }
+                TileButton("Copy", "doc.on.doc") { bridge.submit(.copy(trackIdx: trackIdx)) }
+                TileButton("Cut", "scissors") { bridge.submit(.cut(trackIdx: trackIdx)) }
+                TileButton("Paste", "doc.on.clipboard") { bridge.submit(.paste(trackIdx: trackIdx)) }
+                TileButton("Clear", "trash") { bridge.submit(.trash(trackIdx: trackIdx)); Haptics.confirm() }
             }
         }
         .padding()
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Theme.Surface.default)
-    }
-
-    private func action(_ label: String, _ icon: String, _ perform: @escaping () -> Void) -> some View {
-        Button(action: perform) {
-            VStack(spacing: 4) {
-                Image(systemName: icon).font(.title3)
-                Text(label).font(Typography.sectionTag)
-            }
-            .foregroundStyle(Theme.textPrimary)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 8)
-            .raisedStyle()
-        }
-        .buttonStyle(.plain)
     }
 }

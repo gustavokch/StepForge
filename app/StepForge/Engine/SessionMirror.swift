@@ -229,7 +229,8 @@ struct SessionMirror: Equatable {
         // echoes the result. The mock leaves the mirror untouched for these.
         case .roll, .vary, .cut, .copy, .paste, .undo,
              .retriggerPattern, .requestFullSnapshot,
-             .serialize, .loadSession, .midiClockTick:
+             .serialize, .loadSession, .midiClockTick,
+             .copyPattern, .cutPattern, .pastePattern, .clearPattern:
             break
         }
     }
