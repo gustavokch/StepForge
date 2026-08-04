@@ -1027,27 +1027,36 @@ impl Engine {
             // to all tracks). Emits no new event: FullSnapshot carries the
             // change. (`PatternCleared` stays unused — it would mean slot=None,
             // which this never produces.)
+            //
+            // CopyPattern is clipboard-only: it reads ONE pattern and never
+            // mutates the session, so it skips the full-`Session` deep clone the
+            // mutating variants need (#41). Hoisted to its own arm to keep the
+            // clone strictly on the Cut/Paste/Clear path.
+            CopyPattern { ref index } => {
+                let index = *index;
+                if index < crate::models::PATTERN_SLOTS {
+                    let snap = self.snapshot.load_full();
+                    self.clipboard
+                        .lock()
+                        .unwrap()
+                        .copy_pattern(&snap, index);
+                    // No publish, no FullSnapshot — the mirror learns nothing
+                    // from a Copy (Command::CopyPattern contract). `&snap`
+                    // deref-coerces Guard<Session> -> &Session.
+                }
+            }
             CutPattern { ref index }
-            | CopyPattern { ref index }
             | PastePattern { ref index }
             | ClearPattern { ref index } => {
                 let index = *index;
                 if index < crate::models::PATTERN_SLOTS {
                     let mut s = (*self.snapshot.load_full()).clone();
-                    // Inner match is exhaustive over the four variants the outer
-                    // guard admits at runtime. Rust's outer `|` guard does not
-                    // narrow `cmd`'s type for exhaustiveness checking, so the
-                    // fallback uses `unreachable!` (loud panic) instead of a
-                    // silent `false` — a stray variant here is a logic bug that
-                    // must not silently drop the publish.
+                    // Inner match is exhaustive over the three variants the outer
+                    // guard admits. A stray variant here is a logic bug → loud
+                    // panic, not a silent drop.
                     let mutated = match cmd {
                         CutPattern { .. } => {
                             self.clipboard.lock().unwrap().cut_pattern(&mut s, index)
-                        }
-                        CopyPattern { .. } => {
-                            // Clipboard-only — session unchanged: no publish.
-                            self.clipboard.lock().unwrap().copy_pattern(&s, index);
-                            false
                         }
                         PastePattern { .. } => {
                             self.clipboard.lock().unwrap().paste_pattern(&mut s, index)
@@ -1056,7 +1065,7 @@ impl Engine {
                             crate::clipboard::Clipboard::clear_pattern(&mut s, index)
                         }
                         _ => unreachable!(
-                            "inner match constrained to Cut/Copy/Paste/Clear by outer guard"
+                            "inner match constrained to Cut/Paste/Clear by outer guard"
                         ),
                     };
                     if mutated {
@@ -2182,6 +2191,33 @@ mod tests {
         assert!(
             Engine::new_host_driven().host_driven,
             "host-driven constructor sets the flag"
+        );
+    }
+
+    /// #41: CopyPattern is clipboard-only — it must not publish a FullSnapshot
+    /// or bump the reload generation. (Characterizes the contract the
+    /// clone-skip refactor must preserve. Accessors mirror the LoadSession
+    /// tests: `reload_generation` is an atomic read with `Ordering::Acquire`;
+    /// `large_events` / `hot_events` are drained via `.dequeue()`.)
+    #[test]
+    fn copy_pattern_is_clipboard_only_no_snapshot() {
+        let e = Engine::new();
+        let gen_before = e.reload_generation.load(Ordering::Acquire);
+        e.apply_command(Command::CopyPattern { index: 0 });
+        assert_eq!(
+            e.reload_generation.load(Ordering::Acquire),
+            gen_before,
+            "CopyPattern must not bump reload_generation"
+        );
+        // No FullSnapshot on the large channel (Copy is clipboard-only).
+        assert!(
+            e.large_events.dequeue().is_none(),
+            "CopyPattern must not emit a FullSnapshot"
+        );
+        // And nothing on the hot channel either.
+        assert!(
+            e.hot_events.dequeue().is_none(),
+            "CopyPattern must not emit a hot event"
         );
     }
 }
