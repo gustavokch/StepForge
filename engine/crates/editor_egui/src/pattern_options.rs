@@ -46,6 +46,25 @@ fn clip_rect_id() -> Id {
     Id::new("stepforge.pattern_options.clip")
 }
 
+/// Per-field edit-focus flags, recorded at the end of one frame and read at the
+/// top of the next so the per-frame re-seed (#42) skips whichever field the user
+/// is actively editing (slider / action combobox / target picker).
+#[derive(Clone, Copy, Default)]
+struct FocusFlags {
+    loops: bool,
+    action: bool,
+    target: bool,
+}
+fn focus_id() -> Id {
+    Id::new("stepforge.pattern_options.focus")
+}
+fn read_focus(ctx: &Context) -> FocusFlags {
+    ctx.data(|d| d.get_temp::<FocusFlags>(focus_id()).unwrap_or_default())
+}
+fn write_focus(ctx: &Context, f: FocusFlags) {
+    ctx.data_mut(|d| d.insert_temp(focus_id(), f));
+}
+
 /// Test-facing tag for the four whole-pattern clipboard buttons (rect-lookup key).
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -189,6 +208,12 @@ fn write(ctx: &Context, f: impl FnOnce(&mut PatternOptionsState)) {
 /// current follow_action (V4: read-only over `state` here).
 pub(crate) fn open(ctx: &Context, pattern_idx: usize, state: &UiState) {
     let frame = crate::frame_nr(ctx);
+    // Reset edit-focus so the first-frame re-seed (#42) isn't skipped by stale
+    // focus left from a previously open sheet (`close()` clears the target, not
+    // focus). `open()` already seeds the draft from the live pattern below, so
+    // this is insurance against a one-frame stale display if an external
+    // SetFollowAction lands between `open()` and the first render.
+    write_focus(ctx, FocusFlags::default());
     let (after_loops, action, specific_target) = match state.session.as_deref() {
         Some(s) => match s.patterns.get(pattern_idx).and_then(Option::as_ref) {
             Some(p) => {
@@ -231,12 +256,35 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
         return;
     }
 
+    // #42: re-sync the draft from the live target pattern every frame so an
+    // external SetFollowAction (preset/automation/undo swap) is reflected
+    // instead of leaving the sheet lying. Skip the field that held edit focus
+    // last frame so an in-progress slider/combobox edit isn't clobbered.
+    // #36: clamp after_loops to the slider's 1..=16 range on seed so an
+    // out-of-range session normalizes instead of desyncing (slider=16,label=32).
+    let focused = read_focus(ctx);
+    if let Some(p) = patterns.get(pattern_idx).and_then(Option::as_ref) {
+        let (live_action, live_target) = action_to_draft(&p.follow_action.action, patterns);
+        let live_loops = p.follow_action.after_loops.clamp(1, 16);
+        if !focused.loops {
+            st.after_loops = live_loops;
+        }
+        if !focused.action {
+            st.action = live_action;
+        }
+        if !focused.target {
+            st.specific_target = live_target;
+        }
+    }
+
     #[cfg(test)]
     ctx.data_mut(|d| {
         *d.get_temp_mut_or_default::<Option<Rect>>(window_rect_id()) = None;
         *d.get_temp_mut_or_default::<Option<Rect>>(save_rect_id()) = None;
         *d.get_temp_mut_or_default::<Option<Rect>>(cancel_rect_id()) = None;
     });
+
+    let mut focus = FocusFlags::default(); // assigned inside the closure below
 
     let area = egui::Area::new(Id::new("stepforge.pattern_options"))
         .order(egui::Order::Foreground)
@@ -249,9 +297,10 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
                     ui.separator();
 
                     // Whole-pattern clipboard: Cut/Copy/Paste/Clear. Each emits
-                    // its command then closes the sheet — Paste overwrites
-                    // follow_action, so the draft would go stale if it stayed
-                    // open; a fresh open re-seeds. The clipboard is engine-side
+                    // its command; the sheet STAYS OPEN — the per-frame re-seed
+                    // (#42) repairs the draft next frame, so close-on-emit is no
+                    // longer needed (and was the cause of #39: an empty Paste
+                    // silently dismissed the sheet). The clipboard is engine-side
                     // (the editor cannot see whether it is empty), so Paste is
                     // always enabled and no-ops when the clipboard is empty.
                     #[cfg(test)]
@@ -268,7 +317,6 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
                         });
                         if cut.clicked() {
                             sink.push(Command::CutPattern { index: pattern_idx });
-                            close(ctx);
                         }
                         let copy = clip_btn(ui, "Copy");
                         #[cfg(test)]
@@ -278,7 +326,6 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
                         });
                         if copy.clicked() {
                             sink.push(Command::CopyPattern { index: pattern_idx });
-                            close(ctx);
                         }
                         let paste = clip_btn(ui, "Paste");
                         #[cfg(test)]
@@ -288,7 +335,6 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
                         });
                         if paste.clicked() {
                             sink.push(Command::PastePattern { index: pattern_idx });
-                            close(ctx);
                         }
                         let clear = clip_btn(ui, "Clear");
                         #[cfg(test)]
@@ -298,35 +344,41 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
                         });
                         if clear.clicked() {
                             sink.push(Command::ClearPattern { index: pattern_idx });
-                            close(ctx);
                         }
                     });
                     ui.separator();
 
                     // Follow Action — After Loops (1..=16, iOS Stepper parity).
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("After Loops").color(TEXT_MUTED));
-                        let mut v = st.after_loops as i32;
-                        // Range-bounded; `changed()` clamps to 1..=16 on edit.
-                        let sr = ui.add(Slider::new(&mut v, 1..=16).text("loops"));
-                        if sr.changed() {
-                            st.after_loops = v.clamp(1, 16) as u32;
-                        }
-                        let _ = sr;
-                        ui.label(RichText::new(format!("{}", st.after_loops)).color(TEXT_PRIMARY));
-                    });
+                    let loops_resp = ui
+                        .horizontal(|ui| {
+                            ui.label(RichText::new("After Loops").color(TEXT_MUTED));
+                            let mut v = st.after_loops as i32;
+                            // Range-bounded; `changed()` clamps to 1..=16 on edit.
+                            let sr = ui.add(Slider::new(&mut v, 1..=16).text("loops"));
+                            if sr.changed() {
+                                st.after_loops = v.clamp(1, 16) as u32;
+                            }
+                            ui.label(
+                                RichText::new(format!("{}", st.after_loops)).color(TEXT_PRIMARY),
+                            );
+                            sr
+                        })
+                        .inner;
 
                     // Action type — all six variants (incl PlaySpecific; editor enhancement).
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Action").color(TEXT_MUTED));
-                        ComboBox::from_id_salt("stepforge.pattern_options.action")
-                            .selected_text(draft_label(st.action))
-                            .show_ui(ui, |ui| {
-                                for (variant, label) in ACTION_OPTIONS {
-                                    ui.selectable_value(&mut st.action, variant, label);
-                                }
-                            });
-                    });
+                    let action_resp = ui
+                        .horizontal(|ui| {
+                            ui.label(RichText::new("Action").color(TEXT_MUTED));
+                            ComboBox::from_id_salt("stepforge.pattern_options.action")
+                                .selected_text(draft_label(st.action))
+                                .show_ui(ui, |ui| {
+                                    for (variant, label) in ACTION_OPTIONS {
+                                        ui.selectable_value(&mut st.action, variant, label);
+                                    }
+                                })
+                        })
+                        .inner
+                        .response;
 
                     // PlaySpecific target picker (only when PlaySpecific selected).
                     // `specific_target == PATTERN_SLOTS` is the sentinel "no
@@ -337,27 +389,39 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
                     // unconditionally preserves the sentinel when the user
                     // hasn't picked — do NOT clamp (`.min(PATTERN_SLOTS - 1)`
                     // would silently turn the sentinel into the last valid slot).
-                    if st.action == ActionDraft::PlaySpecific {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Target").color(TEXT_MUTED));
-                            let mut tgt = st.specific_target;
-                            let selected_text = patterns
-                                .get(tgt)
-                                .and_then(|p| p.as_ref())
-                                .map(|_| format!("P{}", tgt + 1))
-                                .unwrap_or_else(|| "Select target…".to_string());
-                            ComboBox::from_id_salt("stepforge.pattern_options.target")
-                                .selected_text(selected_text)
-                                .show_ui(ui, |ui| {
-                                    for (i, opt) in patterns.iter().enumerate() {
-                                        if opt.is_some() {
-                                            ui.selectable_value(&mut tgt, i, format!("P{}", i + 1));
-                                        }
-                                    }
-                                });
-                            st.specific_target = tgt;
-                        });
-                    }
+                    let target_resp = if st.action == ActionDraft::PlaySpecific {
+                        let r = ui
+                            .horizontal(|ui| {
+                                ui.label(RichText::new("Target").color(TEXT_MUTED));
+                                let mut tgt = st.specific_target;
+                                let selected_text = patterns
+                                    .get(tgt)
+                                    .and_then(|p| p.as_ref())
+                                    .map(|_| format!("P{}", tgt + 1))
+                                    .unwrap_or_else(|| "Select target…".to_string());
+                                let resp =
+                                    ComboBox::from_id_salt("stepforge.pattern_options.target")
+                                        .selected_text(selected_text)
+                                        .show_ui(ui, |ui| {
+                                            for (i, opt) in patterns.iter().enumerate() {
+                                                if opt.is_some() {
+                                                    ui.selectable_value(
+                                                        &mut tgt,
+                                                        i,
+                                                        format!("P{}", i + 1),
+                                                    );
+                                                }
+                                            }
+                                        });
+                                st.specific_target = tgt;
+                                resp
+                            })
+                            .inner
+                            .response;
+                        Some(r)
+                    } else {
+                        None
+                    };
 
                     ui.separator();
                     ui.horizontal(|ui| {
@@ -392,6 +456,14 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
                             close(ctx);
                         }
                     });
+
+                    // Record this frame's edit-focus so next frame's re-seed
+                    // (#42) skips whichever field the user is editing.
+                    focus = FocusFlags {
+                        loops: loops_resp.has_focus(),
+                        action: action_resp.has_focus(),
+                        target: target_resp.map(|r| r.has_focus()).unwrap_or(false),
+                    };
                 });
             });
         });
@@ -406,6 +478,8 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
     let rect = area.response.rect;
     #[cfg(test)]
     ctx.data_mut(|d| *d.get_temp_mut_or_default::<Option<Rect>>(window_rect_id()) = Some(rect));
+    // Persist this frame's edit-focus for next frame's re-seed (#42).
+    write_focus(ctx, focus);
     // `opened_at == frame_nr` only on the opening frame; the gear `…` click that
     // opened the sheet is still "primary_clicked" then, so skip the outside-click
     // dismiss branch that frame (Esc still dismisses). Same guard as the T11
@@ -603,6 +677,63 @@ mod tests {
     }
 
     #[test]
+    fn after_loops_out_of_range_clamps_on_seed() {
+        // #36: an out-of-range after_loops (u32) must normalize to the slider's
+        // 1..=16 range when the sheet is open, instead of desyncing
+        // (slider=16, label=32, state=32).
+        let mut st = UiState {
+            session: Some(Arc::new(Session::default())),
+            ..Default::default()
+        };
+        {
+            let s = Arc::make_mut(st.session.as_mut().unwrap());
+            s.patterns[1].as_mut().unwrap().follow_action.after_loops = 32;
+        }
+        let h = open_for(1, st);
+        h.settle(); // re-seed runs each idle frame
+        let draft = read(&h.ctx);
+        assert_eq!(
+            draft.after_loops, 16,
+            "out-of-range after_loops must clamp to 16"
+        );
+    }
+
+    #[test]
+    fn open_sheet_re_syncs_draft_after_external_follow_action_change() {
+        // #42: while the sheet is open, an external follow_action change
+        // (preset / automation / undo swap delivered as a mirror update) must
+        // be reflected in the draft, not masked by a one-shot seed.
+        let mut h = open_for(
+            2,
+            UiState {
+                session: Some(Arc::new(Session::default())),
+                ..Default::default()
+            },
+        );
+        h.settle();
+        // Externally mutate the target pattern's follow_action (no edit focus
+        // held this frame → re-seed applies).
+        {
+            let s = Arc::make_mut(h.state.session.as_mut().unwrap());
+            s.patterns[2].as_mut().unwrap().follow_action = FollowAction {
+                after_loops: 9,
+                action: FollowActionType::PlayNext,
+            };
+        }
+        h.idle(); // one frame: render runs + re-seed applies
+        let st = read(&h.ctx);
+        assert_eq!(
+            st.after_loops, 9,
+            "draft must re-sync after_loops to the live pattern"
+        );
+        assert_eq!(
+            st.action,
+            ActionDraft::PlayNext,
+            "draft must re-sync action"
+        );
+    }
+
+    #[test]
     fn cancel_dismisses_without_emit() {
         let h = open_for(
             0,
@@ -688,12 +819,11 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_buttons_emit_expected_commands_and_close() {
-        // Each whole-pattern clipboard button emits its command carrying the
-        // open pattern's index, then closes the sheet (Paste overwrites
-        // follow_action → a stale draft would result if it stayed open). The
-        // paste/clear EFFECT is covered by the core clipboard tests; here we
-        // assert the editor emits the right command.
+    fn clipboard_buttons_emit_expected_commands_and_stay_open() {
+        // #39: with per-frame re-seed (#42), clipboard buttons no longer need to
+        // close(ctx) — the draft self-heals next frame. Staying open fixes the
+        // empty-paste silent-dismiss and enables Copy → Paste without reopening.
+        // (Diverges from iOS, which dismisses — accepted in design review.)
         let st = || UiState {
             session: Some(Arc::new(Session::default())),
             ..Default::default()
@@ -723,8 +853,8 @@ mod tests {
             assert!(ok, "{clip:?}: wrong command {:?}", cmds[0]);
             assert_eq!(
                 read(&h.ctx).target,
-                None,
-                "{clip:?}: sheet must close after emit"
+                Some(2),
+                "{clip:?}: sheet must STAY OPEN after emit (no close-on-emit)"
             );
         }
     }

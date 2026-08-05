@@ -135,9 +135,16 @@ pub(crate) fn next_pattern_index(
 
 /// PLAYING-cell pulse alpha in `[0,1]` for a wall-clock time (seconds). Smooth
 /// sine ~0.75 Hz (an editor-only enhancement; iOS has no animation). Pure over
-/// `f64` time → testable without driving egui.
+/// `f64` time → testable without driving egui. #38: a non-finite wall-clock
+/// (suspend/resume, platform clock glitch) falls back to a neutral mid-pulse
+/// `0.5` so the active cell's fill/stroke don't go NaN.
 pub(crate) fn pulse_alpha(time: f64) -> f32 {
-    ((time * std::f64::consts::TAU * 0.75).sin() as f32) * 0.5 + 0.5
+    let raw = (time * std::f64::consts::TAU * 0.75).sin() * 0.5 + 0.5;
+    if raw.is_finite() {
+        raw as f32
+    } else {
+        0.5 // neutral mid-pulse — keeps the cell visible (not black)
+    }
 }
 
 /// Loop progress ratio for the active cell, anchored to track 0 (iOS parity —
@@ -672,6 +679,44 @@ mod tests {
             assert!((0.0..=1.0).contains(&a), "pulse out of range at {t}: {a}");
         }
         assert!((pulse_alpha(0.0) - 0.5).abs() < 1e-6); // sin(0)=0 → 0.5
+    }
+
+    #[test]
+    fn pulse_alpha_is_finite_for_non_finite_time() {
+        // #38: a suspend/resume or platform clock glitch can feed a non-finite
+        // wall-clock into pulse_alpha. The result must stay finite (and in range)
+        // so the active cell's gamma_multiply fill and stroke width don't go NaN.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let a = pulse_alpha(bad);
+            assert!(a.is_finite(), "pulse_alpha({bad:?}) = {a} must be finite");
+            assert!(
+                (0.0..=1.0).contains(&a),
+                "pulse_alpha({bad:?}) = {a} must stay in [0,1]"
+            );
+        }
+        // A normal time still produces a normal finite alpha.
+        assert!(pulse_alpha(0.0).is_finite());
+        assert!((0.0..=1.0).contains(&pulse_alpha(1.0)));
+    }
+
+    #[test]
+    fn cell_fill_and_stroke_finite_under_guarded_pulse() {
+        // #38: belt-and-suspenders — feeding the guarded (finite) pulse into the
+        // PLAYING paint helpers must yield finite fill + stroke (no NaN to
+        // gamma_multiply / tessellation). The guarded pulse must stay finite;
+        // the stroke width (f32) must stay finite; and the fill must NOT
+        // degenerate to the all-zero black that a NaN factor would produce via
+        // `gamma_multiply`'s saturating `as u8` cast (PRIMARY is non-black, so a
+        // finite positive factor keeps its tint non-black).
+        let pulse = pulse_alpha(f64::NAN);
+        assert!(pulse.is_finite(), "guarded pulse must stay finite: {pulse}");
+        let fill = cell_fill(CellState::Playing, pulse);
+        assert!(
+            fill.r() > 0 || fill.g() > 0 || fill.b() > 0,
+            "fill must not degenerate to black: {fill:?}"
+        );
+        let stroke = cell_stroke(CellState::Playing, false, pulse);
+        assert!(stroke.width.is_finite());
     }
 
     #[test]
