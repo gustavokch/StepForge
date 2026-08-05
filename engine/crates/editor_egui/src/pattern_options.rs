@@ -349,32 +349,36 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
                     ui.separator();
 
                     // Follow Action — After Loops (1..=16, iOS Stepper parity).
-                    let loops_resp = ui.horizontal(|ui| {
-                        ui.label(RichText::new("After Loops").color(TEXT_MUTED));
-                        let mut v = st.after_loops as i32;
-                        // Range-bounded; `changed()` clamps to 1..=16 on edit.
-                        let sr = ui.add(Slider::new(&mut v, 1..=16).text("loops"));
-                        if sr.changed() {
-                            st.after_loops = v.clamp(1, 16) as u32;
-                        }
-                        ui.label(RichText::new(format!("{}", st.after_loops)).color(TEXT_PRIMARY));
-                        sr
-                    })
-                    .inner;
+                    let loops_resp = ui
+                        .horizontal(|ui| {
+                            ui.label(RichText::new("After Loops").color(TEXT_MUTED));
+                            let mut v = st.after_loops as i32;
+                            // Range-bounded; `changed()` clamps to 1..=16 on edit.
+                            let sr = ui.add(Slider::new(&mut v, 1..=16).text("loops"));
+                            if sr.changed() {
+                                st.after_loops = v.clamp(1, 16) as u32;
+                            }
+                            ui.label(
+                                RichText::new(format!("{}", st.after_loops)).color(TEXT_PRIMARY),
+                            );
+                            sr
+                        })
+                        .inner;
 
                     // Action type — all six variants (incl PlaySpecific; editor enhancement).
-                    let action_resp = ui.horizontal(|ui| {
-                        ui.label(RichText::new("Action").color(TEXT_MUTED));
-                        ComboBox::from_id_salt("stepforge.pattern_options.action")
-                            .selected_text(draft_label(st.action))
-                            .show_ui(ui, |ui| {
-                                for (variant, label) in ACTION_OPTIONS {
-                                    ui.selectable_value(&mut st.action, variant, label);
-                                }
-                            })
-                    })
-                    .inner
-                    .response;
+                    let action_resp = ui
+                        .horizontal(|ui| {
+                            ui.label(RichText::new("Action").color(TEXT_MUTED));
+                            ComboBox::from_id_salt("stepforge.pattern_options.action")
+                                .selected_text(draft_label(st.action))
+                                .show_ui(ui, |ui| {
+                                    for (variant, label) in ACTION_OPTIONS {
+                                        ui.selectable_value(&mut st.action, variant, label);
+                                    }
+                                })
+                        })
+                        .inner
+                        .response;
 
                     // PlaySpecific target picker (only when PlaySpecific selected).
                     // `specific_target == PATTERN_SLOTS` is the sentinel "no
@@ -386,28 +390,34 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
                     // hasn't picked — do NOT clamp (`.min(PATTERN_SLOTS - 1)`
                     // would silently turn the sentinel into the last valid slot).
                     let target_resp = if st.action == ActionDraft::PlaySpecific {
-                        let r = ui.horizontal(|ui| {
-                            ui.label(RichText::new("Target").color(TEXT_MUTED));
-                            let mut tgt = st.specific_target;
-                            let selected_text = patterns
-                                .get(tgt)
-                                .and_then(|p| p.as_ref())
-                                .map(|_| format!("P{}", tgt + 1))
-                                .unwrap_or_else(|| "Select target…".to_string());
-                            let resp = ComboBox::from_id_salt("stepforge.pattern_options.target")
-                                .selected_text(selected_text)
-                                .show_ui(ui, |ui| {
-                                    for (i, opt) in patterns.iter().enumerate() {
-                                        if opt.is_some() {
-                                            ui.selectable_value(&mut tgt, i, format!("P{}", i + 1));
-                                        }
-                                    }
-                                });
-                            st.specific_target = tgt;
-                            resp
-                        })
-                        .inner
-                        .response;
+                        let r = ui
+                            .horizontal(|ui| {
+                                ui.label(RichText::new("Target").color(TEXT_MUTED));
+                                let mut tgt = st.specific_target;
+                                let selected_text = patterns
+                                    .get(tgt)
+                                    .and_then(|p| p.as_ref())
+                                    .map(|_| format!("P{}", tgt + 1))
+                                    .unwrap_or_else(|| "Select target…".to_string());
+                                let resp =
+                                    ComboBox::from_id_salt("stepforge.pattern_options.target")
+                                        .selected_text(selected_text)
+                                        .show_ui(ui, |ui| {
+                                            for (i, opt) in patterns.iter().enumerate() {
+                                                if opt.is_some() {
+                                                    ui.selectable_value(
+                                                        &mut tgt,
+                                                        i,
+                                                        format!("P{}", i + 1),
+                                                    );
+                                                }
+                                            }
+                                        });
+                                st.specific_target = tgt;
+                                resp
+                            })
+                            .inner
+                            .response;
                         Some(r)
                     } else {
                         None
@@ -682,7 +692,10 @@ mod tests {
         let h = open_for(1, st);
         h.settle(); // re-seed runs each idle frame
         let draft = read(&h.ctx);
-        assert_eq!(draft.after_loops, 16, "out-of-range after_loops must clamp to 16");
+        assert_eq!(
+            draft.after_loops, 16,
+            "out-of-range after_loops must clamp to 16"
+        );
     }
 
     #[test]
@@ -709,8 +722,15 @@ mod tests {
         }
         h.idle(); // one frame: render runs + re-seed applies
         let st = read(&h.ctx);
-        assert_eq!(st.after_loops, 9, "draft must re-sync after_loops to the live pattern");
-        assert_eq!(st.action, ActionDraft::PlayNext, "draft must re-sync action");
+        assert_eq!(
+            st.after_loops, 9,
+            "draft must re-sync after_loops to the live pattern"
+        );
+        assert_eq!(
+            st.action,
+            ActionDraft::PlayNext,
+            "draft must re-sync action"
+        );
     }
 
     #[test]
