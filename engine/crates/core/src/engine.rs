@@ -907,16 +907,39 @@ impl Engine {
                         if env.version == SESSION_FORMAT_VERSION
                             && validate_session(&env.session) =>
                     {
+                        // Clone the validated session once for the FullSnapshot
+                        // payload, then move the original into `publish` — avoids
+                        // a second ArcSwap `load_full()` round-trip for the
+                        // snapshot we just stored (same single deep clone).
+                        let snapshot_session = env.session.clone();
                         self.publish(env.session);
                         // Cancel any queue pending from the previous session so a
                         // stale `PatternSwitched` can't fire into the reloaded one.
                         self.scheduler.cancel();
                         self.reload_generation.fetch_add(1, Ordering::AcqRel);
-                        let snap = self.snapshot.load_full();
+                        // #30: a wholesale reload invalidates the previous session's
+                        // per-track undo snapshots — a later Undo would restore an
+                        // old-session track onto the new one. Drain the slots and
+                        // tell the mirror each previously-occupied track is no
+                        // longer undoable. Bounded by MAX_TRACKS. #29 made the
+                        // mirror order-independent for undo, so this UndoAvailable
+                        // burst may surround the FullSnapshot freely.
+                        let occupied = self.undo.lock().unwrap().take_occupied();
+                        for (track_idx, was_occupied) in occupied.iter().enumerate() {
+                            if *was_occupied {
+                                crate::midi_out::push_event(
+                                    &self.hot_events,
+                                    &EngineEvent::UndoAvailable {
+                                        track_idx,
+                                        available: false,
+                                    },
+                                );
+                            }
+                        }
                         push_large_event(
                             &self.large_events,
                             EngineEvent::FullSnapshot {
-                                session: (*snap).clone(),
+                                session: snapshot_session,
                             },
                         );
                     }
@@ -1010,27 +1033,36 @@ impl Engine {
             // to all tracks). Emits no new event: FullSnapshot carries the
             // change. (`PatternCleared` stays unused — it would mean slot=None,
             // which this never produces.)
+            //
+            // CopyPattern is clipboard-only: it reads ONE pattern and never
+            // mutates the session, so it skips the full-`Session` deep clone the
+            // mutating variants need (#41). Hoisted to its own arm to keep the
+            // clone strictly on the Cut/Paste/Clear path.
+            CopyPattern { ref index } => {
+                let index = *index;
+                if index < crate::models::PATTERN_SLOTS {
+                    let snap = self.snapshot.load_full();
+                    self.clipboard
+                        .lock()
+                        .unwrap()
+                        .copy_pattern(&snap, index);
+                    // No publish, no FullSnapshot — the mirror learns nothing
+                    // from a Copy (Command::CopyPattern contract). `&snap`
+                    // deref-coerces Guard<Session> -> &Session.
+                }
+            }
             CutPattern { ref index }
-            | CopyPattern { ref index }
             | PastePattern { ref index }
             | ClearPattern { ref index } => {
                 let index = *index;
                 if index < crate::models::PATTERN_SLOTS {
                     let mut s = (*self.snapshot.load_full()).clone();
-                    // Inner match is exhaustive over the four variants the outer
-                    // guard admits at runtime. Rust's outer `|` guard does not
-                    // narrow `cmd`'s type for exhaustiveness checking, so the
-                    // fallback uses `unreachable!` (loud panic) instead of a
-                    // silent `false` — a stray variant here is a logic bug that
-                    // must not silently drop the publish.
+                    // Inner match is exhaustive over the three variants the outer
+                    // guard admits. A stray variant here is a logic bug → loud
+                    // panic, not a silent drop.
                     let mutated = match cmd {
                         CutPattern { .. } => {
                             self.clipboard.lock().unwrap().cut_pattern(&mut s, index)
-                        }
-                        CopyPattern { .. } => {
-                            // Clipboard-only — session unchanged: no publish.
-                            self.clipboard.lock().unwrap().copy_pattern(&s, index);
-                            false
                         }
                         PastePattern { .. } => {
                             self.clipboard.lock().unwrap().paste_pattern(&mut s, index)
@@ -1039,7 +1071,7 @@ impl Engine {
                             crate::clipboard::Clipboard::clear_pattern(&mut s, index)
                         }
                         _ => unreachable!(
-                            "inner match constrained to Cut/Copy/Paste/Clear by outer guard"
+                            "inner match constrained to Cut/Paste/Clear by outer guard"
                         ),
                     };
                     if mutated {
@@ -1953,6 +1985,56 @@ mod tests {
         );
     }
 
+    /// #30: a mid-session LoadSession must clear the previous session's undo
+    /// snapshots and tell the mirror each previously-occupied track is no longer
+    /// undoable. Exposed by #29 (which made FullSnapshot stop clearing
+    /// undo_available, removing the only prior reset).
+    #[test]
+    fn load_session_clears_stale_undo_and_emits_unavailable() {
+        use crate::serde_ext::SessionEnvelope;
+        let e = Engine::new();
+        // Session A: push an undo snapshot for track 0 via Roll.
+        e.apply_command(Command::Roll { track_idx: 0, strength: 0.5 });
+        assert!(
+            e.undo.lock().unwrap().available(0),
+            "Roll must push an undo snapshot for track 0"
+        );
+        // Load session B (a valid envelope).
+        let env = SessionEnvelope::wrap(Session::default());
+        let bytes = postcard::to_allocvec(&env).unwrap();
+        e.apply_command(Command::LoadSession { bytes });
+        // Undo slots cleared (engine state — the source of truth).
+        assert!(
+            !e.undo.lock().unwrap().available(0),
+            "LoadSession must clear stale undo slots"
+        );
+        // The mirror is told track 0 is no longer undoable (UndoAvailable{false}
+        // rides the hot channel). Roll's prior {0,true} may still be queued
+        // ahead of it, so drain and look for the false one. hot_events slots are
+        // postcard-encoded HotEventSlots (not EngineEvent) — decode each before
+        // matching, mirroring the SetSyncSource test pattern at engine.rs:1761.
+        let mut saw_false = false;
+        while let Some(slot) = e.hot_events.dequeue() {
+            let ev: EngineEvent =
+                postcard::from_bytes(&slot.bytes[..slot.len as usize]).unwrap();
+            if let EngineEvent::UndoAvailable { track_idx: 0, available: false } = ev {
+                saw_false = true;
+            }
+        }
+        assert!(
+            saw_false,
+            "LoadSession must emit UndoAvailable{{0,false}} so the mirror disables Undo"
+        );
+        // Undo on track 0 is now a no-op — does not mutate the new session.
+        let before = e.snapshot_arc().patterns[0].clone();
+        e.apply_command(Command::Undo { track_idx: 0 });
+        assert_eq!(
+            e.snapshot_arc().patterns[0],
+            before,
+            "Undo after LoadSession must not restore an old-session track"
+        );
+    }
+
     /// `validate_session` directly: the invariants the restore path relies on.
     #[test]
     fn validate_session_accepts_default_rejects_corrupt() {
@@ -2115,6 +2197,33 @@ mod tests {
         assert!(
             Engine::new_host_driven().host_driven,
             "host-driven constructor sets the flag"
+        );
+    }
+
+    /// #41: CopyPattern is clipboard-only — it must not publish a FullSnapshot
+    /// or bump the reload generation. (Characterizes the contract the
+    /// clone-skip refactor must preserve. Accessors mirror the LoadSession
+    /// tests: `reload_generation` is an atomic read with `Ordering::Acquire`;
+    /// `large_events` / `hot_events` are drained via `.dequeue()`.)
+    #[test]
+    fn copy_pattern_is_clipboard_only_no_snapshot() {
+        let e = Engine::new();
+        let gen_before = e.reload_generation.load(Ordering::Acquire);
+        e.apply_command(Command::CopyPattern { index: 0 });
+        assert_eq!(
+            e.reload_generation.load(Ordering::Acquire),
+            gen_before,
+            "CopyPattern must not bump reload_generation"
+        );
+        // No FullSnapshot on the large channel (Copy is clipboard-only).
+        assert!(
+            e.large_events.dequeue().is_none(),
+            "CopyPattern must not emit a FullSnapshot"
+        );
+        // And nothing on the hot channel either.
+        assert!(
+            e.hot_events.dequeue().is_none(),
+            "CopyPattern must not emit a hot event"
         );
     }
 }
