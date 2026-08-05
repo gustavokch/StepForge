@@ -208,6 +208,12 @@ fn write(ctx: &Context, f: impl FnOnce(&mut PatternOptionsState)) {
 /// current follow_action (V4: read-only over `state` here).
 pub(crate) fn open(ctx: &Context, pattern_idx: usize, state: &UiState) {
     let frame = crate::frame_nr(ctx);
+    // Reset edit-focus so the first-frame re-seed (#42) isn't skipped by stale
+    // focus left from a previously open sheet (`close()` clears the target, not
+    // focus). `open()` already seeds the draft from the live pattern below, so
+    // this is insurance against a one-frame stale display if an external
+    // SetFollowAction lands between `open()` and the first render.
+    write_focus(ctx, FocusFlags::default());
     let (after_loops, action, specific_target) = match state.session.as_deref() {
         Some(s) => match s.patterns.get(pattern_idx).and_then(Option::as_ref) {
             Some(p) => {
@@ -278,7 +284,7 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
         *d.get_temp_mut_or_default::<Option<Rect>>(cancel_rect_id()) = None;
     });
 
-    let mut focus = read_focus(ctx); // overwritten inside the closure below
+    let mut focus = FocusFlags::default(); // assigned inside the closure below
 
     let area = egui::Area::new(Id::new("stepforge.pattern_options"))
         .order(egui::Order::Foreground)
