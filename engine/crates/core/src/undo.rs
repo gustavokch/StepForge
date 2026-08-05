@@ -72,16 +72,17 @@ impl Undo {
     pub fn available(&self, idx: usize) -> bool {
         idx < MAX_TRACKS && self.slots[idx].is_some()
     }
-    /// Drain all occupied slots, returning the indices that were `Some`
-    /// (now cleared). Used by `LoadSession` to reset undo state on a wholesale
+    /// Drain all occupied slots, marking which indices were `Some` (now
+    /// cleared). Used by `LoadSession` to reset undo state on a wholesale
     /// reload (#30): the previous session's per-track snapshots would otherwise
-    /// restore old-session tracks onto the new one. Idempotent. The returned
-    /// `Vec` is bounded by `MAX_TRACKS`; this runs on the worker thread, never RT.
-    pub fn take_occupied(&mut self) -> Vec<usize> {
-        let mut out = Vec::new();
+    /// restore old-session tracks onto the new one. Idempotent. Returns a
+    /// stack-allocated `[bool; MAX_TRACKS]` (no heap) — this runs on the
+    /// worker thread, never RT.
+    pub fn take_occupied(&mut self) -> [bool; MAX_TRACKS] {
+        let mut out = [false; MAX_TRACKS];
         for (i, slot) in self.slots.iter_mut().enumerate() {
             if slot.is_some() {
-                out.push(i);
+                out[i] = true;
                 *slot = None;
             }
         }
@@ -147,7 +148,7 @@ mod tests {
         assert!(u.available(0)); // snapshot at idx 0 was NOT consumed
     }
     #[test]
-    fn take_occupied_returns_indices_and_clears() {
+    fn take_occupied_marks_indices_and_clears() {
         // #30: LoadSession drains occupied undo slots so stale snapshots from
         // the previous session can't be restored onto the new one.
         let mut u = Undo::default();
@@ -155,9 +156,10 @@ mod tests {
         u.push(0, &s.patterns[0].as_ref().unwrap().tracks[0]);
         u.push(2, &s.patterns[0].as_ref().unwrap().tracks[0]);
         let occupied = u.take_occupied();
-        assert_eq!(occupied, vec![0, 2], "returns the occupied indices");
+        assert!(occupied[0] && occupied[2], "flags the occupied indices");
+        assert!(!occupied[1] && !occupied[3], "unoccupied slots stay false");
         assert!(!u.available(0) && !u.available(2), "slots now cleared");
-        // A second drain is empty (idempotent).
-        assert!(u.take_occupied().is_empty());
+        // A second drain is all-false (idempotent).
+        assert!(u.take_occupied().iter().all(|f| !f), "second drain is empty");
     }
 }

@@ -907,6 +907,11 @@ impl Engine {
                         if env.version == SESSION_FORMAT_VERSION
                             && validate_session(&env.session) =>
                     {
+                        // Clone the validated session once for the FullSnapshot
+                        // payload, then move the original into `publish` — avoids
+                        // a second ArcSwap `load_full()` round-trip for the
+                        // snapshot we just stored (same single deep clone).
+                        let snapshot_session = env.session.clone();
                         self.publish(env.session);
                         // Cancel any queue pending from the previous session so a
                         // stale `PatternSwitched` can't fire into the reloaded one.
@@ -920,20 +925,21 @@ impl Engine {
                         // mirror order-independent for undo, so this UndoAvailable
                         // burst may surround the FullSnapshot freely.
                         let occupied = self.undo.lock().unwrap().take_occupied();
-                        for track_idx in occupied {
-                            crate::midi_out::push_event(
-                                &self.hot_events,
-                                &EngineEvent::UndoAvailable {
-                                    track_idx,
-                                    available: false,
-                                },
-                            );
+                        for (track_idx, was_occupied) in occupied.iter().enumerate() {
+                            if *was_occupied {
+                                crate::midi_out::push_event(
+                                    &self.hot_events,
+                                    &EngineEvent::UndoAvailable {
+                                        track_idx,
+                                        available: false,
+                                    },
+                                );
+                            }
                         }
-                        let snap = self.snapshot.load_full();
                         push_large_event(
                             &self.large_events,
                             EngineEvent::FullSnapshot {
-                                session: (*snap).clone(),
+                                session: snapshot_session,
                             },
                         );
                     }
