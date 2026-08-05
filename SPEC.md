@@ -1,27 +1,31 @@
 # SPEC
 
 ## §G GOAL
-Pure-Rust CLAP/VST3 drum-sequencer plugin. `nih_plug` drives reused `sequencer_engine` (host-driven), egui editor replaces SwiftUI — no Swift, no FFI, no `NSView`. Full UI parity w/ iOS app, shipped phased. Phase 0 (skeleton + RT loop + minimal editor) shipped PR #12; Phase 1+ = real UI.
+Pure-Rust CLAP/VST3 drum-sequencer plugin. `nih_plug` drives the reused
+`sequencer_engine` (host-driven); an egui editor replaces SwiftUI — no Swift,
+no FFI, no `NSView`. Full UI parity with the iOS app, shipped phased.
+Phase 0 (skeleton + RT loop + minimal editor) shipped PR #12; Phase 1+ is the
+real UI.
 
 ## §C CONSTRAINTS
-- macOS desktop (Phase 0 shipped PR #12; Phase 1+ continues macOS); iOS build MUST stay green ∀ task: `cargo check -p sequencer_engine --target aarch64-apple-ios` PASS.
-- `sequencer_engine` core stays `#![forbid(unsafe_code)]` & untouched — all new code lives in 3 new crates (`editor_egui`, `clap_plugin`, `xtask`).
-- Hard Rule 1 RT sacred: `process()` alloc-free, lock-free, no FFI, no `UiState`/`params.session` access. GUI thread only writes lock-free `engine.commands` & reads ArcSwap snapshot. Enable `nih_plug` `assert_process_allocs` debug.
-- Transport units quarter-notes both sides — no conversion. `pos_beats()`/`bar_start_pos_beats()` → `HostTransport` direct.
+- **macOS desktop** (Phase 0 shipped PR #12; Phase 1+ continues macOS). The iOS build MUST stay green on every task: `cargo check -p sequencer_engine --target aarch64-apple-ios` PASS.
+- The `sequencer_engine` core stays `#![forbid(unsafe_code)]` and untouched — all new code lives in three new crates (`editor_egui`, `clap_plugin`, `xtask`).
+- **Hard Rule 1 — RT sacred**: `process()` is alloc-free, lock-free, no FFI, and touches no `UiState`/`params.session`. The GUI thread only writes the lock-free `engine.commands` and reads the ArcSwap snapshot. Enable `nih_plug` `assert_process_allocs` in debug.
+- **Transport units are quarter-notes on both sides** — no conversion. `pos_beats()`/`bar_start_pos_beats()` feed `HostTransport` directly.
 - Pin `nih_plug` + `nih_plug_egui` + `nih_plug_xtask` to ONE shared git rev `f36931f` — never float `master`, never mismatched revs.
-- License: no `vst3-sys` (GPLv3). VST3 via clap-wrapper Phase 4. Phase 0 CLAP only.
-- MIDI config: `MIDI_INPUT = Basic`, `MIDI_OUTPUT = Basic`, `AUDIO_IO_LAYOUTS = &[]` (MIDI-only; Live dummy 2×2 audio bus deferred → Phase 4).
-- egui version align: `editor_egui` uses same egui as `nih_plug_egui` (0.31 @ pinned rev).
-- Zero automation params — driven via `Command`; `Params` carries only `#[persist]` fields.
+- **License**: no `vst3-sys` (GPLv3). VST3 ships via clap-wrapper in Phase 4. Phase 0 is CLAP only.
+- **MIDI config**: `MIDI_INPUT = Basic`, `MIDI_OUTPUT = Basic`, `AUDIO_IO_LAYOUTS = &[]` (MIDI-only; the Live dummy 2×2 audio bus is deferred to Phase 4).
+- **egui version align**: `editor_egui` uses the same egui as `nih_plug_egui` (0.31 @ pinned rev).
+- **Zero automation params** — driven via `Command`; `Params` carries only `#[persist]` fields.
 
 ## §I INTERFACES
-- crate `editor_egui` (lib): `pub trait CommandSink { fn push(&self, cmd: Command) }`, `pub struct UiState`, `pub fn render(ctx, &UiState, &impl CommandSink)`, `pub fn transport_action(playing: bool) -> Command`, `pub fn apply_theme(&Context)`. ⊥ `nih_plug` dep, ⊥ Engine handle, ⊥ FFI — headless-testable.
-- crate `clap_plugin` (lib + cdylib, `stepforge_clap`): `pub struct StepForge` (`impl Plugin` + `impl ClapPlugin` + `nih_export_clap!(StepForge)`), `pub struct StepForgeParams`. Owns `Arc<Engine>`.
-- crate `xtask` (bin): `cargo xtask bundle stepforge_clap --release` → `.clap` under `engine/target/bundled/`.
-- plugin contract: `Engine::new_host_driven()` in `Default`; `process()` → `transport::map_transport()` → `Engine::render_host()` → `midi::midi_event_to_note()` → `context.send_event()`; play→stop edge → explicit `NoteOff` burst ∀ 16×128 (CC 123 filtered); `#[persist] session` → `Command::LoadSession` in `initialize()`; empty session → seed `demo_session()` beat (audible transport sync pre-Phase-1).
-- engine reuse API (unchanged; module-qualified — core has no root re-exports, per `lib.rs`): `engine::Engine::{new_host_driven, render_host, run_worker_loop, snapshot_arc}` + fields `commands`/`hot_events`/`large_events`/`shutdown`; `host::{HostTransport, HostRenderState, MidiEvent}`; `command::Command`; `event::EngineEvent`; `midi_out::push_drop_oldest`; `serde_ext::{SessionEnvelope, SESSION_FORMAT_VERSION}`; `models::Session`.
-- clap id: `org.stepforge.clap`; features `[NoteEffect]` (CLAP note port; `midi-effect` dropped in PR #12).
-- env: none.
+- **crate `editor_egui` (lib)**: `pub trait CommandSink { fn push(&self, cmd: Command) }`, `pub struct UiState`, `pub fn render(ctx, &UiState, &impl CommandSink)`, `pub fn transport_action(playing: bool) -> Command`, `pub fn apply_theme(&Context)`. Never depends on `nih_plug`, never holds an Engine handle, never touches FFI — headless-testable.
+- **crate `clap_plugin` (lib + cdylib, `stepforge_clap`)**: `pub struct StepForge` (`impl Plugin` + `impl ClapPlugin` + `nih_export_clap!(StepForge)`), `pub struct StepForgeParams`. Owns `Arc<Engine>`.
+- **crate `xtask` (bin)**: `cargo xtask bundle stepforge_clap --release` → `.clap` under `engine/target/bundled/`.
+- **Plugin contract**: `Engine::new_host_driven()` in `Default`; `process()` → `transport::map_transport()` → `Engine::render_host()` → `midi::midi_event_to_note()` → `context.send_event()`; the play→stop edge fires an explicit `NoteOff` burst across all 16×128 (CC 123 filtered); `#[persist] session` → `Command::LoadSession` in `initialize()`; an empty session seeds the `demo_session()` beat (audible transport sync pre-Phase-1).
+- **Engine reuse API** (unchanged; module-qualified — core has no root re-exports, per `lib.rs`): `engine::Engine::{new_host_driven, render_host, run_worker_loop, snapshot_arc}` + fields `commands`/`hot_events`/`large_events`/`shutdown`; `host::{HostTransport, HostRenderState, MidiEvent}`; `command::Command`; `event::EngineEvent`; `midi_out::push_drop_oldest`; `serde_ext::{SessionEnvelope, SESSION_FORMAT_VERSION}`; `models::Session`.
+- **CLAP id**: `org.stepforge.clap`; features `[NoteEffect]` (CLAP note port; `midi-effect` dropped in PR #12).
+- **Env**: none.
 
 ## §R RESEARCH
 id|topic|finding|src
@@ -38,19 +42,31 @@ R9|clap-validator|state/param-scan crashes are UPSTREAM nih-plug (unbounded allo
 R1-R4 verified direct @ master (= pinned `f36931f` core trait API); R5/R6/R8 inherited from approved design doc (author verified via zread); R9 from PR #12 verification (upstream nih-plug).
 
 ## §V INVARIANTS
-V1: ∀ `process()` & `reset()` call → alloc-free, lock-free, no FFI, no `UiState`/`params.session` access. `assert_process_allocs` (debug) = enforcement gate; `reset()` runs on RT thread → ! alloc-free.
-V2: transport mapping quarter-notes both sides — `pos_beats()`/`bar_start_pos_beats()` → `HostTransport.block_start_beat`/`bar_start_beat` direct, no unit conversion.
-V3: ∀ emitted `MidiEvent` → `sample_offset ∈ [0, block_samples)`; note-off follows note-on per track; only `NoteOn`/`NoteOff` forwarded (CC dropped).
-V4: `editor_egui` ⊥ depend on `nih_plug`, ⊥ hold Engine handle, ⊥ FFI — pure UI, headless-testable.
-V5: iOS build stays green — `cargo check -p sequencer_engine --target aarch64-apple-ios` PASS ∀ task (desktop crates ⊥ contaminate iOS).
-V6: `sequencer_engine` core stays `#![forbid(unsafe_code)]` & untouched — Phase 0 adds no core code.
-V7: `nih_plug` deps share ONE git rev `f36931f` — never float `master`, never mismatched revs.
-V8: session restore: `params.session` non-empty at `initialize()` → push `Command::LoadSession { bytes }` (runs on state-worker); `SESSION_FORMAT_VERSION` embedded in envelope.
-V9: GUI→RT only writes lock-free `engine.commands` (`push_drop_oldest`); RT→GUI reads wait-free ArcSwap snapshot (`snapshot_arc`) + drains fixed-slot channels — RT thread ⊥ block on lock.
-V10: zero automation params — all interaction via `Command`; `Params` = `#[persist]` `editor_state` + `session` only.
-V11: ∀ `initialize()` → `reset()` re-inits `HostRenderState` (clear `pending` MIDI + realign `rt`/`sample_time`/`last_block_start_beat`/`was_playing`). Guards stale render state across state restore (preset/project swap). `HostRenderState::new()` ! alloc-free (fixed arrays). cites I.plugin contract.
-V12: play→stop edge → explicit `NoteOff` burst ∀ 16 channel × 128 note @ timing 0 — CC 123 all-notes-off is dropped by the `NoteOn`/`NoteOff` filter, so stuck-note prevention needs explicit offs. RT-safe (`send_event` lock-free output). cites I.plugin contract.
-V13: ∀ re-activation (deactivate→initialize same instance) ! clear `engine.shutdown` latch (in `ensure_worker`) → spawned worker drains commands. Guards dead-worker regression (PR #12).
+V1 — Every `process()` and `reset()` call is alloc-free, lock-free, no FFI, and touches no `UiState`/`params.session`. `assert_process_allocs` (debug) is the enforcement gate; `reset()` runs on the RT thread, so it must be alloc-free.
+
+V2 — Transport mapping stays in quarter-notes on both sides: `pos_beats()`/`bar_start_pos_beats()` feed `HostTransport.block_start_beat`/`bar_start_beat` directly, with no unit conversion.
+
+V3 — Every emitted `MidiEvent` has `sample_offset ∈ [0, block_samples)`; note-off follows note-on per track; only `NoteOn`/`NoteOff` are forwarded (CC dropped).
+
+V4 — `editor_egui` never depends on `nih_plug`, never holds an Engine handle, never touches FFI — pure UI, headless-testable.
+
+V5 — The iOS build stays green: `cargo check -p sequencer_engine --target aarch64-apple-ios` PASS on every task (desktop crates never contaminate iOS).
+
+V6 — The `sequencer_engine` core stays `#![forbid(unsafe_code)]` and untouched — Phase 0 adds no core code.
+
+V7 — All `nih_plug` deps share ONE git rev `f36931f` — never float `master`, never mismatched revs.
+
+V8 — Session restore: if `params.session` is non-empty at `initialize()`, push `Command::LoadSession { bytes }` (runs on the state-worker); `SESSION_FORMAT_VERSION` is embedded in the envelope.
+
+V9 — GUI→RT only writes the lock-free `engine.commands` (`push_drop_oldest`); RT→GUI reads the wait-free ArcSwap snapshot (`snapshot_arc`) and drains fixed-slot channels — the RT thread never blocks on a lock.
+
+V10 — Zero automation params: all interaction flows through `Command`; `Params` is `#[persist]` `editor_state` + `session` only.
+
+V11 — Every `initialize()` triggers `reset()` to re-init `HostRenderState` (clear `pending` MIDI + realign `rt`/`sample_time`/`last_block_start_beat`/`was_playing`). Guards against stale render state across state restore (preset/project swap). `HostRenderState::new()` is not alloc-free (fixed arrays). Cites I.plugin contract.
+
+V12 — The play→stop edge fires an explicit `NoteOff` burst across all 16 channels × 128 notes @ timing 0 — CC 123 all-notes-off is dropped by the `NoteOn`/`NoteOff` filter, so stuck-note prevention needs explicit offs. RT-safe (`send_event` is lock-free output). Cites I.plugin contract.
+
+V13 — On every re-activation (deactivate→initialize same instance), do NOT clear the `engine.shutdown` latch (in `ensure_worker`) → the spawned worker drains commands. Guards the dead-worker regression (PR #12).
 
 ## §T TASKS
 id|status|task|cites
