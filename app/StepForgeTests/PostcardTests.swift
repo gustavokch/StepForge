@@ -59,6 +59,11 @@ final class PostcardTests: XCTestCase {
         XCTAssertEqual(Command.clearPattern(index: 5).encode(),  load("cmd_clearpattern_5"))
     }
 
+    // Pattern-level undo (issue #34).
+    func testCommandUndoPattern() {
+        XCTAssertEqual(Command.undoPattern(index: 6).encode(), load("cmd_undopattern_6"))
+    }
+
     func testCommandSetLinkEnabled() {
         XCTAssertEqual(Command.setLinkEnabled(enabled: true).tag, 33)
     }
@@ -156,6 +161,7 @@ final class PostcardTests: XCTestCase {
         XCTAssertEqual(Command.cutPattern(index: 0).tag,   36)
         XCTAssertEqual(Command.pastePattern(index: 0).tag, 37)
         XCTAssertEqual(Command.clearPattern(index: 0).tag, 38)
+        XCTAssertEqual(Command.undoPattern(index: 0).tag, 39)
     }
 
     // MARK: - Robustness (Hard Rule 3: never panic across FFI)

@@ -24,19 +24,19 @@ struct PatternOptionsSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                // Whole-pattern clipboard (CLAP parity — issue #33). Engine-side
+                // Whole-pattern clipboard (issue #33) + undo (#34). Engine-side
                 // clipboard; Copy emits no event, Paste/Cut/Clear publish a
-                // FullSnapshot only on mutation. Dismiss after each so a Paste
-                // (which overwrites follow_action) never leaves a stale draft.
-                // Clear is the only irreversible op (pattern steps aren't
-                // engine-undoable on iOS), so it confirms before mutating; the
-                // other three fire immediately, matching CLAP's `pattern_options`.
+                // FullSnapshot only on mutation. The sheet STAYS OPEN after
+                // Cut/Paste/Clear/Undo so the user can tap Undo immediately and
+                // see the restored state; Copy still dismisses (non-mutating,
+                // no undo). Clear confirms before mutating; it is now undoable.
                 Section("Pattern") {
                     HStack(spacing: 6) {
-                        TileButton("Cut",   "scissors")         { bridge.submit(.cutPattern(index:   patternIdx)); dismiss() }
+                        TileButton("Cut",   "scissors")         { bridge.submit(.cutPattern(index:   patternIdx)) }
                         TileButton("Copy",  "doc.on.doc")       { bridge.submit(.copyPattern(index:  patternIdx)); dismiss() }
-                        TileButton("Paste", "doc.on.clipboard") { bridge.submit(.pastePattern(index: patternIdx)); dismiss() }
+                        TileButton("Paste", "doc.on.clipboard") { bridge.submit(.pastePattern(index: patternIdx)) }
                         TileButton("Clear", "trash")            { showClearConfirm = true }
+                        TileButton("Undo",  "arrow.uturn.backward") { bridge.submit(.undoPattern(index: patternIdx)) }
                     }
                     .confirmationDialog(
                         "Clear pattern \(patternIdx + 1)?",
@@ -46,11 +46,10 @@ struct PatternOptionsSheet: View {
                         Button("Clear", role: .destructive) {
                             bridge.submit(.clearPattern(index: patternIdx))
                             Haptics.confirm()
-                            dismiss()
                         }
                         Button("Cancel", role: .cancel) {}
                     } message: {
-                        Text("Removes all programmed steps. The slot stays, but the steps are not undoable.")
+                        Text("Removes all programmed steps. The slot stays. Undo is available from this sheet.")
                     }
                 }
 
