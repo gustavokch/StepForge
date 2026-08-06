@@ -42,7 +42,7 @@ fn window_rect_id() -> Id {
 }
 #[cfg(test)]
 fn clip_rect_id() -> Id {
-    // Vec<(ActionClip, Rect)> — the four whole-pattern clipboard buttons.
+    // Vec<(ActionClip, Rect)> — the five whole-pattern clipboard buttons.
     Id::new("stepforge.pattern_options.clip")
 }
 
@@ -65,7 +65,7 @@ fn write_focus(ctx: &Context, f: FocusFlags) {
     ctx.data_mut(|d| d.insert_temp(focus_id(), f));
 }
 
-/// Test-facing tag for the four whole-pattern clipboard buttons (rect-lookup key).
+/// Test-facing tag for the five whole-pattern clipboard buttons (rect-lookup key).
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ActionClip {

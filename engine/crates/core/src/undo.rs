@@ -254,8 +254,9 @@ mod tests {
     }
 
     fn session_with_pattern_at(idx: usize) -> Session {
-        // Session::default leaves pattern slots None; place a Pattern with one
-        // active step + a non-default follow_action so a snapshot is observable.
+        // Session::default pre-fills every slot Some; overwrite [idx] with a
+        // Pattern with one active step + a non-default follow_action so a
+        // snapshot is observable.
         let mut s = Session::default();
         let mut p = Pattern::default();
         p.tracks[0].steps[3] = crate::models::Step {
