@@ -73,6 +73,7 @@ pub(crate) enum ActionClip {
     Copy,
     Paste,
     Clear,
+    Undo,
 }
 
 /// Copy mirror of [`FollowActionType`] for the draft state (the model variant is
@@ -344,6 +345,20 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
                         });
                         if clear.clicked() {
                             sink.push(Command::ClearPattern { index: pattern_idx });
+                        }
+                        let undo = clip_btn(ui, "Undo");
+                        #[cfg(test)]
+                        ctx.data_mut(|d| {
+                            d.get_temp_mut_or_default::<Vec<(ActionClip, Rect)>>(clip_rect_id())
+                                .push((ActionClip::Undo, undo.rect))
+                        });
+                        if undo.clicked() {
+                            // #34: pattern-level undo. Always-on (no gating) —
+                            // the engine no-ops when no snapshot. The sheet stays
+                            // open; the per-frame re-seed (#42) re-syncs the
+                            // follow_action draft from the restored pattern next
+                            // frame.
+                            sink.push(Command::UndoPattern { index: pattern_idx });
                         }
                     });
                     ui.separator();
@@ -833,6 +848,7 @@ mod tests {
             ActionClip::Copy,
             ActionClip::Paste,
             ActionClip::Clear,
+            ActionClip::Undo,
         ] {
             let h = open_for(2, st());
             h.settle();
@@ -848,6 +864,7 @@ mod tests {
                 (ActionClip::Copy, Command::CopyPattern { index }) => *index == 2,
                 (ActionClip::Paste, Command::PastePattern { index }) => *index == 2,
                 (ActionClip::Clear, Command::ClearPattern { index }) => *index == 2,
+                (ActionClip::Undo, Command::UndoPattern { index }) => *index == 2,
                 _ => false,
             };
             assert!(ok, "{clip:?}: wrong command {:?}", cmds[0]);
