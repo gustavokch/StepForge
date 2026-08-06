@@ -63,6 +63,19 @@ fn pattern_clipboard_commands_are_accepted_over_c_abi() {
 }
 
 #[test]
+fn undo_pattern_command_roundtrips_over_c_abi() {
+    // #34: Command::UndoPattern round-trips the postcard codec + the C-ABI
+    // submit path — accepted (Ok), never a fatal decode error (Hard Rule 3).
+    use sequencer_engine::command::Command;
+    let h = sequencer_engine_ffi::engine_new();
+    let bytes = command_codec::encode_command(&Command::UndoPattern { index: 4 }).unwrap();
+    let res =
+        unsafe { sequencer_engine_ffi::engine_submit_command(h, bytes.as_ptr(), bytes.len()) };
+    assert_eq!(res, EngineResult::Ok, "UndoPattern must be accepted over the C ABI");
+    unsafe { sequencer_engine_ffi::engine_free(h) };
+}
+
+#[test]
 fn drain_returns_empty_when_no_events() {
     let h = sequencer_engine_ffi::engine_new();
     let mut ptr = std::ptr::null_mut();

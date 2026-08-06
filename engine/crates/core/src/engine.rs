@@ -1086,6 +1086,11 @@ impl Engine {
                     }
                 }
             }
+            // #34: pattern-level undo. Temporary no-op — the real restore logic
+            // lands in Task 3. Kept explicit so the variant is not silently
+            // swallowed by the `other` catch-all and so the match stays
+            // exhaustive as the variant is added.
+            UndoPattern { .. } => {}
             // Scheduler (Task 16 module, wired here): the worker records the
             // request in atomics; the RT loop fires it at the quantize boundary
             // (`check_scheduler`); the worker then publishes the switch.

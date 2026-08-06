@@ -36,6 +36,7 @@ mod tests {
             Command::CutPattern { index: 3 },
             Command::PastePattern { index: 4 },
             Command::ClearPattern { index: 5 },
+            Command::UndoPattern { index: 6 },
         ];
         for c in cmds {
             let bytes = encode_command(&c).unwrap();

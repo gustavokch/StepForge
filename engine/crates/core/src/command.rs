@@ -142,6 +142,13 @@ pub enum Command {
     ClearPattern {
         index: usize,
     },
+    /// Undo the last whole-pattern op (Cut/Paste/Clear) on slot `index`.
+    /// One-deep; no-op if no snapshot. Always-on in the UI (no availability
+    /// event). Restore publishes a FullSnapshot. In-memory snapshot, never
+    /// serialized (#34).
+    UndoPattern {
+        index: usize,
+    },
 }
 
 #[cfg(test)]
@@ -165,6 +172,7 @@ mod tests {
             Command::CutPattern { index: 3 },
             Command::PastePattern { index: 4 },
             Command::ClearPattern { index: 5 },
+            Command::UndoPattern { index: 6 },
         ];
         for c in cmds {
             let bytes = postcard::to_allocvec(&c).expect("serialize");
