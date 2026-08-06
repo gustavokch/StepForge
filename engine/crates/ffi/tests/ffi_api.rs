@@ -71,7 +71,11 @@ fn undo_pattern_command_roundtrips_over_c_abi() {
     let bytes = command_codec::encode_command(&Command::UndoPattern { index: 4 }).unwrap();
     let res =
         unsafe { sequencer_engine_ffi::engine_submit_command(h, bytes.as_ptr(), bytes.len()) };
-    assert_eq!(res, EngineResult::Ok, "UndoPattern must be accepted over the C ABI");
+    assert_eq!(
+        res,
+        EngineResult::Ok,
+        "UndoPattern must be accepted over the C ABI"
+    );
     unsafe { sequencer_engine_ffi::engine_free(h) };
 }
 

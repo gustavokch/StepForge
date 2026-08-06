@@ -1047,18 +1047,13 @@ impl Engine {
                 let index = *index;
                 if index < crate::models::PATTERN_SLOTS {
                     let snap = self.snapshot.load_full();
-                    self.clipboard
-                        .lock()
-                        .unwrap()
-                        .copy_pattern(&snap, index);
+                    self.clipboard.lock().unwrap().copy_pattern(&snap, index);
                     // No publish, no FullSnapshot — the mirror learns nothing
                     // from a Copy (Command::CopyPattern contract). `&snap`
                     // deref-coerces Guard<Session> -> &Session.
                 }
             }
-            CutPattern { ref index }
-            | PastePattern { ref index }
-            | ClearPattern { ref index } => {
+            CutPattern { ref index } | PastePattern { ref index } | ClearPattern { ref index } => {
                 let index = *index;
                 if index < crate::models::PATTERN_SLOTS {
                     let mut s = (*self.snapshot.load_full()).clone();
@@ -2034,7 +2029,10 @@ mod tests {
         use crate::serde_ext::SessionEnvelope;
         let e = Engine::new();
         // Session A: push an undo snapshot for track 0 via Roll.
-        e.apply_command(Command::Roll { track_idx: 0, strength: 0.5 });
+        e.apply_command(Command::Roll {
+            track_idx: 0,
+            strength: 0.5,
+        });
         assert!(
             e.undo.lock().unwrap().available(0),
             "Roll must push an undo snapshot for track 0"
@@ -2055,9 +2053,12 @@ mod tests {
         // matching, mirroring the SetSyncSource test pattern at engine.rs:1761.
         let mut saw_false = false;
         while let Some(slot) = e.hot_events.dequeue() {
-            let ev: EngineEvent =
-                postcard::from_bytes(&slot.bytes[..slot.len as usize]).unwrap();
-            if let EngineEvent::UndoAvailable { track_idx: 0, available: false } = ev {
+            let ev: EngineEvent = postcard::from_bytes(&slot.bytes[..slot.len as usize]).unwrap();
+            if let EngineEvent::UndoAvailable {
+                track_idx: 0,
+                available: false,
+            } = ev
+            {
                 saw_false = true;
             }
         }

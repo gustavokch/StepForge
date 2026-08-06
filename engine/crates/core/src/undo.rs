@@ -7,7 +7,9 @@
 //! mutating commands snapshot. In-memory only — `Undo` is engine state, never
 //! serialized, so this is no `SESSION_FORMAT_VERSION` change.
 
-use crate::models::{FollowAction, Pattern, Session, Step, Track, MAX_TRACKS, PATTERN_SLOTS, STEP_COUNT};
+use crate::models::{
+    FollowAction, Pattern, Session, Step, Track, MAX_TRACKS, PATTERN_SLOTS, STEP_COUNT,
+};
 
 /// What one undo snapshot captures for a track.
 #[derive(Clone, Copy)]
@@ -132,11 +134,7 @@ impl Undo {
         // Resolve the target slot first so a `None` slot never consumes a
         // snapshot (doesn't arise today — pattern ops keep slots Some — but
         // stay total).
-        let Some(p) = s
-            .patterns
-            .get_mut(index)
-            .and_then(|opt| opt.as_mut())
-        else {
+        let Some(p) = s.patterns.get_mut(index).and_then(|opt| opt.as_mut()) else {
             return false;
         };
         let Some(snap) = self.pattern_slots[index].take() else {
@@ -181,7 +179,7 @@ impl Undo {
 mod tests {
     use super::*;
     use crate::clipboard::Clipboard;
-    use crate::models::{Pattern, PATTERN_SLOTS, Step, VelocityZone};
+    use crate::models::{Pattern, Step, VelocityZone, PATTERN_SLOTS};
     use proptest::prelude::*;
     fn session_with_steps() -> Session {
         let mut s = Session::default();
@@ -249,7 +247,10 @@ mod tests {
         assert!(!occupied[1] && !occupied[3], "unoccupied slots stay false");
         assert!(!u.available(0) && !u.available(2), "slots now cleared");
         // A second drain is all-false (idempotent).
-        assert!(u.take_occupied().iter().all(|f| !f), "second drain is empty");
+        assert!(
+            u.take_occupied().iter().all(|f| !f),
+            "second drain is empty"
+        );
     }
 
     fn session_with_pattern_at(idx: usize) -> Session {
@@ -302,7 +303,10 @@ mod tests {
         // never panic.
         let mut u = Undo::default();
         let mut s = Session::default();
-        assert!(!u.undo_pattern(&mut s, PATTERN_SLOTS), "OOB index is a no-op");
+        assert!(
+            !u.undo_pattern(&mut s, PATTERN_SLOTS),
+            "OOB index is a no-op"
+        );
         assert!(!u.undo_pattern(&mut s, 0), "missing snapshot is a no-op");
         // Set slot 1 to None → no-op even with a snapshot push at that index.
         s.patterns[1] = None;
@@ -319,7 +323,10 @@ mod tests {
         u.push_pattern(7, &Pattern::default());
         let occupied = u.take_occupied_patterns();
         assert!(occupied[1] && occupied[7], "marked indices 1 and 7");
-        assert!(!u.available_pattern(1) && !u.available_pattern(7), "cleared");
+        assert!(
+            !u.available_pattern(1) && !u.available_pattern(7),
+            "cleared"
+        );
         // Idempotent.
         assert!(
             u.take_occupied_patterns().iter().all(|f| !f),
@@ -337,7 +344,10 @@ mod tests {
         u.push(3, &t);
         assert!(u.available(0) && u.available(3));
         u.clear_tracks();
-        assert!(!u.available(0) && !u.available(3), "per-track slots cleared");
+        assert!(
+            !u.available(0) && !u.available(3),
+            "per-track slots cleared"
+        );
     }
 
     proptest::proptest! {
