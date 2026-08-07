@@ -23,7 +23,7 @@ use egui::{
 use sequencer_engine::command::Command;
 use sequencer_engine::models::{QuantizeGrain, PATTERN_SLOTS};
 
-use crate::grid::{PRIMARY, SURFACE_HIGH, TEXT_MUTED, TEXT_PRIMARY};
+use crate::theme::{PRIMARY, SURFACE_HIGHEST, TEXT_MUTED, TEXT_PRIMARY};
 use crate::{CommandSink, UiState};
 
 // ---- Pure helpers (headless oracle; ⊥ egui state) ----
@@ -328,7 +328,7 @@ fn render_patterns_popover(
                             btn = if is_active {
                                 btn.fill(PRIMARY)
                             } else {
-                                btn.fill(SURFACE_HIGH)
+                                btn.fill(SURFACE_HIGHEST)
                             };
                             let resp = ui.add(btn);
                             #[cfg(test)]
@@ -425,17 +425,17 @@ fn render_humanize_popover(ui: &mut Ui, anchor: &egui::Response, sink: &impl Com
 
 fn patterns_button(active: usize) -> Button<'static> {
     Button::new(RichText::new(format!("▦ PATTERNS  P{}", active + 1)).color(TEXT_MUTED))
-        .fill(SURFACE_HIGH)
+        .fill(SURFACE_HIGHEST)
 }
 
 fn humanize_button(active: bool) -> Button<'static> {
     let color = if active { PRIMARY } else { TEXT_MUTED };
-    Button::new(RichText::new("≈ NUANCE").color(color)).fill(SURFACE_HIGH)
+    Button::new(RichText::new("≈ NUANCE").color(color)).fill(SURFACE_HIGHEST)
 }
 
 fn quantize_button(g: QuantizeGrain) -> Button<'static> {
     Button::new(RichText::new(format!("GRID  {}", grain_label(g))).color(TEXT_PRIMARY))
-        .fill(SURFACE_HIGH)
+        .fill(SURFACE_HIGHEST)
 }
 
 #[cfg(test)]

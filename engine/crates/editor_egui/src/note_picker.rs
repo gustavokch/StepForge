@@ -20,7 +20,8 @@ use egui::{Color32, Context, Id, Pos2, RichText, Vec2};
 use sequencer_engine::command::Command;
 use std::sync::LazyLock;
 
-use crate::grid::{drum_name, BORDER_WEAK, PRIMARY, SURFACE_HIGH};
+use crate::grid::drum_name;
+use crate::theme::{BORDER_WEAK, PRIMARY, SURFACE_HIGHEST};
 use crate::{CommandSink, UiState};
 
 // ---- ctx.data temp slot (open target + GM/Piano mode) ----
@@ -80,8 +81,8 @@ pub(crate) fn write(ctx: &Context, f: impl FnOnce(&mut NotePickerState)) {
     ctx.data_mut(|d| f(d.get_temp_mut_or_default(note_picker_id())));
 }
 
-/// Open the sheet for `track_idx`. Closes the ActionDrawer — only one
-/// track-level overlay may be open at a time (mutual exclusion).
+/// Open the sheet for `track_idx`. Closes the ActionDrawer and the SettingsSheet
+/// — only one floating overlay may be open at a time (mutual exclusion).
 pub(crate) fn open(ctx: &Context, track_idx: usize) {
     let frame = crate::frame_nr(ctx);
     write(ctx, |s| {
@@ -89,6 +90,7 @@ pub(crate) fn open(ctx: &Context, track_idx: usize) {
         s.opened_at = frame;
     });
     crate::action_drawer::close(ctx);
+    crate::settings::close(ctx);
 }
 pub(crate) fn close(ctx: &Context) {
     write(ctx, |s| s.target = None);
@@ -225,7 +227,7 @@ fn render_gm(
                 let sel = Some(midi) == current;
                 let btn = egui::Button::new(GM_CELL_LABELS[i].as_str())
                     .min_size(Vec2::new(150.0, 0.0))
-                    .fill(if sel { PRIMARY } else { SURFACE_HIGH })
+                    .fill(if sel { PRIMARY } else { SURFACE_HIGHEST })
                     .stroke(if sel {
                         egui::Stroke::NONE
                     } else {
@@ -260,6 +262,13 @@ fn render_piano(
         ui.spacing_mut().item_spacing.x = 2.0;
         ui.horizontal(|ui| {
             for note in 36..=60u8 {
+                // Piano-key colors are LITERAL (a black key is black, a white
+                // key is white) — a domain metaphor, NOT UI text/bg tokens, so
+                // they intentionally bypass `crate::theme`. Forcing them to
+                // ON_PRIMARY/TEXT_PRIMARY would be a semantic category error
+                // (ON_PRIMARY = "dark text on the orange brand fill", not "a
+                // piano's black key"). The selected-key fill uses the brand
+                // PRIMARY; its label reuses the literal contrast below.
                 let black = BLACK_PC.contains(&note.rem_euclid(12));
                 let sel = Some(note) == current;
                 let bg = if sel {

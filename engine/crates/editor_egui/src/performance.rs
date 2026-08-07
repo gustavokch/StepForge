@@ -32,9 +32,8 @@ use sequencer_engine::models::{FollowActionType, Pattern, QuantizeGrain, PATTERN
 #[cfg(test)]
 use egui::{Context, Id, Rect};
 
-use crate::grid::{
-    drum_name, BORDER_WEAK, PRIMARY, SURFACE_HIGH, SURFACE_LOW, TEXT_MUTED, TEXT_PRIMARY,
-};
+use crate::grid::drum_name;
+use crate::theme::{BORDER_WEAK, PRIMARY, SURFACE_HIGHEST, SURFACE_LOW, TEXT_MUTED, TEXT_PRIMARY};
 use crate::{transport_action, CommandSink, UiState};
 
 const GRAINS: [QuantizeGrain; 4] = [
@@ -177,8 +176,8 @@ fn cell_text_color(st: CellState) -> Color32 {
 fn cell_fill(st: CellState, pulse: f32) -> Color32 {
     match st {
         CellState::Empty => SURFACE_LOW,
-        CellState::Filled => SURFACE_HIGH,
-        CellState::Queued => SURFACE_HIGH,
+        CellState::Filled => SURFACE_HIGHEST,
+        CellState::Queued => SURFACE_HIGHEST,
         CellState::Playing => PRIMARY.gamma_multiply(0.20 + 0.25 * pulse),
     }
 }
@@ -419,7 +418,7 @@ pub(crate) fn render_performance_view(ui: &mut Ui, state: &UiState, sink: &impl 
                 let mb = ui.add_sized(
                     Vec2::new(54.0, 18.0),
                     Button::new(RichText::new(mute_label).small().color(mute_color))
-                        .fill(SURFACE_HIGH),
+                        .fill(SURFACE_HIGHEST),
                 );
                 #[cfg(test)]
                 ctx.data_mut(|d| {
@@ -444,7 +443,7 @@ fn play_button(playing: bool) -> Button<'static> {
         ("▶ PLAY", TEXT_PRIMARY)
     };
     Button::new(RichText::new(glyph).strong().color(color))
-        .fill(SURFACE_HIGH)
+        .fill(SURFACE_HIGHEST)
         .corner_radius(CornerRadius::same(6))
 }
 
@@ -454,7 +453,7 @@ fn grain_pill(ui: &mut Ui, g: QuantizeGrain, is_cur: bool) -> Response {
         .strong();
     ui.add(
         Button::new(txt)
-            .fill(if is_cur { SURFACE_HIGH } else { SURFACE_LOW })
+            .fill(if is_cur { SURFACE_HIGHEST } else { SURFACE_LOW })
             .min_size(Vec2::new(40.0, 0.0)),
     )
 }

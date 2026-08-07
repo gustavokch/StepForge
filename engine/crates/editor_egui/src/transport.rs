@@ -16,7 +16,8 @@ use egui::{Button, DragValue, Id, RichText, Ui};
 use sequencer_engine::command::Command;
 use sequencer_engine::models::{SyncSource, MAX_BPM, MIN_BPM};
 
-use crate::grid::{read_grid, write_grid, Zoom, PRIMARY, SURFACE_HIGH, TEXT_MUTED, TEXT_PRIMARY};
+use crate::grid::{read_grid, write_grid, Zoom};
+use crate::theme::{PRIMARY, SURFACE_HIGHEST, TEXT_MUTED, TEXT_PRIMARY};
 use crate::{transport_action, CommandSink, UiState};
 
 // ---- Pure helpers (headless oracle; ⊥ egui state) ----
@@ -94,6 +95,10 @@ fn zoom_rects_id() -> Id {
 #[cfg(test)]
 fn mode_rect_id() -> Id {
     Id::new("stepforge.transport.mode_rect")
+}
+#[cfg(test)]
+fn gear_rect_id() -> Id {
+    Id::new("stepforge.transport.gear_rect")
 }
 
 /// Render the transport bar. `state` is the live mirror; gestures emit via
@@ -184,6 +189,10 @@ pub fn render_transport_bar(ui: &mut Ui, state: &UiState, sink: &impl CommandSin
         ctx.data_mut(|d| d.insert_temp(mode_rect_id(), m_resp.rect));
         if m_resp.clicked() {
             crate::write_mode(&ctx, next_mode);
+            // Close the mode-bound overlays so nothing dangles over the
+            // newly-shown view. Settings is intentionally NOT closed here — it
+            // is mode-agnostic (T13a, resolved Option A): it dismisses only via
+            // its own outside-click/Esc/Done, identical to the other overlays.
             match next_mode {
                 crate::AppMode::Performance => {
                     crate::note_picker::close(&ctx);
@@ -193,6 +202,17 @@ pub fn render_transport_bar(ui: &mut Ui, state: &UiState, sink: &impl CommandSin
                     crate::pattern_options::close(&ctx);
                 }
             }
+        }
+
+        ui.separator();
+
+        // Phase 4 §T T13a — Settings gear. Opens the mode-agnostic SettingsSheet
+        // (a floating Area; closes the three track/pattern overlays on open).
+        let s_resp = ui.button(RichText::new("⚙").color(TEXT_PRIMARY));
+        #[cfg(test)]
+        ctx.data_mut(|d| d.insert_temp(gear_rect_id(), s_resp.rect));
+        if s_resp.clicked() {
+            crate::settings::open(&ctx);
         }
     });
 }
@@ -205,7 +225,15 @@ fn play_button(playing: bool) -> Button<'static> {
     } else {
         ("▶", TEXT_PRIMARY)
     };
-    Button::new(RichText::new(glyph).color(color).strong()).fill(SURFACE_HIGH)
+    Button::new(RichText::new(glyph).color(color).strong()).fill(SURFACE_HIGHEST)
+}
+
+/// Test-facing: center of the gear button rect (recorded each frame).
+#[cfg(test)]
+pub(crate) fn gear_center(ctx: &egui::Context) -> egui::Pos2 {
+    ctx.data(|d| d.get_temp::<egui::Rect>(gear_rect_id()))
+        .expect("gear rect recorded")
+        .center()
 }
 
 #[cfg(test)]

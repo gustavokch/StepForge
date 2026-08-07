@@ -24,7 +24,8 @@ use egui::Rect;
 use egui::{Context, Id, Pos2, Response, RichText, Vec2};
 use sequencer_engine::command::Command;
 
-use crate::grid::{drum_name, TEXT_MUTED, TEXT_PRIMARY};
+use crate::grid::drum_name;
+use crate::theme::{TEXT_MUTED, TEXT_PRIMARY};
 use crate::{CommandSink, UiState};
 
 // ---- ctx.data temp slot (open target + slider-backed strengths) ----
@@ -87,8 +88,9 @@ pub(crate) fn write(ctx: &Context, f: impl FnOnce(&mut ActionDrawerState)) {
     ctx.data_mut(|d| f(d.get_temp_mut_or_default(action_drawer_id())));
 }
 
-/// Open the drawer for `track_idx`. Closes the NotePickerSheet — only one
-/// track-level overlay may be open at a time (mutual exclusion).
+/// Open the drawer for `track_idx`. Closes the NotePickerSheet and the
+/// SettingsSheet — only one floating overlay may be open at a time (mutual
+/// exclusion).
 pub(crate) fn open(ctx: &Context, track_idx: usize) {
     let frame = crate::frame_nr(ctx);
     write(ctx, |s| {
@@ -96,6 +98,7 @@ pub(crate) fn open(ctx: &Context, track_idx: usize) {
         s.opened_at = frame;
     });
     crate::note_picker::close(ctx);
+    crate::settings::close(ctx);
 }
 pub(crate) fn close(ctx: &Context) {
     write(ctx, |s| s.target = None);

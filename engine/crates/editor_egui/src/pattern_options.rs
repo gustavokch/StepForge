@@ -22,7 +22,7 @@ use sequencer_engine::models::{FollowAction, FollowActionType, Pattern, PATTERN_
 #[cfg(test)]
 use egui::Rect;
 
-use crate::grid::{PRIMARY, SURFACE_HIGH, TEXT_MUTED, TEXT_PRIMARY};
+use crate::theme::{PRIMARY, SURFACE_HIGHEST, TEXT_MUTED, TEXT_PRIMARY};
 use crate::{CommandSink, UiState};
 
 fn pattern_options_id() -> Id {
@@ -114,7 +114,7 @@ fn draft_label(d: ActionDraft) -> &'static str {
 fn clip_btn(ui: &mut Ui, label: &str) -> egui::Response {
     ui.add(
         egui::Button::new(RichText::new(label).color(TEXT_PRIMARY))
-            .fill(SURFACE_HIGH)
+            .fill(SURFACE_HIGHEST)
             .min_size(egui::Vec2::new(60.0, 0.0)),
     )
 }
@@ -232,6 +232,10 @@ pub(crate) fn open(ctx: &Context, pattern_idx: usize, state: &UiState) {
         s.action = action;
         s.specific_target = specific_target;
     });
+    // Only one floating sheet at a time: close the SettingsSheet (the other two
+    // track-level overlays are Editing-only and don't co-exist with this
+    // Performance-triggered sheet, but settings is mode-agnostic).
+    crate::settings::close(ctx);
 }
 
 pub(crate) fn close(ctx: &Context) {
@@ -442,7 +446,7 @@ pub(crate) fn render_pattern_options(ctx: &Context, ui_state: &UiState, sink: &i
                     ui.horizontal(|ui| {
                         let save = ui.add(
                             egui::Button::new(RichText::new("Save").strong().color(PRIMARY))
-                                .fill(SURFACE_HIGH)
+                                .fill(SURFACE_HIGHEST)
                                 .min_size(egui::Vec2::new(80.0, 0.0)),
                         );
                         #[cfg(test)]
