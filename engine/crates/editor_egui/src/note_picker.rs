@@ -80,8 +80,8 @@ pub(crate) fn write(ctx: &Context, f: impl FnOnce(&mut NotePickerState)) {
     ctx.data_mut(|d| f(d.get_temp_mut_or_default(note_picker_id())));
 }
 
-/// Open the sheet for `track_idx`. Closes the ActionDrawer — only one
-/// track-level overlay may be open at a time (mutual exclusion).
+/// Open the sheet for `track_idx`. Closes the ActionDrawer and the SettingsSheet
+/// — only one floating overlay may be open at a time (mutual exclusion).
 pub(crate) fn open(ctx: &Context, track_idx: usize) {
     let frame = crate::frame_nr(ctx);
     write(ctx, |s| {
@@ -89,6 +89,7 @@ pub(crate) fn open(ctx: &Context, track_idx: usize) {
         s.opened_at = frame;
     });
     crate::action_drawer::close(ctx);
+    crate::settings::close(ctx);
 }
 pub(crate) fn close(ctx: &Context) {
     write(ctx, |s| s.target = None);

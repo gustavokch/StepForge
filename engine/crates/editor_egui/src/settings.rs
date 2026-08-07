@@ -48,15 +48,19 @@ fn write(ctx: &Context, f: impl FnOnce(&mut SettingsState)) {
     ctx.data_mut(|d| f(d.get_temp_mut_or_default(settings_id())));
 }
 
-/// Open the sheet. Records the frame for the open-frame guard. (Mutual
-/// exclusion — closing the three sibling overlays — is added in Task 4.)
-#[allow(dead_code)] // Task 2 (T13b) wires the TransportBar gear that calls this.
+/// Open the sheet. Records the frame for the open-frame guard, then closes the
+/// three sibling track/pattern overlays — only one floating sheet may be open at
+/// a time (mutual exclusion, symmetric with each sibling's `open`).
 pub(crate) fn open(ctx: &Context) {
     let frame = crate::frame_nr(ctx);
     write(ctx, |s| {
         s.open = true;
         s.opened_at = frame;
     });
+    // Only one floating sheet at a time.
+    crate::note_picker::close(ctx);
+    crate::action_drawer::close(ctx);
+    crate::pattern_options::close(ctx);
 }
 
 pub(crate) fn close(ctx: &Context) {
@@ -264,5 +268,79 @@ mod tests {
                 .all(|c| !matches!(c, sequencer_engine::command::Command::SetSyncSource { .. })),
             "sync source is read-only in the settings sheet"
         );
+    }
+
+    // ---- T13a Task 4: gear trigger + symmetric exclusion + mode-agnostic ----
+
+    #[test]
+    fn gear_button_opens_settings() {
+        // The gear lives in the TransportBar, rendered by the full Harness.
+        let h = Harness::new(UiState {
+            session: Some(Arc::new(Session::default())),
+            ..Default::default()
+        });
+        assert!(!read(&h.ctx).open);
+        h.settle();
+        let gear = crate::transport::gear_center(&h.ctx); // test-facing helper
+        h.click_primary(gear);
+        assert!(read(&h.ctx).open, "gear click must open the settings sheet");
+    }
+
+    #[test]
+    fn opening_settings_closes_pattern_options() {
+        let h = Harness::new(UiState {
+            session: Some(Arc::new(Session::default())),
+            ..Default::default()
+        });
+        crate::write_mode(&h.ctx, crate::AppMode::Performance);
+        crate::pattern_options::open(&h.ctx, 0, &h.state);
+        h.settle();
+        assert!(crate::pattern_options::read(&h.ctx).target.is_some());
+        crate::settings::open(&h.ctx);
+        assert!(
+            crate::pattern_options::read(&h.ctx).target.is_none(),
+            "opening settings must close pattern_options"
+        );
+    }
+
+    #[test]
+    fn opening_note_picker_closes_settings() {
+        let h = Harness::new(UiState {
+            session: Some(Arc::new(Session::default())),
+            ..Default::default()
+        });
+        crate::settings::open(&h.ctx);
+        assert!(read(&h.ctx).open);
+        crate::note_picker::open(&h.ctx, 0);
+        assert!(
+            !read(&h.ctx).open,
+            "opening note_picker must close settings"
+        );
+    }
+
+    #[test]
+    fn mode_switch_does_not_close_settings() {
+        // T13a (resolved design, Option A): settings is mode-agnostic — a mode
+        // switch via `write_mode` does NOT close it. The AppMode toggle's
+        // explicit close-list (transport.rs) closes only the mode-bound overlays;
+        // settings is deliberately excluded (see the comment there). An outside
+        // POINTER click (e.g. on the toggle button) dismisses settings through
+        // the shared `overlay::should_dismiss` outside-click guard, identical to
+        // the other overlays — that path is covered by `outside_click_dismisses`.
+        // This test guards the non-pointer mode-switch path.
+        let h = Harness::new(UiState {
+            session: Some(Arc::new(Session::default())),
+            ..Default::default()
+        });
+        crate::settings::open(&h.ctx);
+        h.settle();
+        assert!(read(&h.ctx).open);
+        // Mode switch with NO outside pointer click → settings must persist.
+        crate::write_mode(&h.ctx, crate::AppMode::Performance);
+        h.idle();
+        assert!(read(&h.ctx).open);
+        crate::write_mode(&h.ctx, crate::AppMode::Editing);
+        h.idle();
+        assert!(read(&h.ctx).open, "a mode switch must not close settings");
     }
 }

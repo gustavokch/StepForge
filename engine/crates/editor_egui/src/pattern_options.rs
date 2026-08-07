@@ -232,6 +232,10 @@ pub(crate) fn open(ctx: &Context, pattern_idx: usize, state: &UiState) {
         s.action = action;
         s.specific_target = specific_target;
     });
+    // Only one floating sheet at a time: close the SettingsSheet (the other two
+    // track-level overlays are Editing-only and don't co-exist with this
+    // Performance-triggered sheet, but settings is mode-agnostic).
+    crate::settings::close(ctx);
 }
 
 pub(crate) fn close(ctx: &Context) {
