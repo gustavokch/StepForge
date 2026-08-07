@@ -936,6 +936,11 @@ impl Engine {
                                 );
                             }
                         }
+                        // #34: drain pattern-undo slots too — a wholesale reload
+                        // invalidates them (else a later UndoPattern would restore
+                        // an old-session pattern). No event burst: the mirror does
+                        // not track pattern-undo (always-on UI).
+                        let _ = self.undo.lock().unwrap().take_occupied_patterns();
                         push_large_event(
                             &self.large_events,
                             EngineEvent::FullSnapshot {
@@ -1042,18 +1047,13 @@ impl Engine {
                 let index = *index;
                 if index < crate::models::PATTERN_SLOTS {
                     let snap = self.snapshot.load_full();
-                    self.clipboard
-                        .lock()
-                        .unwrap()
-                        .copy_pattern(&snap, index);
+                    self.clipboard.lock().unwrap().copy_pattern(&snap, index);
                     // No publish, no FullSnapshot — the mirror learns nothing
                     // from a Copy (Command::CopyPattern contract). `&snap`
                     // deref-coerces Guard<Session> -> &Session.
                 }
             }
-            CutPattern { ref index }
-            | PastePattern { ref index }
-            | ClearPattern { ref index } => {
+            CutPattern { ref index } | PastePattern { ref index } | ClearPattern { ref index } => {
                 let index = *index;
                 if index < crate::models::PATTERN_SLOTS {
                     let mut s = (*self.snapshot.load_full()).clone();
@@ -1075,6 +1075,22 @@ impl Engine {
                         ),
                     };
                     if mutated {
+                        // #34: push the pre-mutation snapshot. The live Arc still
+                        // holds the pre-mutation session (publish is below), so
+                        // read it back from there. Gated on `mutated` so a no-op
+                        // Paste (empty clipboard) leaves no orphan snapshot that a
+                        // later UndoPattern would apply to unrelated edits.
+                        let pre = self.snapshot.load_full();
+                        if let Some(p) = pre.patterns.get(index).and_then(|opt| opt.as_ref()) {
+                            self.undo.lock().unwrap().push_pattern(index, p);
+                        }
+                        // D6: a whole-pattern change invalidates the active
+                        // pattern's per-track snapshots (now stale). Clear them
+                        // and notify the mirror when the target is the active
+                        // pattern (parity with the LoadSession drain).
+                        if index == s.active_pattern_index {
+                            self.invalidate_active_track_undo();
+                        }
                         self.publish(s);
                         let snap = self.snapshot.load_full();
                         crate::midi_out::push_large_event(
@@ -1084,6 +1100,39 @@ impl Engine {
                             },
                         );
                     }
+                }
+            }
+            // #34: pattern-level undo. Restore the pre-mutation PatternSnapshot
+            // for slot `index` (one-deep). Always-on UI — a missing snapshot is
+            // a silent no-op (no publish). Restore overwrites tracks +
+            // follow_action, leaves the pattern's id, keeps the slot Some.
+            // D6: clearing the active pattern's per-track undo applies here too.
+            UndoPattern { ref index } => {
+                let index = *index;
+                // Always-on UI (#34): a missing snapshot is the common path.
+                // Peek before cloning the full Session so a no-op Undo (no
+                // snapshot / OOB) is cheap. apply_command runs on a single
+                // worker thread, so the peek-then-take is race-free.
+                if !self.undo.lock().unwrap().available_pattern(index) {
+                    return;
+                }
+                let mut s = (*self.snapshot.load_full()).clone();
+                let restored = self.undo.lock().unwrap().undo_pattern(&mut s, index);
+                if restored {
+                    // D6: restoring the active pattern invalidates its per-track
+                    // snapshots (now stale). Clear + notify (parity with the
+                    // LoadSession drain).
+                    if index == s.active_pattern_index {
+                        self.invalidate_active_track_undo();
+                    }
+                    self.publish(s);
+                    let snap = self.snapshot.load_full();
+                    crate::midi_out::push_large_event(
+                        &self.large_events,
+                        EngineEvent::FullSnapshot {
+                            session: (*snap).clone(),
+                        },
+                    );
                 }
             }
             // Scheduler (Task 16 module, wired here): the worker records the
@@ -1284,6 +1333,26 @@ impl Engine {
                         },
                     );
                 }
+            }
+        }
+    }
+
+    /// D6 (#34): a whole-pattern op (Cut/Paste/Clear/Undo) targeting the active
+    /// pattern invalidates its per-track undo snapshots — they captured the
+    /// pre-mutation tracks. Clear them and emit `UndoAvailable { false }` per
+    /// previously-occupied slot so both mirrors drop stale per-track undo
+    /// availability (parity with the LoadSession drain).
+    fn invalidate_active_track_undo(&self) {
+        let cleared = self.undo.lock().unwrap().clear_tracks();
+        for (track_idx, was_occupied) in cleared.iter().enumerate() {
+            if *was_occupied {
+                crate::midi_out::push_event(
+                    &self.hot_events,
+                    &EngineEvent::UndoAvailable {
+                        track_idx,
+                        available: false,
+                    },
+                );
             }
         }
     }
@@ -1994,7 +2063,10 @@ mod tests {
         use crate::serde_ext::SessionEnvelope;
         let e = Engine::new();
         // Session A: push an undo snapshot for track 0 via Roll.
-        e.apply_command(Command::Roll { track_idx: 0, strength: 0.5 });
+        e.apply_command(Command::Roll {
+            track_idx: 0,
+            strength: 0.5,
+        });
         assert!(
             e.undo.lock().unwrap().available(0),
             "Roll must push an undo snapshot for track 0"
@@ -2015,9 +2087,12 @@ mod tests {
         // matching, mirroring the SetSyncSource test pattern at engine.rs:1761.
         let mut saw_false = false;
         while let Some(slot) = e.hot_events.dequeue() {
-            let ev: EngineEvent =
-                postcard::from_bytes(&slot.bytes[..slot.len as usize]).unwrap();
-            if let EngineEvent::UndoAvailable { track_idx: 0, available: false } = ev {
+            let ev: EngineEvent = postcard::from_bytes(&slot.bytes[..slot.len as usize]).unwrap();
+            if let EngineEvent::UndoAvailable {
+                track_idx: 0,
+                available: false,
+            } = ev
+            {
                 saw_false = true;
             }
         }
@@ -2032,6 +2107,214 @@ mod tests {
             e.snapshot_arc().patterns[0],
             before,
             "Undo after LoadSession must not restore an old-session track"
+        );
+    }
+
+    /// #34: ClearPattern pushes a pattern-undo snapshot; UndoPattern restores
+    /// the prior pattern (tracks + follow_action + id) and publishes a
+    /// FullSnapshot.
+    #[test]
+    fn pattern_undo_restores_after_clear_and_publishes_snapshot() {
+        use crate::models::VelocityZone;
+        let e = Engine::new();
+        // Seed an active step on the active pattern (slot 0).
+        e.apply_command(Command::SetStep {
+            track_idx: 0,
+            step_idx: 0,
+            zone: VelocityZone::Accent,
+        });
+        let before = e.snapshot_arc().patterns[0].clone().unwrap();
+        assert!(before.tracks[0].steps[0].active);
+
+        // Clear pushes a snapshot.
+        e.apply_command(Command::ClearPattern { index: 0 });
+        assert!(
+            e.undo.lock().unwrap().available_pattern(0),
+            "ClearPattern must push a pattern snapshot"
+        );
+        assert!(
+            !e.snapshot_arc().patterns[0].as_ref().unwrap().tracks[0].steps[0].active,
+            "Clear resets steps"
+        );
+
+        // Drain any FullSnapshot the Clear emitted.
+        while e.large_events.dequeue().is_some() {}
+
+        // Undo restores.
+        e.apply_command(Command::UndoPattern { index: 0 });
+        let after = e.snapshot_arc();
+        let got = after.patterns[0].as_ref().unwrap();
+        assert!(
+            got.tracks[0].steps[0].active,
+            "UndoPattern must restore the cleared step"
+        );
+        assert_eq!(got.id, before.id, "UndoPattern preserves id");
+        assert!(
+            !e.undo.lock().unwrap().available_pattern(0),
+            "snapshot consumed (one-deep)"
+        );
+        // A FullSnapshot was published on restore.
+        let mut saw_snapshot = false;
+        while let Some(ev) = e.large_events.dequeue() {
+            if matches!(ev, EngineEvent::FullSnapshot { .. }) {
+                saw_snapshot = true;
+            }
+        }
+        assert!(saw_snapshot, "UndoPattern must publish a FullSnapshot");
+    }
+
+    /// #34: CopyPattern is clipboard-only — it must NOT push a pattern snapshot.
+    #[test]
+    fn copy_pattern_pushes_no_undo_snapshot() {
+        let e = Engine::new();
+        e.apply_command(Command::CopyPattern { index: 0 });
+        assert!(
+            !e.undo.lock().unwrap().available_pattern(0),
+            "CopyPattern must not push an undo snapshot"
+        );
+    }
+
+    /// #34: a UndoPattern with no prior mutating op is a silent no-op (always-on
+    /// UI) — no state change, no FullSnapshot.
+    #[test]
+    fn undo_pattern_with_no_snapshot_is_a_silent_noop() {
+        let e = Engine::new();
+        let before = e.snapshot_arc();
+        e.apply_command(Command::UndoPattern { index: 0 });
+        assert_eq!(
+            e.snapshot_arc().patterns[0],
+            before.patterns[0],
+            "no-op Undo must not mutate"
+        );
+        assert!(
+            e.large_events.dequeue().is_none(),
+            "no-op Undo must not publish a FullSnapshot"
+        );
+    }
+
+    /// #34: LoadSession drains pattern-undo slots (#30 parity) — a stale snapshot
+    /// cannot restore an old-session pattern onto a reloaded one.
+    #[test]
+    fn load_session_drains_pattern_undo_slots() {
+        use crate::serde_ext::SessionEnvelope;
+        let e = Engine::new();
+        e.apply_command(Command::ClearPattern { index: 3 });
+        assert!(e.undo.lock().unwrap().available_pattern(3));
+        // Load a fresh session.
+        let env = SessionEnvelope::wrap(Session::default());
+        let bytes = postcard::to_allocvec(&env).unwrap();
+        e.apply_command(Command::LoadSession { bytes });
+        assert!(
+            !e.undo.lock().unwrap().available_pattern(3),
+            "LoadSession must drain pattern-undo slots"
+        );
+    }
+
+    /// #34 / D6: a ClearPattern on the ACTIVE pattern clears the per-track undo
+    /// (now stale w.r.t. that pattern). A Roll pushed a per-track snapshot;
+    /// after the whole-pattern Clear it must be gone.
+    #[test]
+    fn clear_pattern_on_active_clears_per_track_undo() {
+        use crate::models::MAX_TRACKS;
+        let e = Engine::new();
+        e.apply_command(Command::Roll {
+            track_idx: 0,
+            strength: 0.5,
+        });
+        assert!(
+            e.undo.lock().unwrap().available(0),
+            "Roll pushes a per-track snapshot for track 0"
+        );
+        e.apply_command(Command::ClearPattern { index: 0 }); // active pattern
+        for t in 0..MAX_TRACKS {
+            assert!(
+                !e.undo.lock().unwrap().available(t),
+                "per-track slot {t} cleared by D6"
+            );
+        }
+    }
+
+    /// #34: a no-op PastePattern (empty pattern clipboard) must NOT push a
+    /// pattern-undo snapshot — otherwise the orphan snapshot would later revert
+    /// unrelated edits. The snapshot is committed only when the mutation happens.
+    #[test]
+    fn paste_pattern_with_empty_clipboard_leaves_no_undo_snapshot() {
+        let e = Engine::new();
+        // Clipboard is empty (no CopyPattern) -> Paste is a no-op.
+        e.apply_command(Command::PastePattern { index: 0 });
+        assert!(
+            !e.undo.lock().unwrap().available_pattern(0),
+            "a no-op Paste must not push a pattern-undo snapshot"
+        );
+        assert!(
+            e.large_events.dequeue().is_none(),
+            "a no-op Paste must not publish a FullSnapshot"
+        );
+    }
+
+    /// #34: a no-op Paste must not destroy a prior valid snapshot. Clear pushes
+    /// snapshot A (pre-clear); an empty-clipboard Paste is a no-op and must leave
+    /// A intact; Undo then restores A (the cleared step comes back).
+    #[test]
+    fn noop_paste_does_not_overwrite_prior_pattern_undo_snapshot() {
+        use crate::models::VelocityZone;
+        let e = Engine::new();
+        // Seed an active step on slot 0 so the pre-clear state is observable.
+        e.apply_command(Command::SetStep {
+            track_idx: 0,
+            step_idx: 0,
+            zone: VelocityZone::Accent,
+        });
+        // Clear captures snapshot A (step active) and clears.
+        e.apply_command(Command::ClearPattern { index: 0 });
+        assert!(e.undo.lock().unwrap().available_pattern(0));
+        // Drain the Clear's FullSnapshot.
+        while e.large_events.dequeue().is_some() {}
+
+        // No-op Paste (empty clipboard) must NOT overwrite snapshot A.
+        e.apply_command(Command::PastePattern { index: 0 });
+
+        // Undo restores A -> the cleared step is active again.
+        e.apply_command(Command::UndoPattern { index: 0 });
+        assert!(
+            e.snapshot_arc().patterns[0].as_ref().unwrap().tracks[0].steps[0].active,
+            "Undo must restore the pre-clear state (no-op Paste did not destroy the snapshot)"
+        );
+    }
+
+    /// #34 / D6: a whole-pattern op on the ACTIVE pattern must emit
+    /// `UndoAvailable { false }` for each previously-occupied per-track slot, so
+    /// the mirror drops stale per-track undo availability (parity with
+    /// LoadSession). A Roll on track 0 marks it undoable; a ClearPattern on the
+    /// active pattern must then report track 0 as no-longer-undoable.
+    #[test]
+    fn pattern_op_on_active_emits_undo_available_false() {
+        use crate::event::EngineEvent;
+        let e = Engine::new();
+        e.apply_command(Command::Roll {
+            track_idx: 0,
+            strength: 0.5,
+        });
+        assert!(e.undo.lock().unwrap().available(0));
+        // Drain the Roll's UndoAvailable{0,true} baseline.
+        while e.hot_events.dequeue().is_some() {}
+
+        e.apply_command(Command::ClearPattern { index: 0 }); // active pattern
+
+        let mut saw_false = false;
+        while let Some(slot) = e.hot_events.dequeue() {
+            let ev: EngineEvent = postcard::from_bytes(&slot.bytes[..slot.len as usize]).unwrap();
+            if let EngineEvent::UndoAvailable {
+                track_idx: 0,
+                available: false,
+            } = ev
+            {
+                saw_false = true;
+            }
+        }
+        assert!(
+            saw_false,
+            "D6 must emit UndoAvailable{{0,false}} when the active pattern's per-track undo is cleared"
         );
     }
 

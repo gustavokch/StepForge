@@ -230,7 +230,7 @@ struct SessionMirror: Equatable {
         case .roll, .vary, .cut, .copy, .paste, .undo,
              .retriggerPattern, .requestFullSnapshot,
              .serialize, .loadSession, .midiClockTick,
-             .copyPattern, .cutPattern, .pastePattern, .clearPattern:
+             .copyPattern, .cutPattern, .pastePattern, .clearPattern, .undoPattern:
             break
         }
     }
