@@ -13,6 +13,7 @@ mod test_support;
 pub mod theme;
 pub mod track_management;
 pub mod transport;
+pub mod typography;
 pub mod ui_state;
 pub use ui_state::UiState;
 
