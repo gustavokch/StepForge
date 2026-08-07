@@ -10,6 +10,7 @@ pub mod performance;
 pub mod settings;
 #[cfg(test)]
 mod test_support;
+pub mod theme;
 pub mod track_management;
 pub mod transport;
 pub mod ui_state;
