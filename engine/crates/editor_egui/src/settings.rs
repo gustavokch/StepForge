@@ -91,6 +91,15 @@ pub(crate) fn render_settings(ctx: &Context, ui_state: &UiState, sink: &impl Com
         *d.get_temp_mut_or_default::<Option<Rect>>(done_rect_id()) = None;
     });
 
+    // True when the MIDI-channel ComboBox popup rendered this frame. The popup
+    // is a separate Foreground `Area` that opens below the sheet and (16 items)
+    // extends past this sheet's `rect`. `overlay::should_dismiss` uses
+    // `pointer.primary_clicked()`, which is global and NOT consumption-aware,
+    // so without this guard a click on any channel item landing below the rect
+    // would close the sheet the same frame the channel is picked. `show_ui`
+    // returns `inner: Some` iff the popup rendered this frame (including the
+    // release frame that commits a pick), so we suppress dismiss that frame.
+    let mut combo_popup_open = false;
     let area = egui::Area::new(Id::new("stepforge.settings"))
         .order(egui::Order::Foreground)
         .current_pos(Pos2::new(40.0, 60.0))
@@ -118,13 +127,16 @@ pub(crate) fn render_settings(ctx: &Context, ui_state: &UiState, sink: &impl Com
                     ui.label(RichText::new("MIDI Channel").color(TEXT_MUTED).strong());
                     let current = ui_state.global_midi_channel();
                     let mut sel = current;
-                    ComboBox::from_id_salt("stepforge.settings.midi_channel")
+                    let combo = ComboBox::from_id_salt("stepforge.settings.midi_channel")
                         .selected_text(format!("Ch {}", sel))
                         .show_ui(ui, |ui| {
                             for ch in 1u8..=16u8 {
                                 ui.selectable_value(&mut sel, ch, format!("Ch {}", ch));
                             }
                         });
+                    // `inner: Some` iff the popup rendered this frame — drives the
+                    // dismiss-suppression guard above.
+                    combo_popup_open = combo.inner.is_some();
                     if let Some(cmd) = midi_channel_command(current, sel) {
                         sink.push(cmd);
                     }
@@ -153,7 +165,7 @@ pub(crate) fn render_settings(ctx: &Context, ui_state: &UiState, sink: &impl Com
     // outside-click dismiss that frame (Esc still dismisses). Same guard as the
     // T11/T12 overlays.
     let is_open_frame = crate::frame_nr(ctx) == st.opened_at;
-    if crate::overlay::should_dismiss(ctx, rect, is_open_frame) {
+    if crate::overlay::should_dismiss(ctx, rect, is_open_frame) && !combo_popup_open {
         close(ctx);
     }
 }
