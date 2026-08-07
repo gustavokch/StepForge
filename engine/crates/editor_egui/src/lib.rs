@@ -7,6 +7,7 @@ pub mod note_picker;
 pub mod overlay;
 pub mod pattern_options;
 pub mod performance;
+pub mod settings;
 #[cfg(test)]
 mod test_support;
 pub mod track_management;
@@ -144,6 +145,9 @@ pub fn render(ctx: &Context, ui_state: &UiState, sink: &impl CommandSink) {
         // a pattern cell's `…` gear). Floating `egui::Area`; no-op when its
         // target is None. The AppMode toggle closes it on the switch to Editing.
         pattern_options::render_pattern_options(ui.ctx(), ui_state, sink);
+        // Phase 4 §T T13a — SettingsSheet overlay (mode-agnostic; gear in the
+        // TransportBar opens it). Floating `egui::Area`; no-op when closed.
+        settings::render_settings(ui.ctx(), ui_state, sink);
     });
 }
 
