@@ -24,7 +24,8 @@ use egui::Rect;
 use egui::{Context, Id, Pos2, Response, RichText, Vec2};
 use sequencer_engine::command::Command;
 
-use crate::grid::{drum_name, TEXT_MUTED, TEXT_PRIMARY};
+use crate::grid::drum_name;
+use crate::theme::{TEXT_MUTED, TEXT_PRIMARY};
 use crate::{CommandSink, UiState};
 
 // ---- ctx.data temp slot (open target + slider-backed strengths) ----

@@ -17,7 +17,7 @@ pub mod typography;
 pub mod ui_state;
 pub use ui_state::UiState;
 
-use egui::{Color32, Context, Id};
+use egui::{Context, Id};
 use sequencer_engine::command::Command;
 
 /// Sink for commands emitted by UI interactions.
@@ -82,11 +82,29 @@ pub fn transport_action(playing: bool) -> Command {
     }
 }
 
-/// Dark graphite theme (Phase 0 minimal; full palette in Phase 4).
+/// Dark graphite theme — full Phase-4 palette/typography port of the iOS
+/// `Theme.swift` + `Typography.swift`. Tokens live in [`theme`] +
+/// [`typography`]. Widgets import `crate::theme::{...}`; `apply_theme` sets the
+/// egui `Visuals` (widget rounding, override text color) + `Style` (item
+/// spacing, button padding, the 7-name type-scale).
 pub fn apply_theme(ctx: &Context) {
     let mut v = egui::Visuals::dark();
-    v.override_text_color = Some(egui::Color32::WHITE);
+    v.override_text_color = Some(theme::TEXT_PRIMARY);
+    let r = egui::CornerRadius::same(theme::Radius::SM);
+    v.widgets.noninteractive.corner_radius = r;
+    v.widgets.inactive.corner_radius = r;
+    v.widgets.hovered.corner_radius = r;
+    v.widgets.active.corner_radius = r;
+    v.widgets.open.corner_radius = r;
     ctx.set_visuals(v);
+    ctx.style_mut(|s| {
+        s.spacing.item_spacing = egui::vec2(theme::Spacing::SM, theme::Spacing::XS);
+        s.spacing.button_padding = egui::vec2(theme::Spacing::SM, theme::Spacing::XS);
+        for (name, fid) in typography::font_ids() {
+            s.text_styles
+                .insert(egui::TextStyle::Name(name.into()), fid);
+        }
+    });
 }
 
 /// Render the editor: the Phase 1 §T T10c `TransportBar` (play/stop, BPM,
@@ -112,7 +130,7 @@ pub fn render(ctx: &Context, ui_state: &UiState, sink: &impl CommandSink) {
             ui.separator();
             ui.label(
                 egui::RichText::new(format!("engine error [{}]: {}", err.code, err.message))
-                    .color(Color32::LIGHT_RED),
+                    .color(theme::DANGER),
             );
         }
 
@@ -187,5 +205,42 @@ mod tests {
         let _ = ctx.run(egui::RawInput::default(), |ctx| {
             render(ctx, &state, &sink);
         });
+    }
+
+    #[test]
+    fn apply_theme_installs_spacing_radius_textstyles() {
+        let ctx = Context::default();
+        apply_theme(&ctx);
+        let style = ctx.style();
+        // Spacing from the shared tokens (not egui defaults).
+        assert_eq!(
+            style.spacing.item_spacing,
+            egui::vec2(theme::Spacing::SM, theme::Spacing::XS)
+        );
+        // Radius: widget rounding uses Radius::SM (fixes the old CORNER=3 drift).
+        // egui 0.31 renamed `WidgetVisuals::rounding` (method) → `corner_radius`
+        // (field); the deprecated `.rounding()` getter still exists but is
+        // marked deprecated, so read the field directly.
+        assert_eq!(
+            style.visuals.widgets.inactive.corner_radius.nw,
+            theme::Radius::SM
+        );
+        // All 7 typography roles registered as named TextStyles.
+        for name in [
+            typography::NAME_BPM_LARGE,
+            typography::NAME_MONO_VALUE,
+            typography::NAME_STEP_INDEX,
+            typography::NAME_TRACK_NAME,
+            typography::NAME_CONTROL_LABEL,
+            typography::NAME_SECTION_TAG,
+            typography::NAME_BADGE,
+        ] {
+            assert!(
+                style
+                    .text_styles
+                    .contains_key(&egui::TextStyle::Name(name.into())),
+                "TextStyle {name} must be registered"
+            );
+        }
     }
 }

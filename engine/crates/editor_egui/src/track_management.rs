@@ -20,7 +20,7 @@ use egui::{Button, Layout, RichText, Ui, Vec2};
 use sequencer_engine::command::Command;
 use sequencer_engine::models::{MAX_TRACKS, MIN_TRACKS};
 
-use crate::grid::{SURFACE_HIGH, TEXT_MUTED, TEXT_PRIMARY};
+use crate::theme::{SURFACE_HIGHEST, TEXT_MUTED, TEXT_PRIMARY};
 use crate::{CommandSink, UiState};
 
 // ---- Pure helpers (headless oracle; ⊥ egui state) ----
@@ -91,7 +91,7 @@ pub fn render_track_management_bar(ui: &mut Ui, state: &UiState, sink: &impl Com
 fn add_button(enabled: bool) -> Button<'static> {
     let color = if enabled { TEXT_PRIMARY } else { TEXT_MUTED };
     Button::new(RichText::new("+").color(color).strong())
-        .fill(SURFACE_HIGH)
+        .fill(SURFACE_HIGHEST)
         .min_size(Vec2::new(30.0, 24.0))
 }
 
@@ -99,7 +99,7 @@ fn add_button(enabled: bool) -> Button<'static> {
 fn remove_button(enabled: bool) -> Button<'static> {
     let color = if enabled { TEXT_PRIMARY } else { TEXT_MUTED };
     Button::new(RichText::new("\u{2212}").color(color).strong())
-        .fill(SURFACE_HIGH)
+        .fill(SURFACE_HIGHEST)
         .min_size(Vec2::new(30.0, 24.0))
 }
 

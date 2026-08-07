@@ -13,7 +13,7 @@
 use egui::Rect;
 use egui::{ComboBox, Context, Id, Pos2, RichText};
 
-use crate::grid::{SURFACE_HIGH, TEXT_MUTED, TEXT_PRIMARY};
+use crate::theme::{SURFACE_HIGHEST, TEXT_MUTED, TEXT_PRIMARY};
 use crate::{CommandSink, UiState};
 use sequencer_engine::command::Command;
 
@@ -132,7 +132,7 @@ pub(crate) fn render_settings(ctx: &Context, ui_state: &UiState, sink: &impl Com
                     ui.separator();
                     let done = ui.add(
                         egui::Button::new(RichText::new("Done").color(TEXT_PRIMARY))
-                            .fill(SURFACE_HIGH)
+                            .fill(SURFACE_HIGHEST)
                             .min_size(egui::Vec2::new(80.0, 0.0)),
                     );
                     #[cfg(test)]

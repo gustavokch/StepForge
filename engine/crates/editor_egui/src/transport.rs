@@ -16,7 +16,8 @@ use egui::{Button, DragValue, Id, RichText, Ui};
 use sequencer_engine::command::Command;
 use sequencer_engine::models::{SyncSource, MAX_BPM, MIN_BPM};
 
-use crate::grid::{read_grid, write_grid, Zoom, PRIMARY, SURFACE_HIGH, TEXT_MUTED, TEXT_PRIMARY};
+use crate::grid::{read_grid, write_grid, Zoom};
+use crate::theme::{PRIMARY, SURFACE_HIGHEST, TEXT_MUTED, TEXT_PRIMARY};
 use crate::{transport_action, CommandSink, UiState};
 
 // ---- Pure helpers (headless oracle; ⊥ egui state) ----
@@ -224,7 +225,7 @@ fn play_button(playing: bool) -> Button<'static> {
     } else {
         ("▶", TEXT_PRIMARY)
     };
-    Button::new(RichText::new(glyph).color(color).strong()).fill(SURFACE_HIGH)
+    Button::new(RichText::new(glyph).color(color).strong()).fill(SURFACE_HIGHEST)
 }
 
 /// Test-facing: center of the gear button rect (recorded each frame).

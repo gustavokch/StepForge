@@ -31,23 +31,11 @@ use egui::{
 use sequencer_engine::command::Command;
 use sequencer_engine::models::{Ratchet, Step, Track, VelocityZone, STEP_COUNT};
 
+use crate::theme::{
+    BORDER_WEAK, PRIMARY, SURFACE_HIGHEST, SURFACE_LOW, TEXT_MUTED, TEXT_PRIMARY, ZONE_ACCENT,
+    ZONE_LOW, ZONE_MID,
+};
 use crate::{CommandSink, UiState};
-
-// ---- Palette (design §Widgets) ---- dark graphite tiers, orange active, zones.
-// `pub(crate)` so the TransportBar (T10c) reuses the same tokens — one palette,
-// no drift between widgets. Full palette/typography module lands in Phase 4.
-pub(crate) const SURFACE_LOW: Color32 = Color32::from_rgb(0x1B, 0x1B, 0x1B); // inactive cell fill
-pub(crate) const SURFACE_HIGH: Color32 = Color32::from_rgb(0x35, 0x35, 0x35);
-// PRIMARY (UI accent: accent-zone stroke, mute-on fill) and ZONE_ACCENT (step
-// velocity-zone fill) share the same orange deliberately — kept as two names so
-// each call site reads by role, not by coincidental value.
-pub(crate) const PRIMARY: Color32 = Color32::from_rgb(0xFF, 0x7F, 0x00); // accent stroke / mute-on fill
-pub(crate) const ZONE_ACCENT: Color32 = Color32::from_rgb(0xFF, 0x7F, 0x00); // Accent-zone step fill
-pub(crate) const ZONE_MID: Color32 = Color32::from_rgb(0xFF, 0xB6, 0x88);
-pub(crate) const ZONE_LOW: Color32 = Color32::from_rgb(0x98, 0xCB, 0xFF);
-pub(crate) const TEXT_PRIMARY: Color32 = Color32::from_rgb(0xF5, 0xF5, 0xF5);
-pub(crate) const TEXT_MUTED: Color32 = Color32::from_rgb(0x8A, 0x8A, 0x8A);
-pub(crate) const BORDER_WEAK: Color32 = Color32::from_rgb(0x33, 0x33, 0x33);
 
 // ---- Layout (desktop; iOS `GridMetrics` port, fixed size-classes) ----
 // Fits the longest drum name ("Closed Hat"/"Side Stick") + mute + `…` buttons.
@@ -62,7 +50,7 @@ const CELL_W_8: f32 = 52.0; // zoom = 8 doubles width
 const CELL_H: f32 = 34.0;
 const STEP_GAP: f32 = 3.0; // iOS stepGap
 const ROW_SPACING: f32 = 4.0; // iOS rowSpacing
-const CORNER: u8 = 3; // iOS Theme.Radius.sm (egui CornerRadius is u8 px)
+const CORNER: u8 = crate::theme::Radius::SM; // iOS Theme.Radius.sm (was 3 — drift fixed)
 const PLAYHEAD_BAR: f32 = 2.0;
 const RATCHET_CAP_W: f32 = 2.0;
 const RATCHET_CAP_H: f32 = 6.0;
@@ -566,11 +554,15 @@ fn header(ui: &mut Ui, track_idx: usize, track: &Track, sink: &impl CommandSink)
         Layout::left_to_right(egui::Align::Center),
         |ui| {
             let mute_btn = egui::Button::new(egui::RichText::new("M").color(if track.muted {
-                Color32::BLACK
+                crate::theme::ON_PRIMARY
             } else {
                 TEXT_MUTED
             }))
-            .fill(if track.muted { PRIMARY } else { SURFACE_HIGH });
+            .fill(if track.muted {
+                PRIMARY
+            } else {
+                SURFACE_HIGHEST
+            });
             let mute_resp = ui.add(mute_btn);
             #[cfg(test)]
             ui.ctx().data_mut(|d| {
@@ -616,7 +608,7 @@ fn header(ui: &mut Ui, track_idx: usize, track: &Track, sink: &impl CommandSink)
                 crate::note_picker::open(ui.ctx(), track_idx);
             }
             // T11 — "…" opens the ActionDrawer for this track (iOS ellipsis).
-            let more_resp = ui.add(egui::Button::new("…").fill(SURFACE_HIGH));
+            let more_resp = ui.add(egui::Button::new("…").fill(SURFACE_HIGHEST));
             #[cfg(test)]
             ui.ctx().data_mut(|d| {
                 d.get_temp_mut_or_default::<Vec<(usize, Rect)>>(more_btn_rects_id())
