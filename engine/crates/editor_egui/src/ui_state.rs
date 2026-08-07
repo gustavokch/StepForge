@@ -265,6 +265,17 @@ impl UiState {
             .unwrap_or_default()
     }
 
+    /// Authoritative global MIDI output channel `[1, 16]` (snapshot). `10`
+    /// before the first snapshot — matches `Session::default().global_midi_channel`
+    /// (GM drums). Read by the SettingsSheet (T13a); edits become
+    /// `Command::SetGlobalMidiChannel` and the engine echoes a `FullSnapshot`.
+    pub fn global_midi_channel(&self) -> u8 {
+        self.session
+            .as_ref()
+            .map(|s| s.global_midi_channel)
+            .unwrap_or(10)
+    }
+
     // ---- Feel read accessors (T10d FeelBar). Same shape as `bpm()`: snapshot
     // ground truth, a sane default before the first snapshot, read-only (⊥
     // optimistic) — edits become `Command`s and the engine echoes back via
@@ -355,6 +366,21 @@ mod tests {
             session: Some(Arc::new(Session::default())),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn uistate_global_midi_channel_accessor() {
+        // pre-snapshot default
+        let mut st = UiState::default();
+        assert_eq!(st.global_midi_channel(), 10);
+
+        // with a session that overrides the channel
+        let s = Session {
+            global_midi_channel: 1,
+            ..Default::default()
+        };
+        st.session = Some(Arc::new(s));
+        assert_eq!(st.global_midi_channel(), 1);
     }
 
     fn track(st: &UiState, idx: usize) -> &Track {
