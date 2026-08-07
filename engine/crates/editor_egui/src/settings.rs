@@ -11,10 +11,11 @@
 
 #[cfg(test)]
 use egui::Rect;
-use egui::{Context, Id, Pos2, RichText};
+use egui::{ComboBox, Context, Id, Pos2, RichText};
 
-use crate::grid::{SURFACE_HIGH, TEXT_PRIMARY};
+use crate::grid::{SURFACE_HIGH, TEXT_MUTED, TEXT_PRIMARY};
 use crate::{CommandSink, UiState};
+use sequencer_engine::command::Command;
 
 fn settings_id() -> Id {
     Id::new("stepforge.settings")
@@ -62,9 +63,20 @@ pub(crate) fn close(ctx: &Context) {
     write(ctx, |s| s.open = false);
 }
 
-/// Render the sheet if open. No-op (no panic) when closed. Body content
-/// (status + MIDI channel) is added in Task 3.
-pub(crate) fn render_settings(ctx: &Context, _ui_state: &UiState, _sink: &impl CommandSink) {
+/// Pure: the command (if any) for a MIDI-channel pick. `None` when unchanged
+/// (no spurious emit). Mirrors `transport::bpm_edit_command` as a headless
+/// oracle. The widget reads `current` from [`UiState::global_midi_channel`]
+/// each frame (commit-on-change, iOS Picker parity).
+pub(crate) fn midi_channel_command(current: u8, picked: u8) -> Option<Command> {
+    if picked == current {
+        None
+    } else {
+        Some(Command::SetGlobalMidiChannel { channel: picked })
+    }
+}
+
+/// Render the sheet if open. No-op (no panic) when closed.
+pub(crate) fn render_settings(ctx: &Context, ui_state: &UiState, sink: &impl CommandSink) {
     let st = read(ctx);
     if !st.open {
         return;
@@ -84,7 +96,35 @@ pub(crate) fn render_settings(ctx: &Context, _ui_state: &UiState, _sink: &impl C
                 ui.vertical(|ui| {
                     ui.label(RichText::new("Settings").strong().color(TEXT_PRIMARY));
                     ui.separator();
-                    // Task 3 fills the Session status + MIDI channel here.
+
+                    // ---- Session (read-only status; host owns transport) ----
+                    ui.label(RichText::new("Session").color(TEXT_MUTED).strong());
+                    ui.label(format!("BPM: {:.0}", ui_state.bpm()));
+                    ui.label(format!(
+                        "Sync: {}",
+                        crate::transport::sync_label(ui_state.sync_source())
+                    ));
+                    if ui_state.link_enabled {
+                        ui.label(format!("Link: {} peers", ui_state.link_peers));
+                    }
+
+                    ui.separator();
+
+                    // ---- Global MIDI Channel (writable; commit-on-change) ----
+                    ui.label(RichText::new("MIDI Channel").color(TEXT_MUTED).strong());
+                    let current = ui_state.global_midi_channel();
+                    let mut sel = current;
+                    ComboBox::from_id_salt("stepforge.settings.midi_channel")
+                        .selected_text(format!("Ch {}", sel))
+                        .show_ui(ui, |ui| {
+                            for ch in 1u8..=16u8 {
+                                ui.selectable_value(&mut sel, ch, format!("Ch {}", ch));
+                            }
+                        });
+                    if let Some(cmd) = midi_channel_command(current, sel) {
+                        sink.push(cmd);
+                    }
+
                     ui.separator();
                     let done = ui.add(
                         egui::Button::new(RichText::new("Done").color(TEXT_PRIMARY))
@@ -189,5 +229,40 @@ mod tests {
             .expect("window rect recorded");
         h.click_primary(outside);
         assert!(!read(&h.ctx).open);
+    }
+
+    // ---- pure oracle: MIDI channel emit logic ----
+
+    #[test]
+    fn midi_channel_command_emits_only_on_change() {
+        use sequencer_engine::command::Command;
+        // unchanged → no emit
+        assert!(midi_channel_command(10, 10).is_none());
+        // changed → SetGlobalMidiChannel
+        assert!(matches!(
+            midi_channel_command(10, 12),
+            Some(Command::SetGlobalMidiChannel { channel: 12 })
+        ));
+        assert!(matches!(
+            midi_channel_command(1, 16),
+            Some(Command::SetGlobalMidiChannel { channel: 16 })
+        ));
+    }
+
+    // ---- e2e: status is read-only; sheet never emits SetSyncSource ----
+
+    #[test]
+    fn settings_status_block_emits_no_setsyncsource() {
+        // Sync is host-owned → the sheet only labels it. Exercise the open
+        // sheet across several frames + Done; nothing may emit SetSyncSource.
+        let h = open_harness();
+        h.settle();
+        h.click_primary(done_center(&h.ctx));
+        assert!(
+            h.cmds()
+                .iter()
+                .all(|c| !matches!(c, sequencer_engine::command::Command::SetSyncSource { .. })),
+            "sync source is read-only in the settings sheet"
+        );
     }
 }
