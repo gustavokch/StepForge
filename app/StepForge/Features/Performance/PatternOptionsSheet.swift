@@ -70,6 +70,16 @@ struct PatternOptionsSheet: View {
                     }
                 }
             }
+            .onChange(of: currentFollowAction) { newAction in
+                // #34: the sheet stays open after Cut/Paste/Clear/Undo, so the
+                // engine's follow_action can change underneath the @State draft
+                // (which SwiftUI seeds once in init). Re-sync the Stepper/Picker
+                // whenever the prop updates — the egui sheet does this per-frame
+                // via #42 — otherwise a later Save would clobber the
+                // pasted/restored value with the stale draft.
+                afterLoops = Int(newAction.afterLoops)
+                actionType = newAction.action
+            }
             .navigationTitle("Pattern \(patternIdx + 1) Options")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)

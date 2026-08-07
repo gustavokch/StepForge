@@ -165,13 +165,21 @@ impl Undo {
         out
     }
 
-    /// Clear every per-track slot. Used when a whole-pattern change targets the
-    /// active pattern: the per-track snapshots are now stale w.r.t. that pattern
-    /// (D6).
-    pub fn clear_tracks(&mut self) {
-        for slot in self.slots.iter_mut() {
-            *slot = None;
+    /// Clear every per-track slot, returning which indices were occupied (now
+    /// cleared). Used when a whole-pattern change targets the active pattern:
+    /// the per-track snapshots are now stale w.r.t. that pattern (D6). The
+    /// caller emits `UndoAvailable { false }` per occupied slot so the mirror
+    /// drops stale per-track undo availability (parity with `take_occupied` on
+    /// LoadSession).
+    pub fn clear_tracks(&mut self) -> [bool; MAX_TRACKS] {
+        let mut out = [false; MAX_TRACKS];
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            if slot.is_some() {
+                out[i] = true;
+                *slot = None;
+            }
         }
+        out
     }
 }
 
@@ -338,13 +346,15 @@ mod tests {
     #[test]
     fn clear_tracks_empties_per_track_slots() {
         // D6 helper: a whole-pattern change on the active pattern clears the
-        // (now stale) per-track snapshots.
+        // (now stale) per-track snapshots and reports which were occupied.
         let mut u = Undo::default();
         let t = crate::models::Track::default();
         u.push(0, &t);
         u.push(3, &t);
         assert!(u.available(0) && u.available(3));
-        u.clear_tracks();
+        let cleared = u.clear_tracks();
+        assert!(cleared[0] && cleared[3], "occupied slots flagged");
+        assert!(!cleared[1] && !cleared[2], "unoccupied slots stay false");
         assert!(
             !u.available(0) && !u.available(3),
             "per-track slots cleared"
