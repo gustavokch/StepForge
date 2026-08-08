@@ -28,6 +28,10 @@ pub struct StepForge {
     midi_buf: Box<[MidiEvent; 1024]>,
     /// Last transport play state, for emitting all-notes-off on the stop edge.
     was_playing: bool,
+    /// Last host-reported tempo (BPM), for change-gating the RT `SetBpm` push.
+    /// Host-RT-owned (`process()` is the sole writer, single audio thread) → no
+    /// synchronization. `NAN` until the host first reports a tempo.
+    last_host_tempo: f64,
 }
 
 impl Default for StepForge {
@@ -41,6 +45,7 @@ impl Default for StepForge {
             ui_state: Arc::new(RwLock::new(UiState::default())),
             midi_buf: Box::new([MidiEvent::zero(); 1024]),
             was_playing: false,
+            last_host_tempo: f64::NAN,
         }
     }
 }
@@ -281,6 +286,23 @@ impl Plugin for StepForge {
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         let tr = context.transport();
+        // Surface host tempo to `session.bpm` so the editor's BPM counter shows
+        // the host value (the bug: host tempo drove step timing via `render_host`
+        // beat position but was never written to `session.bpm`, so the editor
+        // stayed at 120.0). RT-safe — a lock-free `push_drop_oldest` into the
+        // MPSC command ring (CAS on a fixed array: no alloc, no lock, no FFI),
+        // gated on the host actually providing a tempo (`Some`) and on a >0.5
+        // BPM change so it fires only on real moves, not every block. The worker
+        // does the alloc-heavy clone-mutate-publish off-RT.
+        if let Some(t) = tr.tempo {
+            if (t - self.last_host_tempo).abs() > 0.5 {
+                self.last_host_tempo = t;
+                let _ = sequencer_engine::midi_out::push_drop_oldest(
+                    &self.engine.commands,
+                    sequencer_engine::command::Command::SetBpm { bpm: t },
+                );
+            }
+        }
         let transport = transport::map_transport(
             tr.tempo,
             tr.playing,

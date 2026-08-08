@@ -43,7 +43,7 @@ struct TransportBar: View {
             Text("BPM").font(Typography.controlLabel).foregroundStyle(Theme.textMuted)
             TextField("120", text: $bpmText)
                 .font(Typography.bpmLarge)
-                .foregroundStyle(Theme.textPrimary)
+                .foregroundStyle(bridge.mirror.syncSource == .free ? Theme.textPrimary : Theme.textMuted)
                 .multilineTextAlignment(.leading)
                 .frame(width: 74)
                 #if os(iOS)
@@ -52,6 +52,9 @@ struct TransportBar: View {
                 .focused($bpmFocused)
                 .onSubmit(commitBpm)
                 .onChange(of: bpmFocused) { _, focused in if !focused { commitBpm() } }
+                // External sync owns the tempo: read-only under Link/MIDI Clock
+                // (a drag would snap back within ~1 ms). Free is user-editable.
+                .disabled(bridge.mirror.syncSource != .free)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
