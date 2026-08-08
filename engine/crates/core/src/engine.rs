@@ -29,6 +29,12 @@ use std::sync::{Arc, Mutex};
 /// is far above any real-time block jitter (~1/1000 beat at typical sizes) yet
 /// below a musical landmark, so only genuine discontinuities trip it.
 const SEEK_SLACK_BEATS: f64 = 1.0;
+/// Off-RT external-tempo publish hysteresis: a derived/observed tempo (Ableton
+/// Link session tempo, or a future in-core MIDI-Clock estimate) must move more
+/// than this (BPM) before it overwrites `session.bpm` + emits `BpmChanged`, so
+/// sub-BPM jitter does not churn the snapshot (COW clone) or flood the hot event
+/// slot.
+const EXTERNAL_TEMPO_EPSILON: f64 = 0.1;
 
 #[cfg(target_os = "ios")]
 pub struct Link;
@@ -55,6 +61,12 @@ pub struct DummySessionState;
 impl DummySessionState {
     pub fn beat_at_time(&self, _time: u64, _quantum: f64) -> f64 {
         0.0
+    }
+    /// Mirror the real `SessionState::tempo` so the poller's `state.tempo()` call
+    /// compiles on iOS. iOS Link is a no-op dummy (no real session, the poller is
+    /// inert), so the value is never observed.
+    pub fn tempo(&self) -> f64 {
+        120.0
     }
 }
 #[cfg(target_os = "ios")]
@@ -342,6 +354,27 @@ impl Engine {
     pub fn publish(&self, session: Session) {
         self.snapshot.store(Arc::new(session));
     }
+    /// Off-RT: publish an externally-derived tempo (Ableton Link session tempo,
+    /// or a future in-core MIDI-Clock estimate) to `session.bpm` + emit
+    /// `BpmChanged`, but only when it moved more than `EXTERNAL_TEMPO_EPSILON`.
+    /// Mirrors the `SetBpm` publish path; epsilon-gated so jitter does not churn
+    /// the snapshot (COW clone) or flood the hot event slot. Caller MUST be
+    /// off-RT (the Link poller thread) — it uses `publish` (ArcSwap store) +
+    /// `push_event` (fixed-slot ring), the same lock-free primitives the worker
+    /// uses, but it is never invoked from the RT thread.
+    fn publish_external_tempo(&self, bpm: f64) {
+        let clamped = bpm.clamp(crate::models::MIN_BPM, crate::models::MAX_BPM);
+        if (self.snapshot.load().bpm - clamped).abs() <= EXTERNAL_TEMPO_EPSILON {
+            return;
+        }
+        let mut s = (*self.snapshot.load_full()).clone();
+        s.bpm = clamped;
+        self.publish(s);
+        let _ = crate::midi_out::push_event(
+            &self.hot_events,
+            &EngineEvent::BpmChanged { bpm: clamped },
+        );
+    }
     /// Serialize path: owned snapshot (lock-free load_full).
     pub fn snapshot_arc(&self) -> Arc<Session> {
         self.snapshot.load_full()
@@ -460,6 +493,10 @@ impl Engine {
         // disable→re-enable (see the `else` branch) — always emits a
         // `LinkPeersChanged` with the current count.
         let mut last_peers: usize = usize::MAX;
+        // Sentinel for the first poll after startup / re-enable: forces one
+        // `publish_external_tempo` attempt so the BPM counter snaps to the Link
+        // session tempo immediately (the epsilon gate inside skips no-ops).
+        let mut last_tempo: f64 = f64::NAN;
         while !self.shutdown.load(Ordering::Acquire) {
             if self.external_clock.link_enabled.load(Ordering::Acquire) {
                 // Capture beat position + any peer-count change under the guard;
@@ -467,22 +504,27 @@ impl Engine {
                 // held only for the ableton-link-rs calls (`push_event` is
                 // already non-blocking). try_lock: never block — skip this tick
                 // if the worker holds the mutex during enable/disable.
-                let peers_changed = if let Ok(link) = self.external_clock.link.try_lock() {
+                let (peers_changed, tempo) = if let Ok(link) = self.external_clock.link.try_lock() {
                     let state = link.capture_app_session_state();
                     let time = link.clock().micros();
                     let beats = state.beat_at_time(time, 4.0);
+                    // Read the consensus session tempo alongside the beat
+                    // position — the prior bug captured beats for RT timing but
+                    // never `tempo()`, so the BPM counter stayed at 120.0.
+                    let tempo = state.tempo();
                     self.external_clock
                         .link_beats_micros
                         .store((beats * 1_000_000.0) as u64, Ordering::Release);
                     let peers = link.num_peers();
-                    if peers != last_peers {
+                    let pc = if peers != last_peers {
                         last_peers = peers;
                         Some(peers)
                     } else {
                         None
-                    }
+                    };
+                    (pc, tempo)
                 } else {
-                    None
+                    (None, f64::NAN)
                 };
                 if let Some(peers) = peers_changed {
                     let _ = crate::midi_out::push_event(
@@ -490,10 +532,21 @@ impl Engine {
                         &crate::event::EngineEvent::LinkPeersChanged { count: peers },
                     );
                 }
+                // Surface the Link session tempo to `session.bpm` (off-RT).
+                // `last_tempo.is_nan()` forces one attempt on (re-)enable; the
+                // epsilon gate inside `publish_external_tempo` skips no-ops, and
+                // a failed `try_lock` yields NAN (skipped via `is_finite`).
+                if tempo.is_finite()
+                    && (last_tempo.is_nan() || (tempo - last_tempo).abs() > EXTERNAL_TEMPO_EPSILON)
+                {
+                    last_tempo = tempo;
+                    self.publish_external_tempo(tempo);
+                }
                 std::thread::sleep(std::time::Duration::from_millis(1));
             } else {
                 // Link disabled — reset so re-enable always emits the current count.
                 last_peers = usize::MAX;
+                last_tempo = f64::NAN;
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
@@ -1637,6 +1690,35 @@ mod tests {
         assert_eq!(e.snapshot_arc().bpm, 20.0, "clamp low");
         e.apply_command(Command::SetBpm { bpm: 140.0 });
         assert_eq!(e.snapshot_arc().bpm, 140.0, "in-range unchanged");
+    }
+    #[test]
+    fn publish_external_tempo_is_epsilon_gated_and_clamps() {
+        // The Link poller surfaces the session tempo via `publish_external_tempo`.
+        // It must (a) skip no-op jitter within epsilon, (b) publish past epsilon,
+        // and (c) clamp — same invariants as `SetBpm`, since both overwrite
+        // `session.bpm` and emit `BpmChanged`.
+        let e = Engine::new();
+        let initial = e.snapshot_arc().bpm;
+
+        // (a) within epsilon -> snapshot unchanged.
+        e.publish_external_tempo(initial + 0.05);
+        assert_eq!(e.snapshot_arc().bpm, initial, "within epsilon: no publish");
+
+        // (b) past epsilon -> overwrites session.bpm.
+        e.publish_external_tempo(initial + 20.0);
+        assert_eq!(
+            e.snapshot_arc().bpm,
+            initial + 20.0,
+            "past epsilon: published"
+        );
+
+        // (c) out-of-range clamps to MAX_BPM.
+        e.publish_external_tempo(crate::models::MAX_BPM + 100.0);
+        assert_eq!(
+            e.snapshot_arc().bpm,
+            crate::models::MAX_BPM,
+            "external tempo clamps high"
+        );
     }
     #[test]
     fn link_beats_micros_maps_to_16th_step_target() {
